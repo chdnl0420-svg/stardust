@@ -165,7 +165,9 @@ const tools = {
     const allowed = ['particleCount', 'gridSize', 'boundary', 'law', 'gravity',
                      'softeningCells', 'timeScale', 'sortInterval', 'pressure',
                      'pressureK', 'gamma', 'temperature', 'brightness',
-                     'displayGamma', 'hud', 'colormap', 'zoom', 'panX', 'panY'];
+                     'displayGamma', 'hud', 'colormap', 'zoom', 'panX', 'panY',
+                     'cooling', 'coolingRate', 'starFormation', 'starDensity', 'starTemp',
+                     'expansion', 'hubble', 'renderMode', 'colorBy'];
     const kv = { cmd: 'set' };
     for (const k of allowed) if (args[k] !== undefined) kv[k] = args[k];
     if (Object.keys(kv).length === 1) throw new Error('바꿀 값이 하나도 없습니다');
@@ -211,6 +213,12 @@ const tools = {
     return typed(await send(kv, 30000));
   },
 
+  async nbody_record({ on = true, every }) {
+    const kv = { cmd: 'record', on: on ? 1 : 0 };
+    if (every !== undefined) kv.every = every;
+    return typed(await send(kv, 30000));
+  },
+
   async nbody_quit() {
     if (!appAlive()) return { ok: 1, note: '이미 종료되었습니다' };
     try { await send({ cmd: 'quit' }, 5000); } catch (_) {}
@@ -243,7 +251,16 @@ const TOOL_SCHEMA = [
       hud: { type: 'integer', enum: [0, 1] },
       colormap: { type: 'string', enum: ['astro', 'gray', 'thermal'] },
       zoom: { type: 'number' }, panX: { type: 'number' }, panY: { type: 'number' },
+      cooling: { type: 'integer', enum: [0, 1] }, coolingRate: { type: 'number' },
+      starFormation: { type: 'integer', enum: [0, 1] },
+      starDensity: { type: 'number' }, starTemp: { type: 'number' },
+      expansion: { type: 'integer', enum: [0, 1] }, hubble: { type: 'number' },
+      renderMode: { type: 'string', enum: ['field', 'points'] },
+      colorBy: { type: 'string', enum: ['density', 'temperature', 'speed'] },
     } } },
+  { name: 'nbody_record', description: '앱의 녹화(PNG 시퀀스)를 켜고 끈다. captures/ 폴더에 쌓인다.',
+    inputSchema: { type: 'object', properties: {
+      on: { type: 'boolean' }, every: { type: 'integer', minimum: 1 } } } },
   { name: 'nbody_preset', description: '초기조건 프리셋을 바꾸고 리셋한다. 경계 조건도 시나리오에 맞게 함께 바뀐다.',
     inputSchema: { type: 'object', required: ['preset'], properties: {
       preset: { type: 'string', enum: ['spiral', 'tidal', 'shock', 'web', 'empty'] },

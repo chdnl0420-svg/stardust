@@ -117,6 +117,7 @@ std::string ControlBridge::statusBody(const App& app) const {
     const int    occupiedCells = sim.measureOccupiedCells();
     double centroidX = 0.0, centroidY = 0.0;
     sim.measureCentroid(centroidX, centroidY);
+    const double meanTemp = sim.measureMeanTemperature();
 
     char buf[1400];
     snprintf(buf, sizeof(buf),
@@ -127,11 +128,12 @@ std::string ControlBridge::statusBody(const App& app) const {
         "gravity=%.4f\nsofteningCells=%.3f\ntimeScale=%.3f\nsortInterval=%d\n"
         "pressure=%d\npressureK=%.4f\ngamma=%.3f\n"
         "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
-        "running=%d\nsimTime=%.5f\nactiveCount=%d\n"
+        "running=%d\nsimTime=%.5f\nactiveCount=%d\nstarCount=%d\n"
+        "renderMode=%s\ncolorBy=%s\nrecording=%d\nrecordedFrames=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
         "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
-        "centroidX=%.5f\ncentroidY=%.5f\n"
+        "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
         "vramFreeMB=%.0f\n",
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -142,11 +144,15 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.gamma,
         app.cfg.temperatureEnabled ? 1 : 0, app.cfg.coolingEnabled ? 1 : 0,
         app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
-        app.running ? 1 : 0, app.sim.simTime(), app.sim.activeCount(),
+        app.running ? 1 : 0, app.sim.simTime(), app.sim.activeCount(), app.sim.starCount(),
+        app.view.mode == RenderMode::Points ? "points" : "field",
+        app.view.colorBy == ColorBy::Temperature ? "temperature"
+            : app.view.colorBy == ColorBy::Speed ? "speed" : "density",
+        app.recording ? 1 : 0, app.recordedFrames,
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
         t.substeps, t.dtUsed, t.maxSpeed,
         totalMass, maxDensity, occupiedCells,
-        centroidX, centroidY,
+        centroidX, centroidY, meanTemp,
         Sim::deviceFreeBytes() / 1048576.0);
     return buf;
 }
@@ -222,9 +228,24 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "pressureK"))      app.cfg.pressureK      = getFloat(kv, "pressureK", app.cfg.pressureK);
         if (has(kv, "gamma"))          app.cfg.gamma          = getFloat(kv, "gamma", app.cfg.gamma);
         if (has(kv, "temperature"))    app.cfg.temperatureEnabled = getInt(kv, "temperature", 1) != 0;
+        if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;
+        if (has(kv, "coolingRate"))    app.cfg.coolingRate        = getFloat(kv, "coolingRate", app.cfg.coolingRate);
+        if (has(kv, "starFormation"))  app.cfg.starFormationEnabled = getInt(kv, "starFormation", 0) != 0;
+        if (has(kv, "starDensity"))    app.cfg.starDensityThreshold = getFloat(kv, "starDensity", app.cfg.starDensityThreshold);
+        if (has(kv, "starTemp"))       app.cfg.starTempThreshold  = getFloat(kv, "starTemp", app.cfg.starTempThreshold);
+        if (has(kv, "expansion"))      app.cfg.expansionEnabled   = getInt(kv, "expansion", 0) != 0;
+        if (has(kv, "hubble"))         app.cfg.hubble             = getFloat(kv, "hubble", app.cfg.hubble);
         if (has(kv, "brightness"))     app.view.brightness    = getFloat(kv, "brightness", app.view.brightness);
         if (has(kv, "displayGamma"))   app.view.gamma         = getFloat(kv, "displayGamma", app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
+        if (has(kv, "renderMode"))
+            app.view.mode = (kv["renderMode"] == "points") ? RenderMode::Points
+                                                           : RenderMode::DensityField;
+        if (has(kv, "colorBy")) {
+            const std::string& c = kv["colorBy"];
+            app.view.colorBy = (c == "temperature") ? ColorBy::Temperature
+                             : (c == "speed")       ? ColorBy::Speed : ColorBy::Density;
+        }
         if (has(kv, "colormap")) {
             const std::string& c = kv["colormap"];
             app.view.cmap = (c == "gray") ? ColorMap::Gray
@@ -316,6 +337,21 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         }
         std::string body = "affected=" + std::to_string(result) + "\n" + statusBody(app);
         writeResponse(body);
+        return false;
+    }
+
+    // 앱 자체의 녹화 기능(설정 보드 버튼과 같은 경로)을 켜고 끈다.
+    if (cmd == "record") {
+        const bool on = getInt(kv, "on", 1) != 0;
+        if (on && !app.recording) { app.recordedFrames = 0; app.frameCounter = 0; }
+        app.recording = on;
+        if (has(kv, "every")) app.recordEvery = getInt(kv, "every", 1);
+        writeResponse(statusBody(app));
+        return false;
+    }
+    if (cmd == "snapshot") {
+        app.snapshotRequested = true;
+        writeResponse("ok=1\nqueued=1\n");
         return false;
     }
 

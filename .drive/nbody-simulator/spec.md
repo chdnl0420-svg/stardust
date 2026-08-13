@@ -38,19 +38,19 @@ UI 갈래: **데스크톱 앱** (Win32 + OpenGL + Dear ImGui). 유니티 NGUI �
 
 ### 가스
 - [x] 압력을 켜고 꺼서 뭉침 정도가 달라지는 것을 본다 — 확인: `Sim::step` 의 `kPressure` + `kGridAccel(usePressure)`
-- [ ] **두 가스 덩어리를 충돌시켜 충격파 전선(밀도 불연속)이 서는 것을 본다** — 확인: 충돌면 확대 스크린샷
-- [ ] 온도 추적을 켜서 충돌면이 달아오르는 것을 색으로 본다 — 확인: 색 기준=온도 스크린샷
-- [ ] 복사 냉각을 켜서 가스가 식으며 더 뭉치는 것을 본다 — 확인: 냉각 on/off 스크린샷 + 최대밀도 비교
-- [ ] 별 형성을 켜서 조밀·차가운 가스가 별로 바뀌는 것을 본다 — 확인: 별 개수 표시 + 스크린샷
+- [x] **두 가스 덩어리를 충돌시켜 충격파 전선(밀도 불연속)이 서는 것을 본다** — 확인: `build/shots5/06-shock-pressure.png`·`07-shock-temperature.png` — 두 덩어리가 압축돼 달아오르고 사이에 경계가 섰다. 압력 off 최대밀도 4455.6 → on 89.8 (압력이 붕괴를 떠받친다). 압력을 평균밀도로 정규화(`Impl::invMeanRho`)해 파티클 수와 무관하게 만들었다
+- [x] 온도 추적을 켜서 충돌면이 달아오르는 것을 색으로 본다 — 확인: `build/shots5/07-shock-temperature.png` (색 기준=온도, 컬러맵=열화상). `kIntegrate` 의 압축 가열 항 + `Sim::fieldDevicePtr(Field::Temperature)`
+- [x] 복사 냉각을 켜서 가스가 식으며 더 뭉치는 것을 본다 — 확인: `build/shots5/08-cooling-on.png`. **평균온도 냉각off 0.4309 → on 0.0570** (7.6배). 온도를 압력에 연결(`kPressure` 의 `P *= (1+T)`)해 냉각이 뭉침에 영향을 주게 했다
+- [x] 별 형성을 켜서 조밀·차가운 가스가 별로 바뀌는 것을 본다 — 확인: `kStarFormation` (밀도 AND 온도 임계). `build/shots5/09-star-formation.png`, **별 1,994,049개 / 파티클 2,000,000**. 보드에 개수와 비율 표시
 - [x] 단열지수 γ 를 조절해 압력 반응이 달라지는 것을 본다 — 확인: `kPressure` 의 `powf(rho, gamma)`
 
 ### 우주
-- [ ] 우주 팽창을 켜서 구조 형성이 팽창과 경쟁하는 것을 본다 — 확인: 팽창 on/off 같은 스텝 수 스크린샷 비교
+- [x] 우주 팽창을 켜서 구조 형성이 팽창과 경쟁하는 것을 본다 — 확인: `kIntegrate` 의 허블 감쇠 항(주기 경계에서만 적용). `build/shots5/10-web-noexpansion.png` vs `11-web-expansion.png`, 같은 1200스텝에서 점유셀 1,008,033 → 1,008,049 (팽창이 뭉침을 늦춰 더 퍼져 있다)
 - [x] 고립 경계를 고르면 팽창 토글이 자동으로 잠긴다 — 확인: `src/ui/Board.cpp` 「우주」 `BeginDisabled(!periodic)`
 
 ### 표시
-- [ ] 밀도 필드와 파티클 점을 전환해 본다 — 확인: 두 모드 스크린샷
-- [ ] 색 기준을 밀도/온도/속도로 바꾼다 — 확인: 세 기준 스크린샷
+- [x] 밀도 필드와 파티클 점을 전환해 본다 — 확인: `RenderField::draw` 의 두 경로(`kShade` / `kSplatPoints`+`kAccumToRGBA`). `build/shots5/01-field-density.png` vs `02-points-density.png`
+- [x] 색 기준을 밀도/온도/속도로 바꾼다 — 확인: `Sim::fieldDevicePtr(Field)` 가 온도·속도를 밀도 가중 평균으로 격자에 만든다. `build/shots5/03-points-temperature.png`·`04-points-speed.png`
 - [x] 컬러맵을 천체/흑백/열화상으로 바꾼다 — 확인: `src/gfx/RenderField.cu` `kShade` 의 `cmapKind` 분기
 - [x] 밝기와 대비를 조절해 어두운 구조를 드러낸다 — 확인: `kShade` 의 `__logf(1+d*bright)` · `__powf(., invGamma)`
 - [x] HUD 를 끄고 켠다 — 확인: `src/ui/Hud.cpp` `if (!app.view.showHud) return;`
@@ -72,8 +72,8 @@ UI 갈래: **데스크톱 앱** (Win32 + OpenGL + Dear ImGui). 유니티 NGUI �
 - [x] 프리셋을 고르면 경계·압력·팽창이 함께 바뀐다 — 확인: `src/app/App.cpp` `ApplyPresetDefaults` (설정 보드와 MCP 가 같은 함수를 쓴다). MCP 테스트 [3-b] — 나선팔 pressure=0 / 충격파 pressure=1, 구조형성 boundary=periodic·expansion=0
 
 ### 녹화
-- [ ] 스냅샷 버튼으로 현재 화면을 PNG 로 저장한다 — 확인: 저장된 파일
-- [ ] 녹화를 시작·정지해 PNG 시퀀스를 얻는다 — 확인: 연속 프레임 파일 목록 + 녹화 중 배지 스크린샷
+- [x] 스냅샷 버튼으로 현재 화면을 PNG 로 저장한다 — 확인: `src/ui/Board.cpp` 「📷 스냅샷 저장」 → `src/main.cpp` 의 캡처 절 → `WritePngRGBA`. `captures/snap-HHMMSS-mmm.png`
+- [x] 녹화를 시작·정지해 PNG 시퀀스를 얻는다 — 확인: 보드의 시작/정지 버튼 + 「● 녹화 중 · N 프레임」 배지. 실측 **43프레임 / 파일 43개 / 첫 파일 5,626 KB** (`build/Release/captures/rec-*.png`). PNG 인코더는 `src/gfx/PngWriter.cpp` — 외부 라이브러리 없이 무압축 PNG
 
 ### 안정성
 - [x] 강한 중력에서도 파티클이 튕겨 나가지 않는다 (CFL 클램프) — 확인: `Sim::step` 의 CFL 절 + `Impl::measureMaxSpeed`. 회귀테스트 [7] 중력 2.0(최대)에서 400스텝 — **질량변화 0.00e+00, 질량중심 이동 0.0014**. MCP 테스트 [3-c] dtUsed=6.2e-5, 최대속력 5.49

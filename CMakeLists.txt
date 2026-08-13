@@ -58,6 +58,7 @@ add_executable(nbody WIN32
   src/app/App.cpp
   src/app/ControlBridge.cpp
   src/gfx/GLContext.cpp
+  src/gfx/PngWriter.cpp
   src/gfx/RenderField.cu
   src/ui/Board.cpp
   src/ui/Hud.cpp

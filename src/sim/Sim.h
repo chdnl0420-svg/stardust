@@ -44,7 +44,8 @@ struct SimConfig {
     bool  coolingEnabled       = false;
     float coolingRate          = 0.25f;
     bool  starFormationEnabled = false;
-    float starDensityThreshold = 70.0f;
+    float starDensityThreshold = 70.0f;   // 이 밀도를 넘고
+    float starTempThreshold    = 0.05f;   // 이 온도보다 차가우면 별이 된다
 
     bool  expansionEnabled     = false;  // 주기 경계에서만 물리적 의미가 있다
     float hubble               = 0.3f;
@@ -105,6 +106,8 @@ public:
     int    measureOccupiedCells();
     // 질량중심(0~1 정규화 좌표). 파티클이 경계로 쏠리면 총질량은 그대로여도 이 값이 움직인다.
     void   measureCentroid(double& cx, double& cy);
+    // 살아 있는 파티클의 평균 온도. 냉각이 실제로 식히는지를 보는 1차 지표다.
+    double measureMeanTemperature();
     // 직접 O(N²) 계산을 정답지로 놓고 격자 중력의 상대오차 RMS 를 잰다.
     // 이 호출은 독립적으로 자기 버퍼를 잡고 끝나면 반납한다(현재 상태를 건드리지 않는다).
     double measureForceErrorVsDirect(int n, int gridSize, float softeningCells);
@@ -126,9 +129,22 @@ public:
     int  eraseAt(float cx, float cy, float radius);
     // 살아 있는 파티클 수. 지우거나 추가하면 바뀐다.
     int  activeCount() const;
+    // 별이 된 파티클 수. 별 형성이 꺼져 있으면 0.
+    int  starCount() const;
 
-    // 렌더가 읽어 갈 밀도 격자(디바이스 포인터). gridSize()² 개의 float.
+    // 화면에 색을 입힐 때 무엇을 기준으로 삼을지.
+    enum class Field { Density, Temperature, Speed };
+
+    // 렌더가 읽어 갈 격자(디바이스 포인터). gridSize()² 개의 float.
+    // 온도·속도는 밀도로 가중 평균한 값이라 빈 칸은 0 이다.
+    // 밀도가 아닌 것을 부르면 그 자리에서 한 번 더 뿌리므로 매 프레임 부르는 비용을 감안한다.
+    const float* fieldDevicePtr(Field field);
     const float* densityDevicePtr() const;
+
+    // 점 렌더가 직접 읽는 파티클 버퍼. [0, activeCount()) 만 유효하다.
+    const float* particlePosDevicePtr() const;   // float2 배열을 float* 로 넘긴다
+    const float* particleVelDevicePtr() const;
+    const float* particleTempDevicePtr() const;
 
 private:
     struct Impl;

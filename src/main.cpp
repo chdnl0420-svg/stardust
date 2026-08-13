@@ -6,10 +6,13 @@
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 #include <GL/gl.h>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 #include "app/App.h"
 #include "app/ControlBridge.h"
 #include "gfx/GLContext.h"
+#include "gfx/PngWriter.h"
 #include "gfx/RenderField.h"
 #include "ui/Board.h"
 #include "ui/Hud.h"
@@ -222,8 +225,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
 
         glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
-        g_field.draw(app.sim.densityDevicePtr(), app.sim.gridSize(), g_w, g_h,
-                     app.view, app.zoom, app.panX, app.panY);
+        g_field.draw(app, g_w, g_h);
 
         ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -243,6 +245,35 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
 
         ImGui::Render();
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+
+        // 스냅샷·녹화도 버퍼 교체 전에 지금 프레임을 집는다.
+        if (app.snapshotRequested || app.recording) {
+            const bool takeNow = app.snapshotRequested ||
+                                 (app.frameCounter++ % (app.recordEvery > 0 ? app.recordEvery : 1) == 0);
+            if (takeNow) {
+                CreateDirectoryA("captures", nullptr);
+                std::vector<unsigned char> px((size_t)g_w * g_h * 4);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadBuffer(GL_BACK);
+                glReadPixels(0, 0, g_w, g_h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                // OpenGL 은 아래에서 위로 읽으므로 줄 순서를 뒤집는다
+                std::vector<unsigned char> flipped((size_t)g_w * g_h * 4);
+                for (int y = 0; y < g_h; ++y)
+                    memcpy(&flipped[(size_t)y * g_w * 4],
+                           &px[(size_t)(g_h - 1 - y) * g_w * 4], (size_t)g_w * 4);
+                char name[256];
+                if (app.snapshotRequested) {
+                    SYSTEMTIME t; GetLocalTime(&t);
+                    snprintf(name, sizeof(name), "captures\\snap-%02d%02d%02d-%03d.png",
+                             t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+                    app.snapshotRequested = false;
+                } else {
+                    snprintf(name, sizeof(name), "captures\\rec-%05d.png", app.recordedFrames);
+                    ++app.recordedFrames;
+                }
+                WritePngRGBA(name, flipped.data(), g_w, g_h);
+            }
+        }
 
         // 제어 명령은 화면을 다 그린 뒤, 버퍼를 교체하기 전에 처리한다.
         // 그래야 screenshot 이 지금 프레임을 집는다(교체 후엔 백버퍼 내용이 바뀐다).

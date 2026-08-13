@@ -107,14 +107,17 @@ bool DrawBoard(App& app, bool& boardOpen) {
         ImGui::SliderFloat("압력 세기", &app.cfg.pressureK, 0.0f, 2.0f, "%.2f");
         ImGui::SliderFloat("단열지수 γ", &app.cfg.gamma, 1.0f, 2.5f, "%.2f");
         ImGui::Checkbox("온도 추적", &app.cfg.temperatureEnabled);
-        {   // 냉각·별형성은 증분 2 대상 — 자리만 둔다
-            Pending p;
-            ImGui::Checkbox("복사 냉각", &app.cfg.coolingEnabled);
-            ImGui::SliderFloat("냉각률", &app.cfg.coolingRate, 0.0f, 1.0f, "%.2f");
-            ImGui::Checkbox("별 형성", &app.cfg.starFormationEnabled);
-            ImGui::SliderFloat("임계 밀도", &app.cfg.starDensityThreshold, 1.0f, 200.0f, "%.0f");
+        ImGui::Checkbox("복사 냉각", &app.cfg.coolingEnabled);
+        ImGui::SliderFloat("냉각률", &app.cfg.coolingRate, 0.0f, 1.0f, "%.2f");
+        ImGui::Checkbox("별 형성", &app.cfg.starFormationEnabled);
+        ImGui::SliderFloat("임계 밀도", &app.cfg.starDensityThreshold, 1.0f, 400.0f, "%.0f");
+        ImGui::SliderFloat("임계 온도", &app.cfg.starTempThreshold, 0.0f, 1.0f, "%.3f");
+        if (app.cfg.starFormationEnabled) {
+            ImGui::Text("별 %d 개 (%.1f%%)", app.sim.starCount(),
+                        app.sim.activeCount() > 0
+                            ? 100.0 * app.sim.starCount() / app.sim.activeCount() : 0.0);
         }
-        SectionNote("냉각과 별 형성은 다음 증분에서 켜진다.");
+        SectionNote("별은 밀도와 온도가 둘 다 임계를 넘어야 생긴다. 하나만 보면 뜨겁고 조밀한 충격파면에서 잘못 생긴다.");
     }
 
     // ---------------- 4. 우주 ----------------
@@ -135,17 +138,12 @@ bool DrawBoard(App& app, bool& boardOpen) {
     if (ImGui::CollapsingHeader("표시", ImGuiTreeNodeFlags_DefaultOpen)) {
         const char* modeItems[] = { "밀도 필드", "파티클 점" };
         int modeIdx = (app.view.mode == RenderMode::DensityField) ? 0 : 1;
-        {   // 점 렌더는 증분 2 대상
-            ImGui::BeginDisabled(true);
-            ImGui::Combo("렌더 모드", &modeIdx, modeItems, 2);
-            ImGui::EndDisabled();
-        }
-        {
-            Pending p;
-            const char* colorItems[] = { "밀도", "온도", "속도" };
-            int cIdx = (int)app.view.colorBy;
-            ImGui::Combo("색 기준", &cIdx, colorItems, 3);
-        }
+        if (ImGui::Combo("렌더 모드", &modeIdx, modeItems, 2))
+            app.view.mode = (modeIdx == 0) ? RenderMode::DensityField : RenderMode::Points;
+
+        const char* colorItems[] = { "밀도", "온도", "속도" };
+        int cIdx = (int)app.view.colorBy;
+        if (ImGui::Combo("색 기준", &cIdx, colorItems, 3)) app.view.colorBy = (ColorBy)cIdx;
         const char* cmapItems[] = { "천체", "흑백", "열화상" };
         int cmIdx = (int)app.view.cmap;
         if (ImGui::Combo("컬러맵", &cmIdx, cmapItems, 3)) app.view.cmap = (ColorMap)cmIdx;
@@ -205,11 +203,29 @@ bool DrawBoard(App& app, bool& boardOpen) {
 
     // ---------------- 8. 녹화 ----------------
     if (ImGui::CollapsingHeader("녹화")) {
-        Pending p;
-        ImGui::Button("⏺ 녹화 시작", ImVec2(-1, 0));
+        if (ImGui::Button("📷 스냅샷 저장", ImVec2(-1, 0))) app.snapshotRequested = true;
+
+        if (app.recording) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.48f, 0.16f, 0.16f, 1.0f));
+            if (ImGui::Button("⏹ 녹화 정지", ImVec2(-1, 0))) app.recording = false;
+            ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.29f, 0.29f, 1.0f));
+            ImGui::Text("● 녹화 중 · %d 프레임", app.recordedFrames);
+            ImGui::PopStyleColor();
+        } else {
+            if (ImGui::Button("⏺ 녹화 시작", ImVec2(-1, 0))) {
+                app.recording = true;
+                app.recordedFrames = 0;
+                app.frameCounter = 0;
+            }
+            if (app.recordedFrames > 0)
+                ImGui::TextDisabled("마지막 녹화: %d 프레임", app.recordedFrames);
+        }
+        ImGui::SliderInt("프레임 간격", &app.recordEvery, 1, 10, "%d 프레임마다");
         const char* fmt[] = { "PNG 시퀀스" };
         int f = 0;
         ImGui::Combo("출력 형식", &f, fmt, 1);
+        SectionNote("captures/ 폴더에 저장한다. 동영상 인코더를 앱에 넣지 않으므로 합치기는 외부 도구로 한다.");
     }
 
     // ---------------- 9. 성능 ----------------

@@ -74,6 +74,60 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
     out[(H - 1 - y) * W + x] = px;
 }
 
+// 파티클을 화면에 더한다. 겹칠수록 밝아지므로 밀집한 곳이 자연히 도드라진다.
+// uchar4 에는 atomicAdd 가 없어 float3 누적 버퍼에 모았다가 뒤에서 색으로 바꾼다.
+__global__ void kSplatPoints(const float2* pos, const float2* vel, const float* temp,
+                             int n, float3* accum, int W, int H,
+                             int colorBy, float zoom, float panX, float panY) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float2 p = pos[i];
+    if (p.x < 0.f) return;                       // 빈 슬롯
+
+    float u = (p.x - 0.5f + panX) * zoom + 0.5f;
+    float v = (p.y - 0.5f + panY) * zoom + 0.5f;
+    float aspect = (float)W / (float)H;
+    if (aspect > 1.f) u = (u - 0.5f) / aspect + 0.5f;
+    else              v = (v - 0.5f) * aspect + 0.5f;
+    if (u < 0.f || u >= 1.f || v < 0.f || v >= 1.f) return;
+
+    int x = (int)(u * W);
+    int y = (int)((1.f - v) * H);                // GL 텍스처는 아래에서 위로 쌓인다
+    if (x < 0 || x >= W || y < 0 || y >= H) return;
+
+    // 색 기준: 0 밀도(흰색으로 쌓아 겹침이 밝기를 만든다) / 1 온도 / 2 속력
+    float t = 0.5f;
+    if (colorBy == 1)      t = fminf(temp[i] * 0.5f, 1.f);
+    else if (colorBy == 2) t = fminf(sqrtf(vel[i].x * vel[i].x + vel[i].y * vel[i].y) * 0.25f, 1.f);
+    float3 c = (colorBy == 0) ? make_float3(0.55f, 0.42f, 0.85f)
+             : (colorBy == 1) ? cmapThermal(t)
+                              : cmapAstro(t);
+
+    float3* px = &accum[y * W + x];
+    atomicAdd(&px->x, c.x);
+    atomicAdd(&px->y, c.y);
+    atomicAdd(&px->z, c.z);
+}
+
+__global__ void kClearAccum(float3* a, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] = make_float3(0.f, 0.f, 0.f);
+}
+
+// 누적값을 화면 색으로 바꾼다. 겹친 수가 넓은 범위를 가지므로 로그로 눌러야 다 보인다.
+__global__ void kAccumToRGBA(const float3* accum, uchar4* out, int n,
+                             float bright, float invGamma) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float3 a = accum[i];
+    float lum = (a.x + a.y + a.z) * 0.3333f;
+    float s = (lum > 1e-6f) ? __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma) / lum
+                            : 0.f;
+    float r = fminf(a.x * s, 1.f), g = fminf(a.y * s, 1.f), b = fminf(a.z * s, 1.f);
+    out[i] = make_uchar4((unsigned char)(r * 255.f), (unsigned char)(g * 255.f),
+                         (unsigned char)(b * 255.f), 255);
+}
+
 } // namespace
 
 void RenderField::init() {
@@ -89,6 +143,7 @@ void RenderField::shutdown() {
     if (texId_) { glDeleteTextures(1, &texId_); texId_ = 0; }
     if (hostPixels_) { free(hostPixels_); hostPixels_ = nullptr; }
     if (devPixels_)  { cudaFree(devPixels_); devPixels_ = nullptr; devBytes_ = 0; }
+    if (devAccum_)   { cudaFree(devAccum_);  devAccum_  = nullptr; }
 }
 
 void RenderField::ensureSize(int w, int h) {
@@ -99,24 +154,55 @@ void RenderField::ensureSize(int w, int h) {
     hostPixels_ = (unsigned char*)malloc(need);
     if (devPixels_) cudaFree(devPixels_);
     cudaMalloc(&devPixels_, need);
+    if (devAccum_) cudaFree(devAccum_);
+    cudaMalloc(&devAccum_, (size_t)w * h * sizeof(float3));
     devBytes_ = need;
 }
 
-void RenderField::draw(const float* densityDevice, int gridSize,
-                       int viewW, int viewH, const ViewSettings& view,
-                       float zoom, float panX, float panY) {
+void RenderField::draw(App& app, int viewW, int viewH) {
     if (viewW <= 0 || viewH <= 0) return;
     ensureSize(viewW, viewH);
 
-    if (densityDevice && devPixels_) {
-        dim3 b(16, 16), g((viewW + 15) / 16, (viewH + 15) / 16);
-        int kind = (view.cmap == ColorMap::Thermal) ? 2
-                 : (view.cmap == ColorMap::Gray)    ? 1 : 0;
-        kShade<<<g, b>>>(densityDevice, gridSize, (uchar4*)devPixels_, viewW, viewH,
-                         view.brightness, 1.0f / view.gamma, kind, zoom, panX, panY);
+    const ViewSettings& view = app.view;
+    const int npix = viewW * viewH;
+    const int cmapKind = (view.cmap == ColorMap::Thermal) ? 2
+                       : (view.cmap == ColorMap::Gray)    ? 1 : 0;
+
+    if (!devPixels_) { if (hostPixels_) memset(hostPixels_, 0, devBytes_); }
+    else if (view.mode == RenderMode::Points) {
+        // 파티클 점 — 겹칠수록 밝아지도록 누적한 뒤 한 번에 색으로 바꾼다.
+        const int n = app.sim.activeCount();
+        kClearAccum<<<(npix + 255) / 256, 256>>>((float3*)devAccum_, npix);
+        if (n > 0) {
+            kSplatPoints<<<(n + 255) / 256, 256>>>(
+                (const float2*)app.sim.particlePosDevicePtr(),
+                (const float2*)app.sim.particleVelDevicePtr(),
+                app.sim.particleTempDevicePtr(), n,
+                (float3*)devAccum_, viewW, viewH, (int)view.colorBy,
+                app.zoom, app.panX, app.panY);
+        }
+        kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
+                                                  (uchar4*)devPixels_, npix,
+                                                  view.brightness, 1.0f / view.gamma);
         cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost);
-    } else if (hostPixels_) {
-        memset(hostPixels_, 0, devBytes_);
+    } else {
+        // 밀도 필드 — 색 기준에 맞는 격자를 받아 화면으로 샘플링한다.
+        const Sim::Field f = (view.colorBy == ColorBy::Temperature) ? Sim::Field::Temperature
+                           : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
+                                                                    : Sim::Field::Density;
+        const float* grid = app.sim.fieldDevicePtr(f);
+        // 온도·속도는 값 범위가 밀도와 달라 로그 압축이 과하다. 밝기를 그 자리에서 보정한다.
+        const float bright = (f == Sim::Field::Density) ? view.brightness
+                                                        : view.brightness * 60.0f;
+        if (grid) {
+            dim3 b(16, 16), g((viewW + 15) / 16, (viewH + 15) / 16);
+            kShade<<<g, b>>>(grid, app.sim.gridSize(), (uchar4*)devPixels_, viewW, viewH,
+                             bright, 1.0f / view.gamma, cmapKind,
+                             app.zoom, app.panX, app.panY);
+            cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost);
+        } else if (hostPixels_) {
+            memset(hostPixels_, 0, devBytes_);
+        }
     }
 
     glViewport(0, 0, viewW, viewH);

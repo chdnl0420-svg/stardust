@@ -50,6 +50,13 @@ struct App {
     float fps = 0.0f;
     float frameMs = 0.0f;
 
+    // 녹화 — 켜면 매 프레임(또는 간격마다) PNG 를 저장한다.
+    bool  recording = false;
+    int   recordEvery = 1;      // 몇 프레임에 하나를 저장할지
+    int   recordedFrames = 0;
+    int   frameCounter = 0;
+    bool  snapshotRequested = false;   // 스냅샷 버튼이 눌렸다
+
     void init();
     // 설정 보드에서 바뀐 값을 코어에 반영한다. 파티클 수·격자·경계가 바뀌면 코어가 재할당한다.
     void applyConfig();

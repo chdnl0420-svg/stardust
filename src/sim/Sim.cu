@@ -191,9 +191,40 @@ __global__ void kMulSpec(cufftComplex* a, const cufftComplex* b, int n, float s)
     a[i] = make_cuFloatComplex((A.x * B.x - A.y * B.y) * s, (A.x * B.y + A.y * B.x) * s);
 }
 
-__global__ void kPressure(const float* rho, float* prs, int n, float K, float gamma) {
+// 압력. 밀도를 평균으로 나눠 정규화하므로 파티클 수를 바꿔도 압력의 세기가 그대로다.
+// (질량 정규화와 같은 이유 — 정규화 전에는 N 을 늘리면 압력만 커져 가스가 폭발했다.)
+//
+// 온도 격자(tempGrid)가 주어지면 P = K ρ^γ (1 + T) 로 온도를 반영한다.
+// 이 연결이 없으면 냉각을 켜도 압력이 그대로라 뭉치는 정도가 바뀌지 않는다(실측: 84.22 vs 84.2).
+__global__ void kPressure(const float* rho, const float* tempGrid, float* prs, int n,
+                          float K, float gamma, float invMeanRho) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) prs[i] = K * powf(fmaxf(rho[i], 0.f), gamma);
+    if (i >= n) return;
+    float p = K * powf(fmaxf(rho[i], 0.f) * invMeanRho, gamma);
+    if (tempGrid) p *= (1.f + tempGrid[i]);
+    prs[i] = p;
+}
+
+// 별 형성 — 밀도와 온도가 둘 다 임계를 넘은 칸의 파티클을 별로 바꾼다.
+// 조건 하나만 쓰면 뜨겁고 조밀한 충격파면에서 잘못 생긴다(design.md O2).
+// 별이 된 파티클은 온도를 0 으로 고정해 더는 가열되지 않는다.
+__global__ void kStarFormation(const float2* pos, float* temp, unsigned char* isStar,
+                               const float* rho, int n, int G, int stride, int periodic,
+                               float rhoThreshold, float tempThreshold, int* starCount) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (isStar[i]) { temp[i] = 0.f; atomicAdd(starCount, 1); return; }
+    float2 p = pos[i];
+    if (p.x < 0.f) return;
+    int ix = (int)floorf(p.x * G), iy = (int)floorf(p.y * G);
+    if (periodic) { ix &= (G - 1); iy &= (G - 1); }
+    else { ix = min(max(ix, 0), G - 1); iy = min(max(iy, 0), G - 1); }
+    const float d = rho[iy * stride + ix];
+    if (d >= rhoThreshold && temp[i] <= tempThreshold) {
+        isStar[i] = 1;
+        temp[i] = 0.f;
+        atomicAdd(starCount, 1);
+    }
 }
 
 // 퍼텐셜과 압력의 기울기를 합쳐 격자 가속도장을 만든다.
@@ -236,7 +267,7 @@ __device__ __forceinline__ float2 sampleAcc(const float2* accG, float2 p, int G,
 // 속도·위치 갱신. dt 는 호출 전에 CFL 조건으로 잘라 둔다(design.md §7).
 __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* temp,
                            int n, int G, float dt, int periodic, int trackTemp,
-                           int cooling, float coolRate) {
+                           int cooling, float coolRate, float hubble) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float2 p = pos[i];
@@ -245,10 +276,20 @@ __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* 
     float2 a = sampleAcc(accG, p, G, periodic);
     v.x += a.x * dt; v.y += a.y * dt;
 
+    // 우주 팽창 — 공간이 늘어나면 물질은 그 흐름에 끌려 속도를 잃는다(허블 감쇠).
+    // 이것이 중력 붕괴와 경쟁해 구조가 자라는 속도를 늦춘다. 주기 경계에서만 의미가 있다.
+    if (hubble > 0.f) {
+        // 냉각과 같은 이유로 계수가 크다 — dt 가 CFL 로 잘려 매우 작기 때문이다.
+        const float damp = fmaxf(1.f - hubble * dt * 6000.f, 0.f);
+        v.x *= damp; v.y *= damp;
+    }
+
     if (trackTemp) {
         // 가속도와 속도가 반대 방향이면(=압축) 온도가 오른다. 충돌면이 달아오르는 것이 이 항이다.
         float t = temp[i] - (a.x * v.x + a.y * v.y) * dt * 0.6f;
-        if (cooling) t -= t * coolRate * dt * 3.0f;
+        // 냉각률 계수가 큰 이유: CFL 클램프 때문에 dt 가 1e-5 수준으로 작다.
+        // 물리적 비례(dt 에 비례)는 유지하되, 슬라이더를 올렸을 때 사람이 체감할 크기로 맞췄다.
+        if (cooling) t -= t * coolRate * dt * 3000.0f;
         temp[i] = fminf(fmaxf(t, 0.f), 20.f);
     }
 
@@ -280,6 +321,48 @@ __global__ void kReorder(const float2* sp, const float2* sv, const float* st,
     if (i >= n) return;
     unsigned s = val[i];
     dp[i] = sp[s]; dv[i] = sv[s]; dt_[i] = st[s];
+}
+
+// 파티클이 가진 값(온도·속력)을 격자에 밀도 가중으로 뿌린다.
+// 나중에 밀도로 나누면 그 칸의 평균값이 된다.
+__global__ void kScatterValue(const float2* pos, const float2* vel, const float* temp,
+                              float* num, int n, int G, int stride, int periodic, int which) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float2 p = pos[i];
+    if (p.x < 0.f) return;
+    float value = (which == 1) ? temp[i]
+                              : sqrtf(vel[i].x * vel[i].x + vel[i].y * vel[i].y);
+    float gx = p.x * G, gy = p.y * G;
+    int ix = (int)floorf(gx), iy = (int)floorf(gy);
+    float fx = gx - ix, fy = gy - iy;
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        int ox = k & 1, oy = (k >> 1) & 1;
+        int cx = ix + ox, cy = iy + oy;
+        float w = (ox ? fx : 1.f - fx) * (oy ? fy : 1.f - fy);
+        if (periodic) { cx &= (G - 1); cy &= (G - 1); }
+        else { cx = min(max(cx, 0), G - 1); cy = min(max(cy, 0), G - 1); }
+        atomicAdd(&num[cy * stride + cx], w * value);
+    }
+}
+
+// 가중합을 밀도로 나눠 제자리에서 평균으로 만든다(패딩 격자 전체를 훑는다).
+__global__ void kNormalizeInPlace(float* num, const float* den, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float d = den[i];
+    num[i] = (d > 1e-4f) ? (num[i] / d) : 0.f;
+}
+
+// 가중합을 밀도로 나눠 평균으로 만든다. 빈 칸은 0 으로 둔다.
+__global__ void kDivideByDensity(const float* num, const float* den, float* out,
+                                 int G, int stride) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= G || y >= G) return;
+    float d = den[y * stride + x];
+    out[y * G + x] = (d > 1e-4f) ? (num[y * stride + x] / d) : 0.f;
 }
 
 __global__ void kCrop(const float* src, float* dst, int G, int stride) {
@@ -458,6 +541,8 @@ struct Sim::Impl {
 
     // 격자 (고립이면 패딩 폭 2G, 주기면 G)
     float  *rho = nullptr, *pot = nullptr, *prs = nullptr, *rhoCrop = nullptr;
+    float  *fieldNum = nullptr;   // 온도·속도 가중합 (패딩 격자)
+    float  *fieldOut = nullptr;   // 평균값 (G x G)
     float2 *accG = nullptr;
     float  *green = nullptr;
     cufftComplex *rhoSpec = nullptr, *greenSpec = nullptr;
@@ -482,6 +567,9 @@ struct Sim::Impl {
 
     // 마우스 도구용 — 살아 있는 파티클은 항상 [0, activeN) 에 모여 있다.
     int   activeN = 0;
+    int   starN = 0;                  // 별이 된 파티클 수
+    unsigned char *isStar = nullptr;
+    int   *starCnt = nullptr;
     unsigned char *alive = nullptr;
     int   *selIdx = nullptr;   // 살아남은 인덱스 목록
     int   *selNum = nullptr;   // 선택된 개수
@@ -504,6 +592,12 @@ struct Sim::Impl {
         return s / (float)(allocN > 0 ? allocN : 1);
     }
 
+    // 평균 밀도의 역수. 압력을 이 값으로 정규화해 파티클 수와 무관하게 만든다.
+    float invMeanRho() const {
+        const float mean = (float)allocN / (float)(allocG * allocG);
+        return (mean > 1e-6f) ? (1.0f / mean) : 1.0f;
+    }
+
     void releaseGrid();
     void releaseParticles();
     void allocate();
@@ -524,6 +618,8 @@ void Sim::Impl::releaseParticles() {
     cudaFree(key); cudaFree(keyOut); cudaFree(val); cudaFree(valOut);
     cudaFree(sortTmp); cudaFree(spdTmp); cudaFree(spdOut);
     cudaFree(alive); cudaFree(selIdx); cudaFree(selNum); cudaFree(selTmp);
+    cudaFree(isStar); cudaFree(starCnt);
+    isStar = nullptr; starCnt = nullptr; starN = 0;
     pos = vel = pos2 = vel2 = nullptr; temp = temp2 = nullptr;
     key = keyOut = val = valOut = nullptr; sortTmp = nullptr; sortTmpBytes = 0;
     spdTmp = nullptr; spdOut = nullptr; spdTmpBytes = 0;
@@ -533,9 +629,11 @@ void Sim::Impl::releaseParticles() {
 void Sim::Impl::releaseGrid() {
     if (planReady) { cufftDestroy(planF); cufftDestroy(planB); planReady = false; }
     cudaFree(rho); cudaFree(pot); cudaFree(prs); cudaFree(rhoCrop);
+    cudaFree(fieldNum); cudaFree(fieldOut);
     cudaFree(accG); cudaFree(green); cudaFree(rhoSpec); cudaFree(greenSpec);
     cudaFree(redTmp); cudaFree(redOut); cudaFree(cntOut);
     rho = pot = prs = rhoCrop = green = nullptr; accG = nullptr;
+    fieldNum = fieldOut = nullptr;
     rhoSpec = greenSpec = nullptr; redTmp = nullptr; redOut = nullptr; cntOut = nullptr;
     redTmpBytes = 0;
 }
@@ -569,6 +667,8 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&prs, sizeof(float) * cells));
     CK(cudaMalloc(&accG, sizeof(float2) * G * G));
     CK(cudaMalloc(&rhoCrop, sizeof(float) * G * G));
+    CK(cudaMalloc(&fieldNum, sizeof(float) * cells));
+    CK(cudaMalloc(&fieldOut, sizeof(float) * G * G));
 
     const int W = S / 2 + 1;
     CK(cudaMalloc(&rhoSpec, sizeof(cufftComplex) * W * S));
@@ -609,7 +709,11 @@ void Sim::Impl::allocate() {
         cub::DeviceSelect::Flagged(nullptr, selTmpBytes, ids, alive, selIdx, selNum, n);
     }
     CK(cudaMalloc(&selTmp, selTmpBytes));
+    CK(cudaMalloc(&isStar, sizeof(unsigned char) * n));
+    CK(cudaMemset(isStar, 0, sizeof(unsigned char) * n));
+    CK(cudaMalloc(&starCnt, sizeof(int)));
     activeN = n;
+    starN = 0;
 
     if (!evA) { cudaEventCreate(&evA); cudaEventCreate(&evB); }
     allocSoft = -1.f;   // 그린함수 재생성 강제
@@ -675,10 +779,13 @@ float Sim::Impl::measureMaxSpeed() {
 }
 
 void Sim::Impl::integrateOnce(float dt) {
+    // 팽창은 주기 경계에서만 물리적 의미가 있다(고립 경계에서는 UI 가 이미 잠그지만
+    // MCP 로 직접 켤 수도 있으므로 여기서도 막는다).
+    const float hub = (cfg.expansionEnabled && periodic()) ? cfg.hubble : 0.f;
     kIntegrate<<<grid1(allocN), BS>>>(accG, pos, vel, temp, allocN, allocG, dt,
                                       periodic() ? 1 : 0,
                                       cfg.temperatureEnabled ? 1 : 0,
-                                      cfg.coolingEnabled ? 1 : 0, cfg.coolingRate);
+                                      cfg.coolingEnabled ? 1 : 0, cfg.coolingRate, hub);
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +885,9 @@ void Sim::reset() {
     kPlace<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, n, (int)d->cfg.preset);
     // 빈 판은 살아 있는 파티클이 0 이고 전 슬롯이 비어 있다 — 마우스로 채워 나간다.
     d->activeN = (d->cfg.preset == Preset::Empty) ? 0 : n;
+    // 리셋하면 별도 사라진다
+    CK(cudaMemset(d->isStar, 0, sizeof(unsigned char) * n));
+    d->starN = 0;
     CK(cudaDeviceSynchronize());
 
     // 회전 프리셋은 중력을 한 번 풀어 그 세기에 맞는 궤도 속도를 넣는다.
@@ -825,8 +935,32 @@ void Sim::step() {
     d->solveGravity();
 
     // (4) 압력
-    if (d->cfg.pressureEnabled)
-        kPressure<<<grid1(S * S), BS>>>(d->rho, d->prs, S * S, d->cfg.pressureK, d->cfg.gamma);
+    if (d->cfg.pressureEnabled) {
+        // 온도를 추적 중이면 격자에 뿌려 압력에 반영한다. 그래야 냉각이 뭉침에 영향을 준다.
+        const float* tgrid = nullptr;
+        if (d->cfg.temperatureEnabled) {
+            kClearF<<<grid1(S * S), BS>>>(d->fieldNum, S * S);
+            kScatterValue<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, d->fieldNum,
+                                            n, G, S, per, 1);
+            // 가중합을 밀도로 나눠 평균 온도로 만든다(패딩 격자 위에서 제자리로).
+            kNormalizeInPlace<<<grid1(S * S), BS>>>(d->fieldNum, d->rho, S * S);
+            tgrid = d->fieldNum;
+        }
+        kPressure<<<grid1(S * S), BS>>>(d->rho, tgrid, d->prs, S * S, d->cfg.pressureK,
+                                        d->cfg.gamma, d->invMeanRho());
+    }
+
+    // (4-b) 별 형성 — 밀도·온도 임계를 넘은 파티클을 별로 바꾸고 개수를 센다
+    if (d->cfg.starFormationEnabled) {
+        int zero = 0;
+        CK(cudaMemcpy(d->starCnt, &zero, sizeof(int), cudaMemcpyHostToDevice));
+        kStarFormation<<<grid1(n), BS>>>(d->pos, d->temp, d->isStar, d->rho, n, G, S, per,
+                                         d->cfg.starDensityThreshold,
+                                         d->cfg.starTempThreshold, d->starCnt);
+        CK(cudaMemcpy(&d->starN, d->starCnt, sizeof(int), cudaMemcpyDeviceToHost));
+    } else {
+        d->starN = 0;
+    }
 
     // (5) 격자 가속도 -> 보간 -> 적분
     const float potScale = d->potentialScale();
@@ -868,8 +1002,9 @@ void Sim::step() {
             kScatter<<<grid1(n), BS>>>(d->pos, d->rho, n, G, S, per);
             d->solveGravity();
             if (d->cfg.pressureEnabled)
-                kPressure<<<grid1(S * S), BS>>>(d->rho, d->prs, S * S,
-                                                d->cfg.pressureK, d->cfg.gamma);
+                kPressure<<<grid1(S * S), BS>>>(d->rho, nullptr, d->prs, S * S,
+                                                d->cfg.pressureK, d->cfg.gamma,
+                                                d->invMeanRho());
             kGridAccel<<<gG, b>>>(d->pot, d->prs, d->rho, d->accG, G, S, potScale,
                                   d->cfg.pressureEnabled ? 1 : 0, per);
         }
@@ -945,6 +1080,7 @@ void Sim::Impl::refreshAccel() {
 }
 
 int Sim::activeCount() const { return impl_->activeN; }
+int Sim::starCount() const   { return impl_->starN; }
 
 int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, bool autoOrbit) {
     Impl* d = impl_;
@@ -1006,6 +1142,17 @@ int Sim::eraseAt(float cx, float cy, float radius) {
     d->activeN = kept;
     CK(cudaDeviceSynchronize());
     return before - kept;
+}
+
+double Sim::measureMeanTemperature() {
+    Impl* d = impl_;
+    if (!d->temp || d->activeN <= 0) return 0.0;
+    size_t bytes = d->redTmpBytes;
+    auto it = thrust::make_transform_iterator(d->temp, ToDouble());
+    cub::DeviceReduce::Sum(d->redTmp, bytes, it, (double*)d->redOut, d->activeN);
+    double sum = 0.0;
+    CK(cudaMemcpy(&sum, d->redOut, sizeof(double), cudaMemcpyDeviceToHost));
+    return sum / (double)d->activeN;
 }
 
 void Sim::measureCentroid(double& cx, double& cy) {
@@ -1095,6 +1242,27 @@ double Sim::measureForceErrorVsDirect(int n, int G, float softeningCells) {
     cudaFree(rs); cudaFree(gs);
     return rms;
 }
+
+const float* Sim::fieldDevicePtr(Field field) {
+    Impl* d = impl_;
+    if (!d->rho) return nullptr;
+    if (field == Field::Density) return densityDevicePtr();
+
+    const int G = d->allocG, S = d->stride();
+    const int per = d->periodic() ? 1 : 0;
+    // 밀도는 이미 이번 스텝에서 채워져 있다. 값 격자만 새로 뿌려 평균을 낸다.
+    kClearF<<<grid1(S * S), BS>>>(d->fieldNum, S * S);
+    kScatterValue<<<grid1(d->allocN), BS>>>(d->pos, d->vel, d->temp, d->fieldNum,
+                                            d->allocN, G, S, per,
+                                            field == Field::Temperature ? 1 : 2);
+    dim3 b(16, 16), g((G + 15) / 16, (G + 15) / 16);
+    kDivideByDensity<<<g, b>>>(d->fieldNum, d->rho, d->fieldOut, G, S);
+    return d->fieldOut;
+}
+
+const float* Sim::particlePosDevicePtr() const  { return (const float*)impl_->pos; }
+const float* Sim::particleVelDevicePtr() const  { return (const float*)impl_->vel; }
+const float* Sim::particleTempDevicePtr() const { return impl_->temp; }
 
 const float* Sim::densityDevicePtr() const {
     Impl* d = impl_;
