@@ -50,6 +50,13 @@ struct SimConfig {
     float hubble               = 0.3f;
 };
 
+// 마우스로 추가하는 형태.
+enum class ShapeKind {
+    RotatingDisk,   // 회전 원반 — 그 자리 중력을 재서 원 궤도가 되는 속도를 넣는다
+    StaticBlob,     // 정지 덩어리 — 속도 0. 그대로 붕괴하는 것을 본다
+    GasRing,        // 가스 고리 — 가운데가 빈 링
+};
+
 // 한 스텝의 단계별 소요 시간(ms). 설정 보드 「성능」 섹션이 그대로 표시한다.
 struct SimTimings {
     float scatterMs = 0.0f;
@@ -101,6 +108,24 @@ public:
     // 직접 O(N²) 계산을 정답지로 놓고 격자 중력의 상대오차 RMS 를 잰다.
     // 이 호출은 독립적으로 자기 버퍼를 잡고 끝나면 반납한다(현재 상태를 건드리지 않는다).
     double measureForceErrorVsDirect(int n, int gridSize, float softeningCells);
+
+    // --- 마우스 도구 ---
+    //
+    // 살아 있는 파티클은 항상 배열 앞쪽 [0, activeCount()) 에 모여 있고 그 뒤는 빈 슬롯이다.
+    // 그래서 형태를 여러 번 추가해도 요청한 개수가 정확히 들어간다 — 앞에서부터 훑으며
+    // 이미 쓴 구간을 건너뛰던 방식은 두 번째 추가에서 개수가 모자랐다(design.md §9-1).
+    // 지우개는 지운 자리를 메우는 정리를 함께 돌려 그 불변식을 지킨다.
+
+    // 형태를 추가하고 실제로 들어간 개수를 돌려준다(빈 슬롯이 모자라면 그만큼만).
+    int  addShape(float cx, float cy, ShapeKind kind, float radius, int count, bool autoOrbit);
+    // 브러시 안의 파티클을 바깥으로 밀어낸다.
+    void sprayAt(float cx, float cy, float radius, float strength);
+    // 브러시 안의 파티클을 가운데로 끌어당긴다.
+    void wellAt(float cx, float cy, float radius, float strength);
+    // 브러시 안의 파티클을 지우고 지운 개수를 돌려준다.
+    int  eraseAt(float cx, float cy, float radius);
+    // 살아 있는 파티클 수. 지우거나 추가하면 바뀐다.
+    int  activeCount() const;
 
     // 렌더가 읽어 갈 밀도 격자(디바이스 포인터). gridSize()² 개의 float.
     const float* densityDevicePtr() const;

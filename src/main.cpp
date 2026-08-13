@@ -3,6 +3,7 @@
 // 한 프레임:
 //   메시지 펌프 -> 시뮬레이션 한 스텝 -> 밀도 격자를 화면에 그림 -> ImGui(보드·HUD·툴바) -> 버퍼 교체
 #include <windows.h>
+#include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 #include <GL/gl.h>
 #include <cstdio>
 
@@ -30,6 +31,8 @@ bool         g_boardOpen = true;
 // 카메라 드래그 상태. 도구가 카메라일 때만 화면을 끈다.
 bool  g_dragging = false;
 POINT g_dragLast{};
+// 도구로 칠하는 중(뿌리기·우물·지우개는 드래그 동안 이어진다)
+bool  g_painting = false;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
@@ -43,15 +46,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_LBUTTONDOWN:
-            if (g_app && g_app->tool == Tool::Camera && !ImGui::GetIO().WantCaptureMouse) {
-                g_dragging = true;
-                GetCursorPos(&g_dragLast);
+            if (g_app && !ImGui::GetIO().WantCaptureMouse) {
                 SetCapture(hwnd);
+                if (g_app->tool == Tool::Camera) {
+                    g_dragging = true;
+                    GetCursorPos(&g_dragLast);
+                } else {
+                    // 도구 사용 — 누른 자리에 바로 적용하고 드래그 동안 이어서 칠한다.
+                    g_painting = true;
+                    float u, v;
+                    g_app->screenToSim(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), g_w, g_h, u, v);
+                    g_app->applyToolAt(u, v, true);
+                }
             }
             return 0;
 
         case WM_LBUTTONUP:
-            if (g_dragging) { g_dragging = false; ReleaseCapture(); }
+            if (g_dragging || g_painting) {
+                g_dragging = false; g_painting = false;
+                ReleaseCapture();
+            }
             return 0;
 
         case WM_MOUSEMOVE:
@@ -63,6 +77,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_app->panX += (now.x - g_dragLast.x) / unit;
                 g_app->panY += (now.y - g_dragLast.y) / unit;
                 g_dragLast = now;
+            } else if (g_painting && g_app) {
+                float u, v;
+                g_app->screenToSim(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), g_w, g_h, u, v);
+                g_app->applyToolAt(u, v, false);   // 형태 추가는 드래그 중엔 안 넣는다
             }
             return 0;
 

@@ -201,6 +201,16 @@ const tools = {
     return { ok: 1, path: png, ...info };
   },
 
+  async nbody_tool({ tool, x, y, radius, strength, shape, count, autoOrbit }) {
+    const kv = { cmd: 'tool', tool, x, y };
+    if (radius !== undefined) kv.radius = radius;
+    if (strength !== undefined) kv.strength = strength;
+    if (shape !== undefined) kv.shape = shape;
+    if (count !== undefined) kv.count = count;
+    if (autoOrbit !== undefined) kv.autoOrbit = autoOrbit ? 1 : 0;
+    return typed(await send(kv, 30000));
+  },
+
   async nbody_quit() {
     if (!appAlive()) return { ok: 1, note: '이미 종료되었습니다' };
     try { await send({ cmd: 'quit' }, 5000); } catch (_) {}
@@ -248,6 +258,16 @@ const TOOL_SCHEMA = [
   { name: 'nbody_screenshot', description: '현재 화면을 PNG 로 저장하고 경로를 돌려준다.',
     inputSchema: { type: 'object', properties: {
       path: { type: 'string', description: '저장할 절대 경로(.png). 생략하면 제어 폴더에 만든다' } } } },
+  { name: 'nbody_tool', description: '마우스 도구를 좌표로 직접 적용한다(창을 클릭하지 않고 검증할 때).',
+    inputSchema: { type: 'object', required: ['tool', 'x', 'y'], properties: {
+      tool: { type: 'string', enum: ['shape', 'spray', 'well', 'erase'] },
+      x: { type: 'number', description: '시뮬 좌표 0~1' },
+      y: { type: 'number', description: '시뮬 좌표 0~1' },
+      radius: { type: 'number' }, strength: { type: 'number' },
+      shape: { type: 'string', enum: ['disk', 'blob', 'ring'], description: 'tool=shape 일 때' },
+      count: { type: 'integer', description: 'tool=shape 일 때 넣을 파티클 수' },
+      autoOrbit: { type: 'boolean' },
+    } } },
   { name: 'nbody_quit', description: '시뮬레이터를 종료한다.',
     inputSchema: { type: 'object', properties: {} } },
 ];

@@ -19,8 +19,9 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <cub/cub.cuh>
-// CUDA 13(CCCL 3.x)에서 cub::TransformInputIterator 가 제거돼 thrust 쪽을 쓴다.
+// CUDA 13(CCCL 3.x)에서 cub::TransformInputIterator·CountingInputIterator 가 제거돼 thrust 쪽을 쓴다.
 #include <thrust/iterator/transform_iterator.h>
+#include <thrust/iterator/counting_iterator.h>
 
 #include <cmath>
 #include <cstdio>
@@ -328,6 +329,91 @@ __global__ void kDirectForce(const float2* pos, float2* f, int n, float eps2) {
     if (i < n) f[i] = make_float2(ax, ay);
 }
 
+// ---------------------------------------------------------------------------
+// 마우스 도구
+// ---------------------------------------------------------------------------
+
+// 빈 슬롯 [base, base+count) 에 형태를 채운다. 속도는 뒤에서 kSetOrbitAt 이 채운다.
+__global__ void kFillShape(float2* pos, float2* vel, float* temp, int base, int count,
+                           float cx, float cy, float radius, int kind, unsigned seed) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    int i = base + k;
+    float u1 = rnd01((unsigned)i * 3u + seed);
+    float u2 = rnd01((unsigned)i * 3u + 1u + seed);
+    float th = u2 * 6.2831853f;
+    // 원반·덩어리는 sqrt 분포라야 면밀도가 고르다. 고리는 바깥 테두리에만 둔다.
+    float r = (kind == 2) ? radius * (0.78f + 0.22f * u1) : radius * sqrtf(u1);
+    pos[i] = make_float2(cx + r * cosf(th), cy + r * sinf(th));
+    vel[i] = make_float2(0.f, 0.f);
+    temp[i] = 0.02f;
+}
+
+// 방금 넣은 형태에 그 자리 중력에 맞는 원 궤도 속도를 준다.
+__global__ void kSetOrbitAt(const float2* accG, const float2* pos, float2* vel,
+                            int base, int count, int G, int periodic,
+                            float cx, float cy, float spin) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    int i = base + k;
+    float2 p = pos[i];
+    float dx = p.x - cx, dy = p.y - cy;
+    float r = sqrtf(dx * dx + dy * dy);
+    if (r < 1e-5f) { vel[i] = make_float2(0.f, 0.f); return; }
+    int ix = (int)floorf(p.x * G), iy = (int)floorf(p.y * G);
+    float2 a = accG[gidx(ix, iy, G, periodic)];
+    float ar = -(a.x * dx + a.y * dy) / r;
+    float v = (ar > 0.f) ? sqrtf(ar * r) * spin : 0.f;
+    vel[i] = make_float2(-dy / r * v, dx / r * v);
+}
+
+// 브러시 안의 파티클 속도를 바깥(sign=+1) 또는 안쪽(sign=-1)으로 민다.
+__global__ void kBrushPush(const float2* pos, float2* vel, int n,
+                           float cx, float cy, float radius, float strength, float sign) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float2 p = pos[i];
+    if (p.x < 0.f) return;
+    float dx = p.x - cx, dy = p.y - cy;
+    float r2 = dx * dx + dy * dy;
+    if (r2 > radius * radius) return;
+    float r = sqrtf(fmaxf(r2, 1e-12f));
+    // 가운데가 가장 세고 가장자리로 갈수록 약해진다 — 경계에서 속도가 튀지 않게.
+    float falloff = 1.f - r / radius;
+    float2 v = vel[i];
+    v.x += sign * (dx / r) * strength * falloff;
+    v.y += sign * (dy / r) * strength * falloff;
+    vel[i] = v;
+}
+
+// 브러시 안이면 살아있음 표시를 끈다(0). 지운 개수는 뒤에서 센다.
+__global__ void kMarkAlive(const float2* pos, unsigned char* alive, int n,
+                           float cx, float cy, float radius) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float2 p = pos[i];
+    float dx = p.x - cx, dy = p.y - cy;
+    bool inside = (dx * dx + dy * dy) <= radius * radius;
+    alive[i] = (p.x >= 0.f && !inside) ? 1 : 0;
+}
+
+// 남은 파티클을 배열 앞쪽으로 모은다(선택된 인덱스 순서대로 gather).
+__global__ void kCompact(const float2* sp, const float2* sv, const float* st,
+                         float2* dp, float2* dv, float* dt_,
+                         const int* idx, int count) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    int s = idx[i];
+    dp[i] = sp[s]; dv[i] = sv[s]; dt_[i] = st[s];
+}
+
+// 빈 슬롯을 화면 밖으로 확실히 밀어 둔다(산란·렌더가 건너뛰도록).
+__global__ void kHideRange(float2* pos, int base, int count) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    pos[base + k] = make_float2(-1.f, -1.f);
+}
+
 __global__ void kInitBlob(float2* pos, int n, float lo, float hi) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -394,6 +480,13 @@ struct Sim::Impl {
     void  *spdTmp = nullptr; size_t spdTmpBytes = 0;
     float *spdOut = nullptr;
 
+    // 마우스 도구용 — 살아 있는 파티클은 항상 [0, activeN) 에 모여 있다.
+    int   activeN = 0;
+    unsigned char *alive = nullptr;
+    int   *selIdx = nullptr;   // 살아남은 인덱스 목록
+    int   *selNum = nullptr;   // 선택된 개수
+    void  *selTmp = nullptr; size_t selTmpBytes = 0;
+
     int  stride() const { return (cfg.boundary == Boundary::Isolated) ? allocG * 2 : allocG; }
     int  padCells() const { int s = stride(); return s * s; }
     bool periodic() const { return cfg.boundary == Boundary::Periodic; }
@@ -416,6 +509,8 @@ struct Sim::Impl {
     void allocate();
     void buildGreen();
     void solveGravity();
+    // 격자 가속도장을 지금 파티클 배치로 다시 만든다. 형태를 넣은 직후 궤도 속도를 재는 데 쓴다.
+    void refreshAccel();
     float measureReduce(bool wantMax);
     // 가장 빠른 파티클의 속력. CFL 조건으로 dt 를 자르는 데 쓴다.
     float measureMaxSpeed();
@@ -428,9 +523,11 @@ void Sim::Impl::releaseParticles() {
     cudaFree(temp); cudaFree(temp2);
     cudaFree(key); cudaFree(keyOut); cudaFree(val); cudaFree(valOut);
     cudaFree(sortTmp); cudaFree(spdTmp); cudaFree(spdOut);
+    cudaFree(alive); cudaFree(selIdx); cudaFree(selNum); cudaFree(selTmp);
     pos = vel = pos2 = vel2 = nullptr; temp = temp2 = nullptr;
     key = keyOut = val = valOut = nullptr; sortTmp = nullptr; sortTmpBytes = 0;
     spdTmp = nullptr; spdOut = nullptr; spdTmpBytes = 0;
+    alive = nullptr; selIdx = nullptr; selNum = nullptr; selTmp = nullptr; selTmpBytes = 0;
 }
 
 void Sim::Impl::releaseGrid() {
@@ -502,6 +599,17 @@ void Sim::Impl::allocate() {
     }
     CK(cudaMalloc(&spdTmp, spdTmpBytes));
     CK(cudaMalloc(&spdOut, sizeof(float)));
+
+    // 지우개 정리용 — 살아남은 인덱스를 골라 앞으로 모은다
+    CK(cudaMalloc(&alive,  sizeof(unsigned char) * n));
+    CK(cudaMalloc(&selIdx, sizeof(int) * n));
+    CK(cudaMalloc(&selNum, sizeof(int)));
+    {
+        thrust::counting_iterator<int> ids(0);
+        cub::DeviceSelect::Flagged(nullptr, selTmpBytes, ids, alive, selIdx, selNum, n);
+    }
+    CK(cudaMalloc(&selTmp, selTmpBytes));
+    activeN = n;
 
     if (!evA) { cudaEventCreate(&evA); cudaEventCreate(&evB); }
     allocSoft = -1.f;   // 그린함수 재생성 강제
@@ -668,6 +776,8 @@ void Sim::reset() {
     d->time = 0.0; d->steps = 0;
 
     kPlace<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, n, (int)d->cfg.preset);
+    // 빈 판은 살아 있는 파티클이 0 이고 전 슬롯이 비어 있다 — 마우스로 채워 나간다.
+    d->activeN = (d->cfg.preset == Preset::Empty) ? 0 : n;
     CK(cudaDeviceSynchronize());
 
     // 회전 프리셋은 중력을 한 번 풀어 그 세기에 맞는 궤도 속도를 넣는다.
@@ -822,6 +932,80 @@ int Sim::measureOccupiedCells() {
     int h = 0;
     CK(cudaMemcpy(&h, d->cntOut, sizeof(int), cudaMemcpyDeviceToHost));
     return h;
+}
+
+void Sim::Impl::refreshAccel() {
+    const int G = allocG, S = stride();
+    const int per = periodic() ? 1 : 0;
+    kClearF<<<grid1(S * S), BS>>>(rho, S * S);
+    kScatter<<<grid1(allocN), BS>>>(pos, rho, allocN, G, S, per);
+    solveGravity();
+    dim3 b(16, 16), g((G + 15) / 16, (G + 15) / 16);
+    kGridAccel<<<g, b>>>(pot, prs, rho, accG, G, S, potentialScale(), 0, per);
+}
+
+int Sim::activeCount() const { return impl_->activeN; }
+
+int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, bool autoOrbit) {
+    Impl* d = impl_;
+    if (count <= 0) return 0;
+    const int room = d->allocN - d->activeN;
+    if (room <= 0) return 0;
+    const int put = (count < room) ? count : room;   // 빈 슬롯이 모자라면 그만큼만
+    const int base = d->activeN;
+
+    // 난수 씨앗을 스텝 수로 흔든다 — 같은 자리에 두 번 넣어도 같은 배치가 겹치지 않게.
+    const unsigned seed = (unsigned)(d->steps * 2654435761u + (unsigned)base * 40503u + 7u);
+    kFillShape<<<grid1(put), BS>>>(d->pos, d->vel, d->temp, base, put,
+                                   cx, cy, radius, (int)kind, seed);
+    d->activeN += put;
+
+    // 회전 형태는 그 자리 중력을 재서 원 궤도가 되는 속도를 넣는다.
+    // 중력을 모른 채 속도를 정하면 원반이 흩어지거나 붕괴한다(design.md §9-2).
+    if (autoOrbit && kind != ShapeKind::StaticBlob) {
+        d->refreshAccel();
+        kSetOrbitAt<<<grid1(put), BS>>>(d->accG, d->pos, d->vel, base, put,
+                                        d->allocG, d->periodic() ? 1 : 0, cx, cy, 0.95f);
+    }
+    CK(cudaDeviceSynchronize());
+    return put;
+}
+
+void Sim::sprayAt(float cx, float cy, float radius, float strength) {
+    Impl* d = impl_;
+    kBrushPush<<<grid1(d->allocN), BS>>>(d->pos, d->vel, d->allocN, cx, cy, radius, strength, +1.f);
+}
+
+void Sim::wellAt(float cx, float cy, float radius, float strength) {
+    Impl* d = impl_;
+    kBrushPush<<<grid1(d->allocN), BS>>>(d->pos, d->vel, d->allocN, cx, cy, radius, strength, -1.f);
+}
+
+int Sim::eraseAt(float cx, float cy, float radius) {
+    Impl* d = impl_;
+    const int before = d->activeN;
+    if (before <= 0) return 0;
+
+    kMarkAlive<<<grid1(d->allocN), BS>>>(d->pos, d->alive, d->allocN, cx, cy, radius);
+
+    // 살아남은 인덱스를 골라 배열 앞쪽으로 모은다. 이 정리를 해야
+    // "빈 슬롯은 항상 뒤쪽" 이라는 불변식이 유지되고, 다음 형태 추가가 정확한 개수를 넣는다.
+    thrust::counting_iterator<int> ids(0);
+    size_t bytes = d->selTmpBytes;
+    cub::DeviceSelect::Flagged(d->selTmp, bytes, ids, d->alive, d->selIdx, d->selNum, d->allocN);
+    int kept = 0;
+    CK(cudaMemcpy(&kept, d->selNum, sizeof(int), cudaMemcpyDeviceToHost));
+
+    if (kept > 0)
+        kCompact<<<grid1(kept), BS>>>(d->pos, d->vel, d->temp,
+                                      d->pos2, d->vel2, d->temp2, d->selIdx, kept);
+    std::swap(d->pos, d->pos2); std::swap(d->vel, d->vel2); std::swap(d->temp, d->temp2);
+    if (kept < d->allocN)
+        kHideRange<<<grid1(d->allocN - kept), BS>>>(d->pos, kept, d->allocN - kept);
+
+    d->activeN = kept;
+    CK(cudaDeviceSynchronize());
+    return before - kept;
 }
 
 void Sim::measureCentroid(double& cx, double& cy) {

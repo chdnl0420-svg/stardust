@@ -21,6 +21,41 @@ void App::tick() {
     }
 }
 
+void App::screenToSim(int px, int py, int viewW, int viewH, float& u, float& v) const {
+    if (viewW <= 0 || viewH <= 0) { u = v = 0.5f; return; }
+    const float aspect = (float)viewW / (float)viewH;
+    u = ((float)px + 0.5f) / (float)viewW;
+    v = ((float)py + 0.5f) / (float)viewH;
+    // 짧은 변을 [0,1] 에 맞춘다 — 렌더 셰이더와 같은 규칙이라야 클릭 위치가 어긋나지 않는다.
+    if (aspect > 1.0f) u = (u - 0.5f) * aspect + 0.5f;
+    else               v = (v - 0.5f) / aspect + 0.5f;
+    u = (u - 0.5f) / zoom + 0.5f - panX;
+    v = (v - 0.5f) / zoom + 0.5f - panY;
+}
+
+void App::applyToolAt(float u, float v, bool firstClick) {
+    switch (tool) {
+        case Tool::Spray:
+            sim.sprayAt(u, v, brush.radius, brush.strength);
+            break;
+        case Tool::Well:
+            sim.wellAt(u, v, brush.radius, brush.strength);
+            break;
+        case Tool::AddShape:
+            // 형태는 누를 때 한 번만 넣는다. 드래그로 계속 쏟아지면 순식간에 슬롯이 바닥난다.
+            if (firstClick)
+                sim.addShape(u, v, brush.shapeKind, brush.shapeRadius,
+                             brush.shapeCount, brush.autoOrbit);
+            break;
+        case Tool::Erase:
+            sim.eraseAt(u, v, brush.radius);
+            break;
+        case Tool::Camera:
+        default:
+            break;
+    }
+}
+
 void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     cfg.preset = preset;
     // 경계 — 은하 장면은 텅 빈 우주에 홀로 떠 있어야 하고(고립),

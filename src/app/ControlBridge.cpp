@@ -115,6 +115,8 @@ std::string ControlBridge::statusBody(const App& app) const {
     const double totalMass     = sim.measureTotalGridMass();
     const double maxDensity    = sim.measureMaxDensity();
     const int    occupiedCells = sim.measureOccupiedCells();
+    double centroidX = 0.0, centroidY = 0.0;
+    sim.measureCentroid(centroidX, centroidY);
 
     char buf[1400];
     snprintf(buf, sizeof(buf),
@@ -125,10 +127,11 @@ std::string ControlBridge::statusBody(const App& app) const {
         "gravity=%.4f\nsofteningCells=%.3f\ntimeScale=%.3f\nsortInterval=%d\n"
         "pressure=%d\npressureK=%.4f\ngamma=%.3f\n"
         "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
-        "running=%d\nsimTime=%.5f\n"
+        "running=%d\nsimTime=%.5f\nactiveCount=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
         "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
+        "centroidX=%.5f\ncentroidY=%.5f\n"
         "vramFreeMB=%.0f\n",
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -139,10 +142,11 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.gamma,
         app.cfg.temperatureEnabled ? 1 : 0, app.cfg.coolingEnabled ? 1 : 0,
         app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
-        app.running ? 1 : 0, app.sim.simTime(),
+        app.running ? 1 : 0, app.sim.simTime(), app.sim.activeCount(),
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
         t.substeps, t.dtUsed, t.maxSpeed,
         totalMass, maxDensity, occupiedCells,
+        centroidX, centroidY,
         Sim::deviceFreeBytes() / 1048576.0);
     return buf;
 }
@@ -282,6 +286,36 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         snprintf(buf, sizeof(buf), "ok=%d\npath=%s\nwidth=%d\nheight=%d\n",
                  ok ? 1 : 0, path.c_str(), viewW, viewH);
         writeResponse(buf);
+        return false;
+    }
+
+    // 마우스 도구를 좌표로 직접 부른다 — QA 가 창을 클릭하지 않고도 검증할 수 있게.
+    if (cmd == "tool") {
+        const std::string what = kv.count("tool") ? kv["tool"] : "";
+        const float x = getFloat(kv, "x", 0.5f), y = getFloat(kv, "y", 0.5f);
+        const float r = getFloat(kv, "radius", app.brush.radius);
+        int result = 0;
+        if (what == "shape") {
+            ShapeKind k = ShapeKind::RotatingDisk;
+            const std::string ks = kv.count("shape") ? kv["shape"] : "disk";
+            if (ks == "blob") k = ShapeKind::StaticBlob;
+            else if (ks == "ring") k = ShapeKind::GasRing;
+            const int cnt = getInt(kv, "count", app.brush.shapeCount);
+            const bool orb = getInt(kv, "autoOrbit", app.brush.autoOrbit ? 1 : 0) != 0;
+            result = app.sim.addShape(x, y, k, getFloat(kv, "radius", app.brush.shapeRadius),
+                                      cnt, orb);
+        } else if (what == "spray") {
+            app.sim.sprayAt(x, y, r, getFloat(kv, "strength", app.brush.strength));
+        } else if (what == "well") {
+            app.sim.wellAt(x, y, r, getFloat(kv, "strength", app.brush.strength));
+        } else if (what == "erase") {
+            result = app.sim.eraseAt(x, y, r);
+        } else {
+            writeResponse("ok=0\nerror=모르는 도구입니다\n");
+            return false;
+        }
+        std::string body = "affected=" + std::to_string(result) + "\n" + statusBody(app);
+        writeResponse(body);
         return false;
     }
 

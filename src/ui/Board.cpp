@@ -156,24 +156,31 @@ bool DrawBoard(App& app, bool& boardOpen) {
     }
 
     // ---------------- 6. 마우스 도구 ----------------
-    if (ImGui::CollapsingHeader("마우스 도구")) {
+    if (ImGui::CollapsingHeader("마우스 도구", ImGuiTreeNodeFlags_DefaultOpen)) {
         const char* toolItems[] = { "카메라 (줌·팬)", "가스 뿌리기", "중력 우물", "형태 추가", "지우개" };
         int t = (int)app.tool;
-        if (ImGui::Combo("도구", &t, toolItems, 5)) {
-            // 증분 1 은 카메라만 실제로 동작한다. 나머지는 골라도 아무 일도 하지 않는다.
-            app.tool = (t == 0) ? Tool::Camera : (Tool)t;
+        if (ImGui::Combo("도구", &t, toolItems, 5)) app.tool = (Tool)t;
+
+        ImGui::SliderFloat("브러시 크기", &app.brush.radius, 0.005f, 0.25f, "%.3f");
+        ImGui::SliderFloat("브러시 세기", &app.brush.strength, 0.02f, 2.0f, "%.2f");
+
+        const char* shapes[] = { "회전 원반", "정지 덩어리", "가스 고리" };
+        int sk = (int)app.brush.shapeKind;
+        if (ImGui::Combo("형태", &sk, shapes, 3)) app.brush.shapeKind = (ShapeKind)sk;
+        ImGui::SliderFloat("형태 반지름", &app.brush.shapeRadius, 0.01f, 0.4f, "%.2f");
+        int sn = app.brush.shapeCount / 10000;
+        if (ImGui::SliderInt("형태 파티클", &sn, 1, 100, "%d만")) app.brush.shapeCount = sn * 10000;
+        ImGui::Checkbox("궤도속도 자동", &app.brush.autoOrbit);
+
+        // 남은 빈 슬롯을 보여준다 — 다 차면 형태를 더 못 넣는다.
+        const int room = app.sim.particleCount() - app.sim.activeCount();
+        ImGui::Text("살아있는 파티클 %d / 빈 슬롯 %d", app.sim.activeCount(), room);
+        if (room < app.brush.shapeCount) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
+            ImGui::TextWrapped("빈 슬롯이 모자라 %d 개만 들어갑니다", room);
+            ImGui::PopStyleColor();
         }
-        {
-            Pending p;
-            static float brush = 0.028f, shapeR = 0.14f;
-            static int shapeKind = 0, shapeN = 15;
-            ImGui::SliderFloat("브러시 크기", &brush, 0.005f, 0.2f, "%.3f");
-            const char* shapes[] = { "회전 원반", "정지 덩어리", "가스 고리" };
-            ImGui::Combo("형태", &shapeKind, shapes, 3);
-            ImGui::SliderFloat("형태 반지름", &shapeR, 0.01f, 0.4f, "%.2f");
-            ImGui::SliderInt("형태 파티클", &shapeN, 1, 60, "%d0만");
-        }
-        SectionNote("증분 1 은 카메라만 동작한다. 뿌리기·우물·형태 추가·지우개는 다음 증분.");
+        SectionNote("화면을 클릭해 보세요. 형태 추가는 누를 때 한 번 들어가고, 뿌리기·우물·지우개는 드래그하는 동안 계속 먹습니다.");
     }
 
     // ---------------- 7. 프리셋 ----------------
@@ -247,10 +254,7 @@ void DrawToolbar(App& app, int viewW, int viewH) {
     for (int i = 0; i < 5; ++i) {
         const bool sel = ((int)app.tool == i);
         if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.17f, 0.44f, 0.62f, 1.0f));
-        // 증분 1 은 카메라만 실제 동작한다 — 나머지는 눌리되 회색으로 표시한다
-        ImGui::BeginDisabled(i != 0);
         if (ImGui::Button(labels[i], ImVec2(72, 30))) app.tool = (Tool)i;
-        ImGui::EndDisabled();
         if (sel) ImGui::PopStyleColor();
         if (i < 4) ImGui::SameLine();
     }

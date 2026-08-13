@@ -256,6 +256,77 @@ static void testVramClamp() {
     check(std::fabs(mass - got) / got < 1e-2, "잘린 상태로도 정상 동작한다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 10. 마우스 도구 — 빈 판에서 형태를 쌓고, 지우고, 밀어 본다.
+//     핵심은 "여러 번 추가해도 요청한 개수가 정확히 들어가는가"다.
+//     앞에서부터 빈 슬롯을 훑는 방식은 두 번째 추가에서 개수가 모자랐다(design.md §9-1).
+// ---------------------------------------------------------------------------
+static void testMouseTools() {
+    printf("\n[10] 마우스 도구 — 형태 추가·지우개·뿌리기\n");
+    Sim sim;
+    SimConfig cfg;
+    cfg.particleCount = 1000000;
+    cfg.gridSize = 512;
+    cfg.gravity = 0.6f;
+    cfg.pressureEnabled = false;
+    cfg.preset = Preset::Empty;
+    sim.init(cfg);
+
+    char buf[220];
+    snprintf(buf, sizeof(buf), "activeCount=%d  격자질량=%.0f", sim.activeCount(), sim.measureTotalGridMass());
+    check(sim.activeCount() == 0 && sim.measureTotalGridMass() < 1.0, "빈 판은 비어 있다", buf);
+
+    // 세 번 추가하고 매번 정확한 개수가 들어가는지 본다
+    const int want = 120000;
+    int got1 = sim.addShape(0.35f, 0.45f, ShapeKind::RotatingDisk, 0.10f, want, true);
+    int got2 = sim.addShape(0.65f, 0.55f, ShapeKind::StaticBlob,   0.08f, want, false);
+    int got3 = sim.addShape(0.50f, 0.75f, ShapeKind::GasRing,      0.09f, want, true);
+    int total = sim.activeCount();
+    double mass = sim.measureTotalGridMass();
+    snprintf(buf, sizeof(buf), "요청 %d×3  들어감 %d/%d/%d  합계=%d  격자질량=%.0f",
+             want, got1, got2, got3, total, mass);
+    check(got1 == want && got2 == want && got3 == want && total == want * 3
+          && std::fabs(mass - total) / total < 1e-2,
+          "세 번 추가해도 매번 요청한 개수가 들어간다", buf);
+
+    // 형태 3종이 서로 다른 배치를 만든다 (고리는 가운데가 비어 점유셀이 적다)
+    {
+        Sim s2; SimConfig c2 = cfg; s2.init(c2);
+        s2.addShape(0.5f, 0.5f, ShapeKind::RotatingDisk, 0.12f, 200000, true);
+        int diskCells = s2.measureOccupiedCells();
+        Sim s3; s3.init(c2);
+        s3.addShape(0.5f, 0.5f, ShapeKind::GasRing, 0.12f, 200000, true);
+        int ringCells = s3.measureOccupiedCells();
+        snprintf(buf, sizeof(buf), "원반 점유셀=%d  고리 점유셀=%d", diskCells, ringCells);
+        check(diskCells > 0 && ringCells > 0 && ringCells < diskCells,
+              "형태 종류마다 배치가 다르다(고리가 더 성기다)", buf);
+    }
+
+    // 지우개 — 지운 만큼 줄고, 남은 것은 앞쪽에 모여 있어야 다음 추가가 정확하다
+    int erased = sim.eraseAt(0.35f, 0.45f, 0.12f);
+    int afterErase = sim.activeCount();
+    int got4 = sim.addShape(0.20f, 0.20f, ShapeKind::StaticBlob, 0.05f, 50000, false);
+    int afterAdd = sim.activeCount();
+    snprintf(buf, sizeof(buf), "지움=%d  지운뒤=%d  다시추가=%d  최종=%d",
+             erased, afterErase, got4, afterAdd);
+    check(erased > 0 && afterErase == total - erased
+          && got4 == 50000 && afterAdd == afterErase + 50000,
+          "지운 뒤에도 추가 개수가 정확하다", buf);
+
+    // 뿌리기·우물 — 속도가 실제로 바뀌는지 (최대속력으로 본다)
+    {
+        Sim s4; SimConfig c4 = cfg; c4.gravity = 0.0f; s4.init(c4);
+        s4.addShape(0.5f, 0.5f, ShapeKind::StaticBlob, 0.10f, 200000, false);
+        s4.step();
+        float v0 = s4.timings().maxSpeed;
+        s4.sprayAt(0.5f, 0.5f, 0.12f, 0.5f);
+        s4.step();
+        float v1 = s4.timings().maxSpeed;
+        snprintf(buf, sizeof(buf), "뿌리기 전 최대속력=%.4f  후=%.4f", v0, v1);
+        check(v1 > v0 + 1e-4f, "뿌리기가 속도를 준다", buf);
+    }
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -273,6 +344,7 @@ int main() {
     testCflClamp();
     testLongRun();
     testVramClamp();
+    testMouseTools();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

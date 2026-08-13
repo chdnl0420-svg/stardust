@@ -22,10 +22,21 @@ struct ViewSettings {
     bool       showHud    = true;
 };
 
+// 마우스 도구 설정. 설정 보드와 MCP 가 같은 값을 만진다.
+struct BrushSettings {
+    float     radius       = 0.028f;  // 뿌리기·우물·지우개 브러시 반지름(시뮬 좌표)
+    float     strength     = 0.35f;   // 뿌리기·우물 세기
+    ShapeKind shapeKind    = ShapeKind::RotatingDisk;
+    float     shapeRadius  = 0.12f;
+    int       shapeCount   = 150000;
+    bool      autoOrbit    = true;    // 형태를 넣을 때 그 자리 중력을 재서 궤도속도를 준다
+};
+
 struct App {
     Sim          sim;
     SimConfig    cfg;          // 설정 보드가 직접 만지는 값
     ViewSettings view;
+    BrushSettings brush;
 
     bool  running = true;      // 일시정지 여부
     bool  stepOnce = false;    // "한 스텝" 버튼
@@ -43,6 +54,12 @@ struct App {
     // 설정 보드에서 바뀐 값을 코어에 반영한다. 파티클 수·격자·경계가 바뀌면 코어가 재할당한다.
     void applyConfig();
     void tick();
+
+    // 화면 픽셀 좌표를 시뮬레이션 좌표([0,1]²)로 바꾼다.
+    // 렌더 셰이더(kShade)와 같은 변환을 써야 클릭한 자리와 보이는 자리가 일치한다.
+    void screenToSim(int px, int py, int viewW, int viewH, float& u, float& v) const;
+    // 지금 선택된 도구를 그 자리에 적용한다. 카메라 도구면 아무것도 하지 않는다.
+    void applyToolAt(float u, float v, bool firstClick);
 };
 
 // 프리셋이 시나리오에 맞는 경계·압력·팽창을 함께 정한다.
