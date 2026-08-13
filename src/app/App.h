@@ -60,6 +60,8 @@ struct App {
     int   recordedFrames = 0;
     int   frameCounter = 0;
     bool  snapshotRequested = false;   // 스냅샷 버튼이 눌렸다
+    // 마지막 저장이 실패했다(디스크 부족·권한 등). 조용히 넘어가면 사용자는 파일이 생긴 줄 안다.
+    bool  lastSaveFailed = false;
 
     void init();
     // 설정 보드에서 바뀐 값을 코어에 반영한다. 파티클 수·격자·경계가 바뀌면 코어가 재할당한다.

@@ -97,6 +97,11 @@ public:
     const SimConfig& config() const;
     SimTimings       timings() const;
     double           simTime() const;
+
+    // CUDA 가 한 번이라도 실패했는가. 실패하면 그 뒤로 스텝이 멈춰 화면이 그대로 굳는다 —
+    // 왜 굳었는지 사용자가 알 수 있어야 하므로 밖에서 읽을 수 있게 연다.
+    static bool        failed();
+    static std::string failMessage();
     int              gridSize() const;
     int              particleCount() const;
 

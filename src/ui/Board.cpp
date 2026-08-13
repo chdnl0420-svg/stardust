@@ -224,6 +224,13 @@ void DrawBoard(App& app, bool& boardOpen) {
             if (app.recordedFrames > 0)
                 ImGui::TextDisabled("마지막 녹화: %d 프레임", app.recordedFrames);
         }
+        // 저장이 실패하면 알린다. 조용히 넘어가면 사용자는 파일이 생긴 줄 알고 나중에야 빈 폴더를 본다.
+        if (app.lastSaveFailed) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.35f, 0.30f, 1.0f));
+            ImGui::TextWrapped("마지막 저장이 실패했습니다 — captures 폴더의 여유 공간과 쓰기 권한을 확인해 주세요.");
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("안내 지우기")) app.lastSaveFailed = false;
+        }
         ImGui::SliderInt("프레임 간격", &app.recordEvery, 1, 10, "%d 프레임마다");
         const char* fmt[] = { "PNG 시퀀스" };
         int f = 0;

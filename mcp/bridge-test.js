@@ -140,6 +140,35 @@ function check(ok, label, detail) {
         `web=${web.boundary}/${web.activeCount}개, empty=${empty.boundary}/${empty.activeCount}개, ` +
         `spiral=${spiral.boundary}/${spiral.activeCount}개`);
 
+  // ---- 6. 제어 채널이 명령 주입과 범위 밖 경로를 막는다 ----
+  //   명령은 "key=value" 줄로 나가므로 값에 줄바꿈이 들어가면 그 자리가 새 명령이 된다.
+  //   스크린샷 경로는 서버 권한으로 쓰이므로 아무 파일이나 덮어쓸 수 있으면 안 된다.
+  console.log('\n[6] 명령 주입과 범위 밖 경로를 막는다');
+  let injectBlocked = false, pathBlocked = false, outsideBlocked = false;
+  try { await call('nbody_preset', { preset: 'spiral\ncmd=quit' }); }
+  catch (e) { injectBlocked = /줄바꿈/.test(e.message); }
+  try { await call('nbody_screenshot', { path: 'C:\\Windows\\System32\\drivers\\etc\\hosts' }); }
+  catch (e) { pathBlocked = /\.png/.test(e.message); }
+  try { await call('nbody_screenshot', { path: 'C:\\Windows\\Temp\\nbody-escape.png' }); }
+  catch (e) { outsideBlocked = /허용된 폴더/.test(e.message); }
+  // 주입이 통했다면 앱이 종료됐을 것이다 — 상태를 읽어 살아 있는지 함께 본다.
+  const alive = await call('nbody_status');
+  check(injectBlocked && pathBlocked && outsideBlocked && alive.ok === 1,
+        '줄바꿈 주입·확장자·폴더 범위를 모두 거부한다',
+        `주입차단=${injectBlocked} 확장자차단=${pathBlocked} 폴더차단=${outsideBlocked} 앱생존=${alive.ok === 1}`);
+
+  // ---- 7. 동시 호출이 서로를 덮어쓰지 않는다 ----
+  //   명령 파일과 응답 파일이 하나씩뿐이라 겹치면 남의 응답을 읽거나 둘 다 타임아웃한다.
+  console.log('\n[7] 동시 호출이 뒤섞이지 않는다');
+  const many = await Promise.all([
+    call('nbody_status'), call('nbody_status'), call('nbody_status'),
+    call('nbody_set', { gravity: 0.7 }), call('nbody_status'),
+    call('nbody_set', { gravity: 0.9 }), call('nbody_status'),
+  ]);
+  const allOk = many.every(m => m && m.ok === 1 && typeof m.activeCount === 'number');
+  check(allOk, '동시에 보낸 7개 명령이 모두 제 응답을 받는다',
+        `ok 응답 ${many.filter(m => m && m.ok === 1).length}/7, 마지막 gravity=${many[6].gravity}`);
+
   console.log(`\n=== 결과: ${pass} PASS / ${fail} FAIL ===`);
   await call('nbody_quit');
   srv.stdin.end();

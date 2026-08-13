@@ -29,10 +29,28 @@
 
 // ---------------------------------------------------------------------------
 // 오류 처리 — 코어는 조용히 기본값을 돌려주지 않는다. 실패를 표시하고 상위가 알게 한다.
+//
+// 한 번이라도 실패하면 g_failed 를 세우고 그 뒤로는 커널을 더 띄우지 않는다.
+// 전에는 오류를 찍기만 하고 그대로 진행했는데, 할당이 실패하면 그 포인터는 null 이라
+// 다음 커널이 null 을 건드려 드라이버가 컨텍스트를 통째로 버린다. 그러면 이후 모든 호출이
+// 연쇄로 실패하고, 화면에는 "아무 일도 안 일어나는 앱"만 남아 원인을 못 찾는다
+// (round-06 리뷰 P1 #7).
 // ---------------------------------------------------------------------------
+namespace {
+bool g_failed = false;
+char g_failMsg[256] = { 0 };
+
+void markFailure(const char* what, const char* file, int line) {
+    if (!g_failed) {                    // 첫 실패만 남긴다 — 뒤따르는 연쇄 실패는 원인이 아니다
+        g_failed = true;
+        snprintf(g_failMsg, sizeof(g_failMsg), "%s (%s:%d)", what, file, line);
+    }
+    printf("[sim] CUDA error %s:%d %s\n", file, line, what);
+}
+} // namespace
+
 #define CK(x)  do { cudaError_t e_ = (x); if (e_ != cudaSuccess) {                      \
-                    printf("[sim] CUDA error %s:%d %s\n", __FILE__, __LINE__,           \
-                           cudaGetErrorString(e_)); }                                   \
+                    markFailure(cudaGetErrorString(e_), __FILE__, __LINE__); }          \
                } while (0)
 
 namespace {
@@ -683,7 +701,8 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&keyOut, sizeof(unsigned) * n));
     CK(cudaMalloc(&val,    sizeof(unsigned) * n));
     CK(cudaMalloc(&valOut, sizeof(unsigned) * n));
-    cub::DeviceRadixSort::SortPairs(nullptr, sortTmpBytes, key, keyOut, val, valOut, n, 0, 24);
+    // 임시버퍼 크기 질의도 실패할 수 있다 — 안 보고 넘기면 0 바이트를 할당하고 정렬이 조용히 깨진다.
+    CK(cub::DeviceRadixSort::SortPairs(nullptr, sortTmpBytes, key, keyOut, val, valOut, n, 0, 24));
     CK(cudaMalloc(&sortTmp, sortTmpBytes));
 
     CK(cudaMalloc(&rho, sizeof(float) * cells));
@@ -700,9 +719,18 @@ void Sim::Impl::allocate() {
         CK(cudaMalloc(&green,     sizeof(float) * cells));
         CK(cudaMalloc(&greenSpec, sizeof(cufftComplex) * W * S));
     }
-    cufftPlan2d(&planF, S, S, CUFFT_R2C);
-    cufftPlan2d(&planB, S, S, CUFFT_C2R);
-    planReady = true;
+    // FFT 계획 생성도 VRAM 을 쓴다 — 실패하면 핸들이 쓸 수 없는 상태인데
+    // 전에는 그대로 planReady 를 켜서 그 핸들로 FFT 를 돌렸다(round-06 리뷰 P1 #8).
+    const cufftResult rF = cufftPlan2d(&planF, S, S, CUFFT_R2C);
+    const cufftResult rB = cufftPlan2d(&planB, S, S, CUFFT_C2R);
+    if (rF != CUFFT_SUCCESS || rB != CUFFT_SUCCESS) {
+        planReady = false;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "cuFFT plan failed (R2C=%d C2R=%d)", (int)rF, (int)rB);
+        markFailure(msg, __FILE__, __LINE__);
+    } else {
+        planReady = true;
+    }
 
     // 리덕션 임시 버퍼 — 합(double 누적)과 최댓값(float) 중 큰 쪽에 맞춘다
     {
@@ -759,6 +787,8 @@ void Sim::Impl::buildGreen() {
 
 // 밀도 격자에서 중력 퍼텐셜을 푼다.
 void Sim::Impl::solveGravity() {
+    // 계획이 없으면 FFT 를 부를 수 없다. 부르면 쓸 수 없는 핸들로 실행돼 그 뒤가 다 무너진다.
+    if (!planReady || g_failed) return;
     const int G = allocG, S = stride(), cells = S * S, W = S / 2 + 1;
     dim3 b(16, 16);
     if (periodic()) {
@@ -833,6 +863,9 @@ std::string Sim::deviceName() {
     if (cudaGetDeviceProperties(&p, 0) != cudaSuccess) return "unknown";
     return p.name;
 }
+bool Sim::failed() { return g_failed; }
+std::string Sim::failMessage() { return g_failMsg; }
+
 size_t Sim::deviceFreeBytes() {
     size_t f = 0, t = 0;
     if (cudaMemGetInfo(&f, &t) != cudaSuccess) return 0;
@@ -840,21 +873,34 @@ size_t Sim::deviceFreeBytes() {
 }
 
 namespace {
-// 파티클 하나가 차지하는 바이트. 위치·속도 두 벌(정렬 재배치용) + 온도 두 벌 +
-// 정렬 키/값 네 벌 + 정렬 임시버퍼 몫을 더한 값이다.
-constexpr size_t kBytesPerParticle = 4 * sizeof(float2) + 2 * sizeof(float)
-                                   + 4 * sizeof(unsigned) + 8;
+// 파티클 하나가 차지하는 바이트. Impl::allocate() 가 n 에 비례해 잡는 것을 전부 센다.
+//   위치·속도 두 벌(정렬 재배치용) 32 + 온도 두 벌 8 + 정렬 키/값 네 벌 16
+//   + 지우개용 alive 1 · selIdx 4 + 별 표식 두 벌 2 = 63
+// 여기에 CUB 임시버퍼(정렬·선택·속도 리덕션) 몫을 여유로 더한다. 이 셋은 CUB 가 크기를
+// 정하고 n 에 비례해 커지는데, 전에는 이 자리를 8 로만 잡고 alive·selIdx·isStar 를
+// 아예 빼놓아 안전하다고 판정한 최대치에서도 실제 할당이 실패할 수 있었다
+// (round-06 리뷰 P1 #10).
+constexpr size_t kBytesPerParticle = 4 * sizeof(float2)          // pos, vel, pos2, vel2
+                                   + 2 * sizeof(float)           // temp, temp2
+                                   + 4 * sizeof(unsigned)        // key, keyOut, val, valOut
+                                   + 1                           // alive
+                                   + sizeof(int)                 // selIdx
+                                   + 2                           // isStar, isStar2
+                                   + 24;                         // CUB 임시버퍼 여유
 
 // 격자가 차지하는 바이트. 고립 경계는 패딩 때문에 폭이 두 배(면적 네 배)가 된다.
 size_t gridBytesFor(int G, Boundary b) {
     const size_t S = (b == Boundary::Isolated) ? (size_t)G * 2 : (size_t)G;
     const size_t cells = S * S;
     const size_t spec  = (S / 2 + 1) * S * sizeof(cufftComplex);
-    size_t bytes = cells * sizeof(float) * 3          // rho, pot, prs
+    size_t bytes = cells * sizeof(float) * 4          // rho, pot, prs, fieldNum
                  + (size_t)G * G * sizeof(float2)     // accG
-                 + (size_t)G * G * sizeof(float)      // rhoCrop
+                 + (size_t)G * G * sizeof(float) * 2  // rhoCrop, fieldOut
                  + spec;                              // rhoSpec
     if (b == Boundary::Isolated) bytes += cells * sizeof(float) + spec;  // green, greenSpec
+    // cuFFT 계획이 쓰는 내부 작업버퍼. 실측 없이 정확히 알 수 없어 스펙트럼 크기만큼 잡아 둔다 —
+    // 모자라게 잡으면 "들어간다"고 판정한 뒤 계획 생성에서 실패한다.
+    bytes += spec;
     return bytes;
 }
 } // namespace
@@ -881,7 +927,14 @@ void clampToVram(SimConfig& cfg, int currentAllocN) {
     // 이미 잡아 둔 것은 다시 쓸 수 있으므로 예산에 더해 준다.
     freeB += (size_t)currentAllocN * kBytesPerParticle;
     const int maxN = Sim::maxParticlesFor(cfg.gridSize, cfg.boundary, freeB);
-    if (maxN > 0 && cfg.particleCount > maxN) cfg.particleCount = maxN;
+    if (maxN <= 0) {
+        // 격자만으로 예산을 넘었다(작은 GPU 이거나 메모리 조회가 실패한 경우).
+        // 전에는 이때 클램프를 통째로 건너뛰어 요청한 수를 그대로 할당하러 갔다
+        // (round-06 리뷰 P1 #11). 최소치로 낮춰 두면 적어도 격자 쪽 실패로 좁혀진다.
+        cfg.particleCount = 1000;
+    } else if (cfg.particleCount > maxN) {
+        cfg.particleCount = maxN;
+    }
     if (cfg.particleCount < 1000) cfg.particleCount = 1000;
 }
 } // namespace
@@ -935,6 +988,9 @@ void Sim::reset() {
 
 void Sim::step() {
     Impl* d = impl_;
+    // 한 번 실패한 뒤에는 아무것도 더 띄우지 않는다 — 위 CK 주석 참조.
+    // 여기서 막지 않으면 null 포인터로 커널이 돌아 원인 파악이 불가능해진다.
+    if (g_failed) return;
     const int n = d->allocN, G = d->allocG, S = d->stride();
     const int per = d->periodic() ? 1 : 0;
     dim3 b(16, 16), gG((G + 15) / 16, (G + 15) / 16);
@@ -947,8 +1003,11 @@ void Sim::step() {
         cudaEvent_t s0 = d->evA;  (void)s0;
         kCellKey<<<grid1(n), BS>>>(d->pos, d->key, d->val, n, G);
         size_t bytes = d->sortTmpBytes;
-        cub::DeviceRadixSort::SortPairs(d->sortTmp, bytes, d->key, d->keyOut,
-                                        d->val, d->valOut, n, 0, 24);
+        // 정렬이 실패하면 valOut 이 미정의 상태다. 그걸로 파티클 배열을 인덱싱하면
+        // 범위 밖 디바이스 메모리를 읽는다(round-06 리뷰 P1 #9).
+        CK(cub::DeviceRadixSort::SortPairs(d->sortTmp, bytes, d->key, d->keyOut,
+                                           d->val, d->valOut, n, 0, 24));
+        if (g_failed) return;
         kReorder<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, d->isStar,
                                    d->pos2, d->vel2, d->temp2, d->isStar2, d->valOut, n);
         std::swap(d->pos, d->pos2); std::swap(d->vel, d->vel2); std::swap(d->temp, d->temp2);

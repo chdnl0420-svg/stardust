@@ -263,16 +263,29 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
                     memcpy(&flipped[(size_t)y * g_w * 4],
                            &px[(size_t)(g_h - 1 - y) * g_w * 4], (size_t)g_w * 4);
                 char name[256];
-                if (app.snapshotRequested) {
+                const bool isSnapshot = app.snapshotRequested;
+                if (isSnapshot) {
                     SYSTEMTIME t; GetLocalTime(&t);
                     snprintf(name, sizeof(name), "captures\\snap-%02d%02d%02d-%03d.png",
                              t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-                    app.snapshotRequested = false;
                 } else {
                     snprintf(name, sizeof(name), "captures\\rec-%05d.png", app.recordedFrames);
-                    ++app.recordedFrames;
                 }
-                WritePngRGBA(name, flipped.data(), g_w, g_h);
+                // 저장에 성공한 뒤에야 요청을 지우고 프레임 수를 올린다.
+                // 전에는 결과를 안 보고 먼저 세어서, 디스크가 차 저장이 실패해도
+                // "N 프레임 녹화됨"이 그대로 올라가고 실제 파일 수와 어긋났다(round-06 리뷰 P2 #30).
+                const bool saved = WritePngRGBA(name, flipped.data(), g_w, g_h);
+                if (isSnapshot) {
+                    // 실패해도 요청은 소비한다 — 안 그러면 매 프레임 같은 실패를 반복한다.
+                    app.snapshotRequested = false;
+                    if (!saved) app.lastSaveFailed = true;
+                } else if (saved) {
+                    ++app.recordedFrames;
+                } else {
+                    // 녹화 중 저장이 실패하면 계속 시도해 봐야 같은 결과라 멈춘다.
+                    app.recording = false;
+                    app.lastSaveFailed = true;
+                }
             }
         }
 

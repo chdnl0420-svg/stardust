@@ -44,6 +44,22 @@ int   getInt(const std::map<std::string, std::string>& kv, const char* k, int d)
 float getFloat(const std::map<std::string, std::string>& kv, const char* k, float d) {
     auto it = kv.find(k); return (it == kv.end()) ? d : (float)atof(it->second.c_str());
 }
+
+// 밖에서 들어온 값을 쓸 수 있는 범위로 자른다.
+//
+// 제어 채널은 파일에서 문자열을 읽어 그대로 숫자로 바꾸므로 무엇이든 들어올 수 있다.
+// NaN(숫자가 아님)이나 무한대가 설정에 들어가면 격자 전체로 번지고 — NaN 은 어떤 연산을 거쳐도
+// NaN 이라 한 칸만 오염돼도 다음 스텝에 판 전체가 물든다 — 앱을 다시 켜기 전에는 못 돌린다.
+// 범위 밖 값도 마찬가지다: 소프트닝 0 은 고립 경계 그린함수의 원점에서 1/0 을 만든다
+// (round-06 리뷰 P1 #13). 범위는 설정 보드 슬라이더와 같게 맞춘다.
+float clampF(float v, float lo, float hi, float fallback) {
+    if (!(v == v)) return fallback;                       // NaN 은 자기 자신과도 다르다
+    if (v > 3.0e38f || v < -3.0e38f) return fallback;     // 무한대
+    return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+int clampI(int v, int lo, int hi) {
+    return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
 bool  has(const std::map<std::string, std::string>& kv, const char* k) {
     return kv.find(k) != kv.end();
 }
@@ -136,7 +152,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
         "recording=%d\nrecordedFrames=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
-        "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\n"
+        // 아직 소비되지 않은 예약 스텝. 밖에서 "요청한 스텝이 다 돌았는지"를 알 유일한 신호다 —
+        // 시간으로 어림하면 프레임이 느린 환경에서 덜 돈 채로 성공 응답이 나간다.
+        "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\npendingSteps=%d\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
         "vramFreeMB=%.0f\n",
@@ -159,7 +177,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.zoom, app.panX, app.panY,
         app.recording ? 1 : 0, app.recordedFrames,
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
-        t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame,
+        t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame, pendingSteps_,
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
         Sim::deviceFreeBytes() / 1048576.0);
@@ -179,12 +197,15 @@ bool ControlBridge::saveScreenshot(const std::string& path, int w, int h) const 
     if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
     char head[64];
     int hn = snprintf(head, sizeof(head), "NBRAW1 %d %d\n", w, h);
-    fwrite(head, 1, (size_t)hn, f);
+    // 쓴 바이트 수를 끝까지 확인한다. 중간에 모자라게 써도 성공을 돌려주면
+    // MCP 쪽이 잘린 파일을 정상 캡처로 알고 PNG 로 변환한다(round-06 리뷰 P2 #31).
+    bool ok = (fwrite(head, 1, (size_t)hn, f) == (size_t)hn);
     // OpenGL 은 아래에서 위로 읽으므로 줄 순서를 뒤집어 저장한다(위가 먼저).
-    for (int y = h - 1; y >= 0; --y)
-        fwrite(px.data() + (size_t)y * w * 4, 1, (size_t)w * 4, f);
-    fclose(f);
-    return true;
+    const size_t rowBytes = (size_t)w * 4;
+    for (int y = h - 1; y >= 0 && ok; --y)
+        ok = (fwrite(px.data() + (size_t)y * w * 4, 1, rowBytes, f) == rowBytes);
+    if (fclose(f) != 0) ok = false;      // 버퍼에 남은 것은 여기서야 실패가 드러난다
+    return ok;
 }
 
 bool ControlBridge::poll(App& app, int viewW, int viewH) {
@@ -226,23 +247,25 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "law"))
             app.cfg.law = (kv["law"] == "inverse_r") ? GravityLaw::InverseR
                                                      : GravityLaw::InverseSquare;
-        if (has(kv, "gravity"))        app.cfg.gravity        = getFloat(kv, "gravity", app.cfg.gravity);
-        if (has(kv, "softeningCells")) app.cfg.softeningCells = getFloat(kv, "softeningCells", app.cfg.softeningCells);
-        if (has(kv, "timeScale"))      app.cfg.timeScale      = getFloat(kv, "timeScale", app.cfg.timeScale);
-        if (has(kv, "sortInterval"))   app.cfg.sortInterval   = getInt(kv, "sortInterval", app.cfg.sortInterval);
+        // 아래 범위는 설정 보드 슬라이더와 같다 — 두 입구가 같은 값만 받아야 한 쪽으로만
+        // 이상한 값이 들어가는 구멍이 안 생긴다.
+        if (has(kv, "gravity"))        app.cfg.gravity        = clampF(getFloat(kv, "gravity", app.cfg.gravity), 0.0f, 2.0f, app.cfg.gravity);
+        if (has(kv, "softeningCells")) app.cfg.softeningCells = clampF(getFloat(kv, "softeningCells", app.cfg.softeningCells), 0.5f, 6.0f, app.cfg.softeningCells);
+        if (has(kv, "timeScale"))      app.cfg.timeScale      = clampF(getFloat(kv, "timeScale", app.cfg.timeScale), 0.1f, 4.0f, app.cfg.timeScale);
+        if (has(kv, "sortInterval"))   app.cfg.sortInterval   = clampI(getInt(kv, "sortInterval", app.cfg.sortInterval), 1, 120);
         if (has(kv, "pressure"))       app.cfg.pressureEnabled = getInt(kv, "pressure", 1) != 0;
-        if (has(kv, "pressureK"))      app.cfg.pressureK      = getFloat(kv, "pressureK", app.cfg.pressureK);
-        if (has(kv, "gamma"))          app.cfg.gamma          = getFloat(kv, "gamma", app.cfg.gamma);
+        if (has(kv, "pressureK"))      app.cfg.pressureK      = clampF(getFloat(kv, "pressureK", app.cfg.pressureK), 0.0f, 2.0f, app.cfg.pressureK);
+        if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
         if (has(kv, "temperature"))    app.cfg.temperatureEnabled = getInt(kv, "temperature", 1) != 0;
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;
-        if (has(kv, "coolingRate"))    app.cfg.coolingRate        = getFloat(kv, "coolingRate", app.cfg.coolingRate);
+        if (has(kv, "coolingRate"))    app.cfg.coolingRate        = clampF(getFloat(kv, "coolingRate", app.cfg.coolingRate), 0.0f, 1.0f, app.cfg.coolingRate);
         if (has(kv, "starFormation"))  app.cfg.starFormationEnabled = getInt(kv, "starFormation", 0) != 0;
-        if (has(kv, "starDensity"))    app.cfg.starDensityThreshold = getFloat(kv, "starDensity", app.cfg.starDensityThreshold);
-        if (has(kv, "starTemp"))       app.cfg.starTempThreshold  = getFloat(kv, "starTemp", app.cfg.starTempThreshold);
+        if (has(kv, "starDensity"))    app.cfg.starDensityThreshold = clampF(getFloat(kv, "starDensity", app.cfg.starDensityThreshold), 1.0f, 400.0f, app.cfg.starDensityThreshold);
+        if (has(kv, "starTemp"))       app.cfg.starTempThreshold  = clampF(getFloat(kv, "starTemp", app.cfg.starTempThreshold), 0.0f, 1.0f, app.cfg.starTempThreshold);
         if (has(kv, "expansion"))      app.cfg.expansionEnabled   = getInt(kv, "expansion", 0) != 0;
-        if (has(kv, "hubble"))         app.cfg.hubble             = getFloat(kv, "hubble", app.cfg.hubble);
-        if (has(kv, "brightness"))     app.view.brightness    = getFloat(kv, "brightness", app.view.brightness);
-        if (has(kv, "displayGamma"))   app.view.gamma         = getFloat(kv, "displayGamma", app.view.gamma);
+        if (has(kv, "hubble"))         app.cfg.hubble             = clampF(getFloat(kv, "hubble", app.cfg.hubble), 0.0f, 1.0f, app.cfg.hubble);
+        if (has(kv, "brightness"))     app.view.brightness    = clampF(getFloat(kv, "brightness", app.view.brightness), 0.05f, 8.0f, app.view.brightness);
+        if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
         if (has(kv, "renderMode"))
             app.view.mode = (kv["renderMode"] == "points") ? RenderMode::Points
@@ -257,9 +280,10 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
             app.view.cmap = (c == "gray") ? ColorMap::Gray
                           : (c == "thermal") ? ColorMap::Thermal : ColorMap::Astro;
         }
-        if (has(kv, "zoom")) app.zoom = getFloat(kv, "zoom", app.zoom);
-        if (has(kv, "panX")) app.panX = getFloat(kv, "panX", app.panX);
-        if (has(kv, "panY")) app.panY = getFloat(kv, "panY", app.panY);
+        // 카메라도 같다 — zoom 0 이나 NaN 이 들어가면 화면 변환이 0 으로 나누기가 된다.
+        if (has(kv, "zoom")) app.zoom = clampF(getFloat(kv, "zoom", app.zoom), 0.05f, 64.0f, app.zoom);
+        if (has(kv, "panX")) app.panX = clampF(getFloat(kv, "panX", app.panX), -8.0f, 8.0f, app.panX);
+        if (has(kv, "panY")) app.panY = clampF(getFloat(kv, "panY", app.panY), -8.0f, 8.0f, app.panY);
 
         // 무엇이 바뀌었든 그 자리에서 코어에 넘긴다.
         // 전에는 파티클 수·격자·경계에서만 넘겨서, 중력·압력·냉각 같은 값을 단독으로 바꾸면

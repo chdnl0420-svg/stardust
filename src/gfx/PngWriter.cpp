@@ -90,7 +90,10 @@ bool WritePngRGBA(const std::string& path, const unsigned char* rgba, int w, int
 
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
-    fwrite(png.data(), 1, png.size(), f);
-    fclose(f);
-    return true;
+    // 쓴 만큼과 닫기까지 확인한다. 디스크가 모자라거나 중간에 끊기면 fwrite 는 요청보다 적게 쓰고,
+    // 버퍼에 남은 것은 fclose 에서야 실패한다 — 둘 다 안 보면 깨진 파일을 만들어 놓고
+    // 성공을 돌려주게 된다(round-06 리뷰 P2 #29).
+    const size_t wrote = fwrite(png.data(), 1, png.size(), f);
+    const bool closedOk = (fclose(f) == 0);
+    return wrote == png.size() && closedOk;
 }

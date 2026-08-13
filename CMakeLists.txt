@@ -46,6 +46,16 @@ set_target_properties(nbody_sim PROPERTIES
 add_executable(sim_tests tests/sim_tests.cpp)
 target_link_libraries(sim_tests PRIVATE nbody_sim)
 
+# CTest 에 등록한다. 안 하면 `ctest` 가 테스트 0개로 성공해, 회귀가 깨져도 통과로 보인다
+# (round-06 리뷰 P2 #36). CUDA 장치가 없으면 sim_tests 가 종료 코드 2 를 돌려주므로
+# 그 경우는 실패가 아니라 "건너뜀"으로 표시한다.
+enable_testing()
+add_test(NAME sim_regression COMMAND sim_tests)
+set_tests_properties(sim_regression PROPERTIES
+  SKIP_RETURN_CODE 2
+  TIMEOUT 900
+)
+
 # ---------------------------------------------------------------------------
 # 앱 — Win32 창 + OpenGL + Dear ImGui
 # ---------------------------------------------------------------------------

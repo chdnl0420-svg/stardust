@@ -34,10 +34,30 @@ function ensureDir() {
 
 // 명령 하나를 보내고 응답을 기다린다.
 // 응답은 "key=value" 줄이라 그대로 객체로 바꾼다.
-async function send(kv, timeoutMs = 15000) {
+//
+// 한 번에 하나씩만 보낸다(sendQueue). 명령 파일과 응답 파일이 하나뿐이라 두 호출이 겹치면
+// 뒤엣것이 앞엣것의 명령을 덮어쓰고, 남의 응답을 자기 것으로 읽거나 둘 다 타임아웃한다.
+let sendQueue = Promise.resolve();
+function send(kv, timeoutMs = 15000) {
+  const run = sendQueue.then(() => sendNow(kv, timeoutMs));
+  // 앞 호출이 실패해도 줄이 끊기면 안 되므로 큐 자체는 항상 성공으로 이어 붙인다.
+  sendQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+// key=value 한 줄로 나가는 값이라 줄바꿈이 들어가면 그 자리에서 새 명령이 된다.
+// 예를 들어 경로에 "\ncmd=quit" 을 넣으면 스크린샷 대신 앱이 종료된다.
+function encodeValue(v) {
+  const s = String(v);
+  if (/[\r\n]/.test(s))
+    throw new Error(`값에 줄바꿈을 넣을 수 없습니다: ${JSON.stringify(s)}`);
+  return s;
+}
+
+async function sendNow(kv, timeoutMs) {
   ensureDir();
   try { fs.unlinkSync(RESP_FILE); } catch (_) {}
-  const body = Object.entries(kv).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+  const body = Object.entries(kv).map(([k, v]) => `${k}=${encodeValue(v)}`).join('\n') + '\n';
   fs.writeFileSync(CMD_FILE, body, 'utf8');
 
   const deadline = Date.now() + timeoutMs;
@@ -114,6 +134,22 @@ function crc32(buf) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
+// 스크린샷 저장 경로를 검사한다.
+// 이 서버는 자기 권한으로 파일을 쓰므로, 경로를 그대로 받으면 호출자가 아무 파일이나
+// PNG 로 덮어쓸 수 있다(소스·설정·사용자 문서). 확장자를 .png 로 묶고 쓰기 가능한 위치를
+// 프로젝트 폴더와 제어 폴더로 한정한다.
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+function safeShotPath(p) {
+  const abs = path.resolve(p);
+  if (path.extname(abs).toLowerCase() !== '.png')
+    throw new Error(`스크린샷 경로는 .png 여야 합니다: ${abs}`);
+  const roots = [PROJECT_ROOT, path.resolve(CONTROL_DIR)];
+  const inside = roots.some(r => abs === r || abs.startsWith(r + path.sep));
+  if (!inside)
+    throw new Error(`허용된 폴더 밖입니다(프로젝트 폴더 또는 제어 폴더 안이어야 합니다): ${abs}`);
+  return abs;
+}
+
 // 문자열 응답을 숫자로 바꿔 읽기 좋게 만든다.
 function typed(resp) {
   const out = {};
@@ -184,9 +220,18 @@ const tools = {
 
   async nbody_step({ count = 1 }) {
     const queued = typed(await send({ cmd: 'step', count }));
-    // 스텝은 프레임에 걸쳐 소비된다. 다 돌 때까지 기다렸다 상태를 돌려준다.
-    await sleep(Math.min(60000, 60 + count * 4));
-    return { ...queued, ...typed(await send({ cmd: 'status' }, 30000)) };
+    // 스텝은 프레임에 하나씩 소비된다. 앱이 남았다고 말하는 동안 기다린다.
+    // 전에는 count*4ms 만 자고 성공을 돌려줬는데, 프레임이 그보다 느린 환경(무거운 격자·
+    // 큰 파티클 수)에서는 대부분이 안 돈 채로 "다 됐다"가 나갔다.
+    const deadline = Date.now() + Math.min(600000, 10000 + count * 80);
+    let st = typed(await send({ cmd: 'status' }, 30000));
+    while (st.pendingSteps > 0 && Date.now() < deadline) {
+      await sleep(30);
+      st = typed(await send({ cmd: 'status' }, 30000));
+    }
+    if (st.pendingSteps > 0)
+      throw new Error(`스텝 ${count} 개 중 ${st.pendingSteps} 개가 남은 채로 시간이 지났습니다`);
+    return { ...queued, ...st };
   },
 
   async nbody_reset() {
@@ -197,7 +242,8 @@ const tools = {
     const raw = path.join(CONTROL_DIR, `shot-${Date.now()}.raw`);
     const resp = typed(await send({ cmd: 'screenshot', path: raw }));
     if (!resp.ok) throw new Error('앱이 화면을 저장하지 못했습니다');
-    const png = outPath || path.join(CONTROL_DIR, `shot-${Date.now()}.png`);
+    const png = outPath ? safeShotPath(outPath)
+                        : path.join(CONTROL_DIR, `shot-${Date.now()}.png`);
     const info = rawToPng(raw, png);
     try { fs.unlinkSync(raw); } catch (_) {}
     return { ok: 1, path: png, ...info };

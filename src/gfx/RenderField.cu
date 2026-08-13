@@ -165,10 +165,12 @@ void RenderField::ensureSize(int w, int h) {
     size_t need = (size_t)w * h * 4;
     if (hostPixels_) free(hostPixels_);
     hostPixels_ = (unsigned char*)malloc(need);
+    // 할당이 실패하면 반드시 null 로 둔다 — 실패한 포인터를 그대로 두면 다음 프레임에
+    // 그 주소로 커널을 띄워 CUDA 컨텍스트를 통째로 망가뜨린다(round-06 리뷰 P1 #12).
     if (devPixels_) cudaFree(devPixels_);
-    cudaMalloc(&devPixels_, need);
+    if (cudaMalloc(&devPixels_, need) != cudaSuccess) devPixels_ = nullptr;
     if (devAccum_) cudaFree(devAccum_);
-    cudaMalloc(&devAccum_, (size_t)w * h * sizeof(float3));
+    if (cudaMalloc(&devAccum_, (size_t)w * h * sizeof(float3)) != cudaSuccess) devAccum_ = nullptr;
     devBytes_ = need;
 }
 
@@ -181,8 +183,9 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     const int cmapKind = (view.cmap == ColorMap::Thermal) ? 2
                        : (view.cmap == ColorMap::Gray)    ? 1 : 0;
 
+    // 점 렌더는 누적 버퍼가 따로 필요하다. 화면 버퍼만 있고 누적 버퍼가 없으면 밀도 필드로 내려간다.
     if (!devPixels_) { if (hostPixels_) memset(hostPixels_, 0, devBytes_); }
-    else if (view.mode == RenderMode::Points) {
+    else if (view.mode == RenderMode::Points && devAccum_) {
         // 파티클 점 — 겹칠수록 밝아지도록 누적한 뒤 한 번에 색으로 바꾼다.
         const int n = app.sim.activeCount();
         kClearAccum<<<(npix + 255) / 256, 256>>>((float3*)devAccum_, npix);

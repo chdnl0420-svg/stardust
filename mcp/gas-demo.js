@@ -34,6 +34,8 @@ async function call(name, args = {}) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const shot = n => call('nbody_screenshot', { path: path.join(OUT, n + '.png') });
+// 화면을 남기면서 그때의 상태도 함께 받는다 — 그림만 저장하고 통과시키면 회귀를 못 잡는다.
+const shotAndStatus = async n => { await shot(n); return call('nbody_status'); };
 let pass = 0, fail = 0;
 function check(ok, label, detail) {
   if (ok) { pass++; console.log(`  [PASS] ${label.padEnd(36)} ${detail}`); }
@@ -88,8 +90,11 @@ function check(ok, label, detail) {
 
   // 온도: 충돌하면 달아오른다
   await call('nbody_set', { colorBy: 'temperature', colormap: 'thermal', brightness: 1.0 });
-  await shot('07-shock-temperature');
-  check(true, '충돌면 온도 화면 저장', 'shots5/07-shock-temperature.png');
+  const tempSt = await shotAndStatus('07-shock-temperature');
+  // 전에는 check(true, ...) 로 무조건 통과시켜 온도가 0 이 돼도 못 잡았다(round-06 리뷰 P2 #38).
+  check(tempSt.meanTemp > 0.01 && tempSt.colorBy === 'temperature',
+        '충돌면이 실제로 달아오른다',
+        `평균온도=${tempSt.meanTemp}  색기준=${tempSt.colorBy}  shots5/07-shock-temperature.png`);
 
   // ---- 가스: 복사 냉각 ----
   const runCool = async (on) => {
