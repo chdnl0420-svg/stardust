@@ -71,6 +71,7 @@ const char* presetSlug(Preset p) {
         case Preset::HeadOnShock: return "shock";
         case Preset::CosmicWeb:   return "web";
         case Preset::BlackHole:   return "blackhole";
+        case Preset::Accretion:   return "accretion";
         default:                  return "empty";
     }
 }
@@ -81,6 +82,7 @@ bool parsePreset(const std::string& s, Preset& out) {
     if (s == "shock")  { out = Preset::HeadOnShock; return true; }
     if (s == "web")    { out = Preset::CosmicWeb;   return true; }
     if (s == "blackhole") { out = Preset::BlackHole; return true; }
+    if (s == "accretion") { out = Preset::Accretion; return true; }
     if (s == "empty")  { out = Preset::Empty;       return true; }
     return false;
 }
@@ -139,7 +141,10 @@ std::string ControlBridge::statusBody(const App& app) const {
     sim.measureCentroid(centroidX, centroidY);
     const double meanTemp = sim.measureMeanTemperature();
 
-    char buf[1700];
+    // 천체 현황. App::tick 이 프레임마다 갱신해 둔 값을 그대로 읽는다.
+    const BodyStats bs = sim.bodyStats();
+
+    char buf[1850];
     snprintf(buf, sizeof(buf),
         // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
         // 늘 1 을 돌려주면 자동 검증이 멈춘 시뮬레이션을 성공으로 읽는다(round-08 리뷰 A13).
@@ -163,6 +168,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\npendingSteps=%d\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
+        // 천체 만들기 장면의 결과. 꺼져 있으면 전부 0 이다.
+        "bodies=%d\nasteroids=%d\nplanets=%d\nstars=%d\n"
+        "heaviestBody=%.0f\nbodyMerges=%d\nbodyShatters=%d\n"
         "vramFreeMB=%.0f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
@@ -187,6 +195,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame, pendingSteps_,
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
+        bs.count, bs.asteroids, bs.planets, bs.stars,
+        bs.heaviest, bs.merges, bs.shatters,
         Sim::deviceFreeBytes() / 1048576.0);
     return buf;
 }

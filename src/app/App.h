@@ -82,6 +82,12 @@ struct App {
     // 「한 번에 놓을 개수」 슬라이더가 끌리는 동안 들고 있는 값(만 단위).
     int   shapeCountSlider = -1;
 
+    // 화면에 그릴 천체 목록. 프레임마다 코어에서 한 번 가져온다 —
+    // 그리는 쪽이 직접 GPU 를 읽으면 매 프레임 여러 번 동기화가 걸린다.
+    static constexpr int MAX_DRAW_BODIES = 2048;
+    BodyView bodyList[MAX_DRAW_BODIES];
+    int      bodyListCount = 0;
+
     void init();
     // 설정 보드에서 바뀐 값을 코어에 반영한다. 파티클 수·격자·경계가 바뀌면 코어가 재할당한다.
     void applyConfig();

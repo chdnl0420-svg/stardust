@@ -39,23 +39,25 @@ void App::tick() {
         sim.step();
         stepsLastFrame = 1;
         stepOnce = false;
-        return;
+    } else if (running) {
+        // 배속 > 1 은 시간 간격을 늘려서는 못 낸다(CFL 안정성 한계 — Sim::step 의 주석 참조).
+        // 대신 한 프레임에 스텝을 여러 번 돌린다. 계산량이 그 배수만큼 늘어 프레임 예산을
+        // 넘길 수 있다는 뜻이라, 상한을 8 로 막아 슬라이더 최대값(4.0)에서도 안전하게 둔다.
+        int reps = 1;
+        if (cfg.timeScale > 1.0f) {
+            reps = (int)(cfg.timeScale + 0.5f);
+            if (reps < 1) reps = 1;
+            if (reps > 8) reps = 8;
+        }
+        for (int i = 0; i < reps; ++i) sim.step();
+        // 코어가 실패 상태면 step 은 아무것도 안 하고 돌아온다 — 그때까지 돈 것으로 세면
+        // 제어 채널이 멈춘 시뮬레이션을 정상 진행으로 보고한다(round-08 리뷰 A12).
+        stepsLastFrame = Sim::failed() ? 0 : reps;
     }
-    if (!running) return;
 
-    // 배속 > 1 은 시간 간격을 늘려서는 못 낸다(CFL 안정성 한계 — Sim::step 의 주석 참조).
-    // 대신 한 프레임에 스텝을 여러 번 돌린다. 계산량이 그 배수만큼 늘어 프레임 예산을
-    // 넘길 수 있다는 뜻이라, 상한을 8 로 막아 슬라이더 최대값(4.0)에서도 안전하게 둔다.
-    int reps = 1;
-    if (cfg.timeScale > 1.0f) {
-        reps = (int)(cfg.timeScale + 0.5f);
-        if (reps < 1) reps = 1;
-        if (reps > 8) reps = 8;
-    }
-    for (int i = 0; i < reps; ++i) sim.step();
-    // 코어가 실패 상태면 step 은 아무것도 안 하고 돌아온다 — 그때까지 돈 것으로 세면
-    // 제어 채널이 멈춘 시뮬레이션을 정상 진행으로 보고한다(round-08 리뷰 A12).
-    stepsLastFrame = Sim::failed() ? 0 : reps;
+    // 화면에 그릴 천체를 프레임에 한 번만 가져온다. 멈춰 있을 때도 가져와야 일시정지 중에
+    // 천체가 사라지지 않는다.
+    bodyListCount = cfg.bodiesEnabled ? sim.readBodies(bodyList, MAX_DRAW_BODIES) : 0;
 }
 
 void App::screenToSim(int px, int py, int viewW, int viewH, float& u, float& v) const {
@@ -121,6 +123,21 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
         cfg.temperatureEnabled = true;   // 안쪽으로 갈수록 빨라지는 것을 온도로도 볼 수 있게
         return;
     }
+    // 천체 만들기는 이 장면에서만 켠다. 다른 장면에서 켜면 나선팔이 생기기도 전에
+    // 팔을 이루던 가스가 전부 덩어리로 먹혀 그 장면의 주인공이 사라진다.
+    cfg.bodiesEnabled = (preset == Preset::Accretion);
+    if (preset == Preset::Accretion) {
+        cfg.boundary = Boundary::Isolated;
+        cfg.gravity = 0.6f;
+        cfg.pressureEnabled = false;     // 압력이 있으면 뭉치는 것을 그만큼 밀어낸다
+        cfg.expansionEnabled = false;
+        cfg.temperatureEnabled = true;
+        cfg.coolingEnabled = true;       // 식어야 뭉친다 — 뜨거운 가스는 스스로 흩어진다
+        cfg.starFormationEnabled = false;// 별은 천체 등급이 대신한다
+        return;
+    }
+    cfg.coolingEnabled = false;
+
     // 경계 — 은하 장면은 텅 빈 우주에 홀로 떠 있어야 하고(고립),
     //        우주 구조 형성은 반대편으로 이어지는 우주가 표준이다(주기).
     cfg.boundary = (preset == Preset::CosmicWeb) ? Boundary::Periodic : Boundary::Isolated;

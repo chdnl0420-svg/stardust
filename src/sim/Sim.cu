@@ -130,6 +130,18 @@ __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
             const float vc = sqrtf(fmaxf(bhGM / r / denom, 0.f));
             v = make_float2(-sinf(th) * vc, cosf(th) * vc);
         } break;
+        case 5: {                                   // Accretion — 넓고 차가운 원반
+            // 은하 장면(0)보다 넓게 깔아 밀도를 낮춘다. 처음부터 빽빽하면 첫 스텝에
+            // 판 전체가 임계를 넘어 천체가 수천 개 동시에 태어나고, 자라는 과정이 안 보인다.
+            float r = sqrtf(u1) * 0.34f, th = u2 * 6.2831853f;
+            p = make_float2(0.5f + r * cosf(th), 0.5f + r * sinf(th));
+            // 궤도를 조금씩 어긋나게 흔든다.
+            // 전부 같은 방향으로 나란히 돌면 이웃끼리의 상대속도가 거의 0 이라 서로 만날 일이
+            // 없고, 만나도 느려서 전부 합쳐진다 — 부서지는 충돌이 t=1.2 까지 두 번뿐이었다
+            // (2026-08-14 실측). 궤도가 제각각이면 타원이 서로 가로질러 빠른 충돌이 생긴다.
+            // 실제 원시 원반도 이렇게 어수선하다.
+            v = make_float2((u3 - 0.5f) * 0.30f, (u4 - 0.5f) * 0.30f);
+        } break;
         default:                                    // Empty — 화면 밖에 숨겨 둔다
             p = make_float2(-1.f, -1.f);
             break;
@@ -630,6 +642,380 @@ __global__ void kAccelAt(const float2* accG, const float2* pos, float2* out,
     out[i] = sampleAcc(accG, pos[i], G, periodic);
 }
 
+// ---------------------------------------------------------------------------
+// 천체 — 가스가 뭉쳐 만들어진 덩어리
+//
+// 파티클은 전부 같은 질량이라 「뭉쳐서 커진다」를 스스로 표현하지 못한다. 아무리 모여도
+// 알갱이 열 개가 붙어 있을 뿐이다. 그래서 뭉친 결과를 천체라는 별도 존재로 두고,
+// 그것이 주변 가스를 먹으며 자라게 한다. 먹힌 가스는 사라지고 그 질량이 천체로 옮겨 가므로
+// 전체 질량은 보존된다.
+//
+// 부서질지 합쳐질지는 부딪히는 속도 하나로 갈린다. 상대속도가 탈출속도보다 느리면 서로의
+// 중력이 붙잡아 합체하고, 빠르면 뿌리치고 흩어져 가스로 되돌아간다. 되돌아간 가스는
+// 아래 씨앗 규칙이 다시 주워 담으므로, 「부서졌다가 다시 뭉친다」를 따로 만들지 않아도 나온다.
+// ---------------------------------------------------------------------------
+
+// 천체 슬롯 상한. 씨앗은 셀 밀도가 임계를 넘은 자리에만 생기므로 실제로는 수십~수백 개다.
+// 상한을 두는 이유는 충돌 판정이 천체 수의 제곱에 비례해서다 — 2048 이면 스레드당 2048 번
+// 도는데, 한 스텝에 수십 마이크로초라 프레임 예산에 영향이 없다.
+constexpr int MAX_BODIES = 2048;
+
+// 슬롯의 상태. 죽은 천체를 목록에서 빼내 앞으로 당기는 대신 슬롯을 비워 재활용한다 —
+// 당기면 화면에 그리던 천체의 번호가 매 스텝 바뀌고 압축 비용도 든다.
+constexpr int BODY_FREE    = -1;  // 빈 슬롯. 새 씨앗이 여기를 잡는다
+constexpr int BODY_ALIVE   = 0;
+constexpr int BODY_SHATTER = 1;   // 이번 스텝에 부서져 가스로 되돌아간다
+constexpr int BODY_MERGED  = 2;   // 이번 스텝에 다른 천체에 흡수된다
+
+// 천체의 반지름. 밀도가 일정하면 2D 에서 반지름은 √질량에 비례한다.
+// 갓 생긴 씨앗(질량 0)도 뭔가는 먹을 수 있어야 하므로 바닥값을 둔다.
+//
+// 질량 계수(0.008)가 이 장면의 속도를 통째로 정한다. 먹는 넓이는 반지름의 제곱이라
+// 계수를 키우면 성장이 눈덩이처럼 가속해, 처음 생긴 몇 개가 판을 통째로 먹어치운다.
+// 실측(2026-08-14): 0.05 로 뒀더니 600 스텝에 가스의 84% 가 사라지고 천체 7개만 남았다 —
+// 소행성 단계를 아무도 못 보고 곧장 별이 됐다. 0.008 이면 별(√m≈300)이 되어도 씨앗의
+// 다섯 배 남짓이라 자라는 과정이 화면에 남는다.
+__device__ __forceinline__ float bodyRadiusOf(float mass, float cell, float grabCells) {
+    return cell * grabCells * (0.5f + 0.008f * sqrtf(fmaxf(mass, 0.f)));
+}
+
+__global__ void kFillInt(int* a, int n, int v) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] = v;
+}
+
+// 천체가 차지한 격자 칸에 자기 번호를 적어 둔다. 파티클이 「내가 지금 있는 칸에 천체가 있나」를
+// 한 번 읽어 알 수 있게 하는 것이라, 1000만 개가 있어도 흡수 판정이 파티클 수에 비례한다.
+__global__ void kMarkBodyCell(const float2* bPos, const float* bMass, const int* bState,
+                              int* cellMap, int num, int G, int periodic,
+                              float cell, float grabCells) {
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= num || bState[b] != BODY_ALIVE) return;
+    const float2 p = bPos[b];
+    const float  R = bodyRadiusOf(bMass[b], cell, grabCells);
+    // 반지름을 칸 수로 바꿔 그 범위를 전부 칠한다. 한 칸만 칠하면 커진 천체의 가장자리에 있는
+    // 가스가 안 먹히고 남아 껍질처럼 둘러싼다.
+    const int rc = min((int)ceilf(R * G), 16);
+    const int cx = (int)floorf(p.x * G), cy = (int)floorf(p.y * G);
+    for (int dy = -rc; dy <= rc; ++dy)
+        for (int dx = -rc; dx <= rc; ++dx)
+            cellMap[gidx(cx + dx, cy + dy, G, periodic)] = b;
+}
+
+// 빈 슬롯을 하나 잡는다. 없으면 고수위를 올려 새 슬롯을 쓰고, 그것도 꽉 찼으면 -1.
+__device__ int allocBody(int* bState, int* bNum) {
+    const int hi = *bNum;
+    for (int i = 0; i < hi; ++i)
+        if (atomicCAS(&bState[i], BODY_FREE, BODY_ALIVE) == BODY_FREE) return i;
+    const int s = atomicAdd(bNum, 1);
+    if (s >= MAX_BODIES) { atomicSub(bNum, 1); return -1; }
+    bState[s] = BODY_ALIVE;
+    return s;
+}
+
+// 가스가 충분히 빽빽해진 자리에 천체를 하나 만든다.
+//
+// 두 가지를 함께 본다. 밀도가 임계를 넘을 것, 그리고 이웃 여덟 칸보다 빽빽할 것.
+// 두 번째가 없으면 뭉친 덩어리 하나에서 임계를 넘은 칸마다 씨앗이 생겨 수십 개가 겹쳐 태어난다.
+__global__ void kSeedBodies(const float* rho, const int* cellMap,
+                            float2* bPos, float2* bVel, float* bMass, float2* bMom,
+                            int* bState, int* bNum,
+                            int G, int stride, int periodic, float thr, float invMeanRho) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= G || y >= G) return;
+
+    // 평균 밀도의 몇 배인가로 본다. 그래야 파티클 수를 바꿔도 임계값의 뜻이 그대로다.
+    const float d0 = rho[y * stride + x] * invMeanRho;
+    if (d0 < thr) return;
+
+    // 이미 천체가 자리 잡은 칸이면 새로 만들지 않는다. 그 천체가 먹으면 될 일이다.
+    if (cellMap[gidx(x, y, G, periodic)] >= 0) return;
+
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const int gx = periodic ? ((x + dx) & (G - 1)) : min(max(x + dx, 0), G - 1);
+            const int gy = periodic ? ((y + dy) & (G - 1)) : min(max(y + dy, 0), G - 1);
+            if (cellMap[gy * G + gx] >= 0) return;             // 이웃이 이미 천체 영역
+            if (rho[gy * stride + gx] * invMeanRho > d0) return; // 더 빽빽한 이웃이 있다
+        }
+
+    const int b = allocBody(bState, bNum);
+    if (b < 0) return;
+    // 칸 한가운데에 놓는다. 속도와 질량은 0 에서 시작해 먹으면서 채워진다 —
+    // 먹은 가스의 운동량을 그대로 물려받으므로 처음 속도를 지어낼 필요가 없다.
+    bPos[b]  = make_float2((x + 0.5f) / G, (y + 0.5f) / G);
+    bVel[b]  = make_float2(0.f, 0.f);
+    bMass[b] = 0.f;
+    bMom[b]  = make_float2(0.f, 0.f);
+}
+
+// 천체 반지름 안에 들어온 가스를 먹는다. 먹힌 파티클은 빈 슬롯이 되고,
+// 그 질량과 운동량은 천체로 옮겨 간다(완전 비탄성 충돌).
+//
+// 반지름 안에 들어왔다고 무조건 먹지는 않는다 — 천체의 중력이 붙잡을 수 있을 만큼
+// 느린 가스만 먹는다. 조건 없이 먹였더니 천체가 원반을 가로지르며 지나는 길의 가스를
+// 전부 빨아들여, 100만 개가 t=0.61 만에 4448 개로 줄었다(2026-08-14 실측).
+// 스쳐 지나가는 것까지 먹는 것은 물리적으로도 틀렸다. 판정은 천체끼리 부딪힐 때와 같은
+// 탈출속도 규칙이라, 흡수와 충돌이 한 가지 원리로 설명된다.
+__global__ void kAccrete(float2* pos, const float2* vel, const int* cellMap,
+                         const float2* bPos, const float2* bVel,
+                         const float* bMass, const int* bState,
+                         float* bGain, float2* bMom, int n, int G, int periodic,
+                         float cell, float grabCells, float gm,
+                         int* eaten, int* freeSlots, int* freeCount, int freeCap) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float2 p = pos[i];
+    if (p.x < 0.f) return;
+
+    const int ix = (int)floorf(p.x * G), iy = (int)floorf(p.y * G);
+    const int b  = cellMap[gidx(ix, iy, G, periodic)];
+    if (b < 0 || bState[b] != BODY_ALIVE) return;
+
+    const float2 bp = bPos[b];
+    const float  dx = p.x - bp.x, dy = p.y - bp.y;
+    const float  m  = bMass[b];
+    const float  R  = bodyRadiusOf(m, cell, grabCells);
+    if (dx * dx + dy * dy > R * R) return;
+
+    const float2 v = vel[i];
+    // 갓 태어난 씨앗(질량 0)은 탈출속도가 0 이라 아무것도 못 먹는다.
+    // 첫 한 끼만 조건 없이 먹여 초기 질량을 갖게 하고, 그 뒤로는 규칙을 적용한다.
+    if (m > 0.f) {
+        const float2 bv = bVel[b];
+        const float  rvx = v.x - bv.x, rvy = v.y - bv.y;
+        const float  vesc2 = 2.f * gm * m / fmaxf(R, 1e-6f);
+        if (rvx * rvx + rvy * rvy > vesc2) return;   // 뿌리치고 지나간다
+    }
+    atomicAdd(&bGain[b], 1.0f);
+    atomicAdd(&bMom[b].x, v.x);
+    atomicAdd(&bMom[b].y, v.y);
+    pos[i] = make_float2(-1.f, -1.f);   // 빈 슬롯으로. 정리는 다음 압축이 한다
+    atomicAdd(eaten, 1);
+
+    // 비워진 자리를 적어 둔다. 나중에 천체가 부서지면 파편을 여기에 되돌려 놓는다 —
+    // 그러지 않으면 파편이 링 버퍼 앞쪽의 멀쩡한 가스를 덮어써서, 부서진 자리와 전혀 상관없는
+    // 곳에서 원반 한 조각이 통째로 사라진다.
+    const int s = atomicAdd(freeCount, 1);
+    if (s < freeCap) freeSlots[s] = i;
+    else             atomicSub(freeCount, 1);
+}
+
+// 천체 질량을 밀도 격자에 얹는다. 이게 있어야 커진 천체가 주변 가스를 더 세게 끌어당긴다 —
+// 없으면 천체는 가스의 중력만 받는 유령이 되어 원반 한가운데가 텅 비어도 아무 일이 안 일어난다.
+__global__ void kScatterBodies(const float2* bPos, const float* bMass, const int* bState,
+                               float* grid, int num, int G, int stride, int periodic) {
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= num || bState[b] != BODY_ALIVE) return;
+    const float m = bMass[b];
+    if (m <= 0.f) return;
+    const float2 p = bPos[b];
+    if (p.x < 0.f) return;
+    const float gx = p.x * G, gy = p.y * G;
+    const int ix = (int)floorf(gx), iy = (int)floorf(gy);
+    const float fx = gx - ix, fy = gy - iy;
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const int ox = k & 1, oy = (k >> 1) & 1;
+        int cx = ix + ox, cy = iy + oy;
+        const float w = (ox ? fx : 1.f - fx) * (oy ? fy : 1.f - fy);
+        if (periodic) { cx &= (G - 1); cy &= (G - 1); }
+        else { cx = min(max(cx, 0), G - 1); cy = min(max(cy, 0), G - 1); }
+        atomicAdd(&grid[cy * stride + cx], w * m);
+    }
+}
+
+// 천체끼리 부딪혔을 때 합쳐질지 부서질지 정한다.
+//
+//   탈출속도  v_esc = √(2 G M / R)   ← 그 중력을 뿌리치는 데 필요한 속도
+//   v_rel < v_esc  → 중력이 붙잡는다 → 합체
+//   v_rel ≥ v_esc  → 뿌리치고 흩어진다 → 둘 다 부서져 가스로
+//
+// 규칙은 이 한 줄뿐이고 「작으면 부서지고 크면 안 부서진다」 같은 조건은 넣지 않았다.
+// 무거울수록 탈출속도가 커져 웬만한 충돌로는 안 부서지는 것이 저절로 따라온다.
+__global__ void kBodyCollide(const float2* bPos, const float2* bVel, const float* bMass,
+                             int* bState, int* mergeTo, int num,
+                             float cell, float grabCells, float gm,
+                             int* mergeCnt, int* shatterCnt) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num || bState[i] != BODY_ALIVE) return;
+
+    const float2 pi = bPos[i], vi = bVel[i];
+    const float  mi = bMass[i];
+    const float  Ri = bodyRadiusOf(mi, cell, grabCells);
+
+    for (int j = 0; j < num; ++j) {
+        if (j == i || bState[j] != BODY_ALIVE) continue;
+        const float2 pj = bPos[j];
+        const float  mj = bMass[j];
+        const float  Rj = bodyRadiusOf(mj, cell, grabCells);
+        const float  dx = pj.x - pi.x, dy = pj.y - pi.y;
+        const float  Rs = Ri + Rj;
+        if (dx * dx + dy * dy > Rs * Rs) continue;
+
+        const float2 vj = bVel[j];
+        const float  rvx = vj.x - vi.x, rvy = vj.y - vi.y;
+        const float  vrel = sqrtf(rvx * rvx + rvy * rvy);
+        // gm 은 파티클 한 알의 중력 상수 몫(중력 세기 ÷ 총 파티클 수)이다.
+        const float  vesc = sqrtf(2.f * gm * (mi + mj) / fmaxf(Rs, 1e-6f));
+
+        if (vrel < vesc) {
+            // 합체 — 무거운 쪽이 남는다. 질량이 같으면 번호가 작은 쪽이 남아
+            // 둘이 서로를 먹겠다고 나서는 교착을 막는다.
+            const bool iWins = (mi > mj) || (mi == mj && i < j);
+            if (iWins && atomicCAS(&bState[j], BODY_ALIVE, BODY_MERGED) == BODY_ALIVE) {
+                mergeTo[j] = i;
+                atomicAdd(mergeCnt, 1);
+            }
+        } else {
+            // 파괴 — 뿌리칠 만큼 빠르면 양쪽 다 흩어진다
+            if (atomicCAS(&bState[i], BODY_ALIVE, BODY_SHATTER) == BODY_ALIVE)
+                atomicAdd(shatterCnt, 1);
+            if (atomicCAS(&bState[j], BODY_ALIVE, BODY_SHATTER) == BODY_ALIVE)
+                atomicAdd(shatterCnt, 1);
+            return;
+        }
+    }
+}
+
+// 합쳐지기로 정해진 천체의 질량과 운동량을 상대에게 넘긴다.
+__global__ void kBodyMerge(const float2* bVel, const float* bMass, const int* bState,
+                           const int* mergeTo, float* bGain, float2* bMom, int num) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num || bState[i] != BODY_MERGED) return;
+    const int t = mergeTo[i];
+    if (t < 0 || t >= num || bState[t] != BODY_ALIVE) return;   // 상대도 죽었으면 그냥 사라진다
+    const float  m = bMass[i];
+    const float2 v = bVel[i];
+    atomicAdd(&bGain[t], m);
+    atomicAdd(&bMom[t].x, v.x * m);
+    atomicAdd(&bMom[t].y, v.y * m);
+}
+
+// 한 천체가 흩뿌릴 수 있는 파편 수의 상한.
+// 별 하나가 부서지면 수만 알갱이가 나올 수 있는데, 그만큼 뿌리면 링 버퍼가 한 번에
+// 돌아 멀쩡한 가스를 통째로 덮어쓴다. 상한을 넘는 질량은 파편이 되지 못하고 사라진다.
+constexpr int MAX_SHARDS = 4096;
+
+// 부서진 천체를 가스 파티클로 되돌린다.
+// 파편은 천체 속도에 바깥으로 튀는 속도를 얹어 흩어진다 — 그래야 그 자리에서 다시 뭉치지 않고
+// 퍼졌다가 나중에 새 씨앗으로 모인다.
+__global__ void kShatter(const float2* bPos, const float2* bVel, const float* bMass,
+                         const int* bState,
+                         float2* pos, float2* vel, float* temp, unsigned char* isStar,
+                         const int* freeSlots, int* freeCount,
+                         int cap, int* ringCur, float cell, float grabCells, unsigned seed) {
+    const int b = blockIdx.y;
+    if (bState[b] != BODY_SHATTER) return;
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    const int m = (int)bMass[b];
+    if (k >= m || k >= MAX_SHARDS) return;
+
+    const float2 bp = bPos[b], bv = bVel[b];
+    const float  R  = bodyRadiusOf(bMass[b], cell, grabCells);
+    const unsigned s = seed + (unsigned)b * 7919u + (unsigned)k * 3u;
+    const float u1 = rnd01(s), u2 = rnd01(s + 1u), u3 = rnd01(s + 2u);
+
+    const float th = u2 * 6.2831853f;
+    const float r  = R * (0.3f + 0.7f * sqrtf(u1));
+    // 튀는 속도는 그 천체의 탈출속도 언저리로 준다 — 부서졌다는 것은 그만큼 뿌리쳤다는 뜻이다.
+    const float spread = R * 12.0f * (0.5f + u3);
+
+    // 먹혀서 비어 있는 자리를 먼저 쓰고, 다 썼으면 링 버퍼로 넘어간다.
+    const int fs = atomicSub(freeCount, 1) - 1;
+    const int slot = (fs >= 0) ? freeSlots[fs] : (atomicAdd(ringCur, 1) % cap);
+
+    pos[slot]  = make_float2(bp.x + r * cosf(th), bp.y + r * sinf(th));
+    vel[slot]  = make_float2(bv.x + cosf(th) * spread, bv.y + sinf(th) * spread);
+    temp[slot] = 0.35f;          // 충돌로 데워진 파편
+    isStar[slot] = 0;
+}
+
+// 파편 배분이 목록을 다 쓰고 음수로 내려간 것을 되돌린다(스레드 하나면 충분하다).
+__global__ void kClampCount(int* c, int cap) {
+    if (*c < 0)   *c = 0;
+    if (*c > cap) *c = cap;
+}
+
+// 위치가 화면 안에 있는 파티클만 살아 있다고 표시한다. 압축 전에 부른다.
+__global__ void kMarkAliveAll(const float2* pos, unsigned char* alive, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    alive[i] = (pos[i].x >= 0.f) ? 1 : 0;
+}
+
+// 이번 스텝에 먹은 것을 반영해 천체를 움직인다.
+//
+// 속도는 운동량 보존으로 정한다 — 흡수는 완전 비탄성 충돌이라 그렇게 해야 맞다.
+//   새 속도 = (기존 질량 × 기존 속도 + 들어온 운동량) ÷ 새 질량
+__global__ void kBodyIntegrate(const float2* accG, float2* bPos, float2* bVel,
+                               float* bMass, const float* bGain, const float2* bMom,
+                               const int* bState, int num, int G, int periodic, float dt) {
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= num || bState[b] != BODY_ALIVE) return;
+
+    const float mOld = bMass[b];
+    const float gain = bGain[b];
+    const float mNew = mOld + gain;
+    float2 v = bVel[b];
+
+    if (gain > 0.f && mNew > 0.f) {
+        const float2 mom = bMom[b];
+        v.x = (v.x * mOld + mom.x) / mNew;
+        v.y = (v.y * mOld + mom.y) / mNew;
+    }
+    bMass[b] = mNew;
+
+    float2 p = bPos[b];
+    const float2 a = sampleAcc(accG, p, G, periodic);
+    v.x += a.x * dt;  v.y += a.y * dt;
+    p.x += v.x * dt;  p.y += v.y * dt;
+
+    if (periodic) {
+        p.x -= floorf(p.x);  p.y -= floorf(p.y);
+    } else {
+        // 판 밖으로 나가면 가장자리에 세운다(파티클 적분과 같은 규칙).
+        if (p.x < 0.f) { p.x = 0.f; v.x = 0.f; }
+        if (p.x > 1.f) { p.x = 1.f; v.x = 0.f; }
+        if (p.y < 0.f) { p.y = 0.f; v.y = 0.f; }
+        if (p.y > 1.f) { p.y = 1.f; v.y = 0.f; }
+    }
+    bPos[b] = p;  bVel[b] = v;
+}
+
+// 이번 스텝에 부서지거나 합쳐진 슬롯을 비워 재활용할 수 있게 한다.
+__global__ void kBodyRetire(float2* bPos, float* bMass, int* bState, int* mergeTo, int num) {
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= num) return;
+    const int st = bState[b];
+    if (st != BODY_SHATTER && st != BODY_MERGED) return;
+    bPos[b]  = make_float2(-1.f, -1.f);
+    bMass[b] = 0.f;
+    mergeTo[b] = -1;
+    bState[b] = BODY_FREE;
+}
+
+// 천체를 화면에 그릴 형태로 옮긴다. 등급은 질량으로 가른다.
+__global__ void kPackBodies(const float2* bPos, const float* bMass, const int* bState,
+                            float* out, int num, float cell, float grabCells,
+                            float planetMass, float starMass, int* outCount) {
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= num || bState[b] != BODY_ALIVE) return;
+    const float m = bMass[b];
+    const float2 p = bPos[b];
+    if (p.x < 0.f) return;
+    const int slot = atomicAdd(outCount, 1);
+    if (slot >= MAX_BODIES) { atomicSub(outCount, 1); return; }
+    float* o = out + slot * 5;
+    o[0] = p.x;
+    o[1] = p.y;
+    o[2] = m;
+    o[3] = bodyRadiusOf(m, cell, grabCells);
+    o[4] = (m >= starMass) ? 2.f : ((m >= planetMass) ? 1.f : 0.f);
+}
+
 // 합계를 double 로 누적하기 위한 변환 어댑터.
 // 4096² 고립이면 패딩 격자가 6,700만 칸이라 float 누적으로는 상대오차가 0.3% 대까지
 // 벌어져 "질량 보존" 판정이 못 미더워진다(실측).
@@ -709,6 +1095,27 @@ struct Sim::Impl {
     int   *selNum = nullptr;   // 선택된 개수
     void  *selTmp = nullptr; size_t selTmpBytes = 0;
 
+    // 천체 — 가스가 뭉쳐 만들어진 덩어리
+    float2 *bPos = nullptr, *bVel = nullptr, *bMom = nullptr;
+    float  *bMass = nullptr, *bGain = nullptr;   // bGain 은 이번 스텝에 들어온 질량
+    int    *bState = nullptr, *bMergeTo = nullptr;
+    int    *bNum = nullptr;        // 지금까지 쓴 슬롯의 고수위(디바이스)
+    int    *bodyCell = nullptr;    // G×G — 각 칸을 차지한 천체 번호(-1 이면 없음)
+    int    *bCounters = nullptr;   // [0] 먹힌 파티클 · [1] 합체 · [2] 파괴 · [3] 화면 복사 개수
+    float  *bPack = nullptr;       // 화면용 (x, y, 질량, 반지름, 등급) × MAX_BODIES
+    int    *shardCursor = nullptr; // 파편을 뿌릴 파티클 슬롯 커서(빈 자리 목록이 떨어졌을 때)
+    // 먹혀서 비워진 파티클 자리 목록. 천체가 부서지면 파편을 여기에 되돌린다.
+    int    *freeSlots = nullptr, *freeCount = nullptr;
+    int    freeCap = 0;
+    int    hostBNum = 0;           // bNum 의 호스트 사본. 커널 실행 범위를 정하는 데 쓴다
+    int    eatenPending = 0;       // 먹혀서 빈 슬롯이 된 파티클 수(압축 시점 판단용)
+    BodyStats bstats;
+
+    // 죽은 슬롯이 이만큼 쌓이면 살아 있는 파티클을 앞으로 모은다.
+    // 매 스텝 모으면 1000만 개를 통째로 복사하느라 프레임 예산을 넘고, 아예 안 모으면
+    // 활성 개수 표시가 실제보다 커지고 링 커서가 살아 있는 파티클을 덮는다.
+    static constexpr int COMPACT_THRESHOLD = 200000;
+
     int  stride() const { return (cfg.boundary == Boundary::Isolated) ? allocG * 2 : allocG; }
     int  padCells() const { int s = stride(); return s * s; }
     bool periodic() const { return cfg.boundary == Boundary::Periodic; }
@@ -744,6 +1151,12 @@ struct Sim::Impl {
     float measureMaxSpeed();
     // 한 번의 적분(격자 가속도는 이미 만들어져 있다고 본다)
     void  integrateOnce(float dt);
+    // 천체를 전부 지우고 슬롯을 비운다.
+    void  clearBodies();
+    // 씨앗 → 흡수 → 충돌 → 파편 → 이동 을 한 번 돈다.
+    void  stepBodies(float dt);
+    // 먹혀서 생긴 빈 자리가 많이 쌓였으면 살아 있는 파티클을 앞으로 모은다.
+    void  compactParticles();
 };
 
 void Sim::Impl::releaseParticles() {
@@ -754,6 +1167,14 @@ void Sim::Impl::releaseParticles() {
     cudaFree(alive); cudaFree(selIdx); cudaFree(selNum); cudaFree(selTmp);
     cudaFree(isStar); cudaFree(isStar2); cudaFree(starCnt);
     isStar = nullptr; isStar2 = nullptr; starCnt = nullptr; starN = 0;
+    cudaFree(bPos); cudaFree(bVel); cudaFree(bMom); cudaFree(bMass); cudaFree(bGain);
+    cudaFree(bState); cudaFree(bMergeTo); cudaFree(bNum); cudaFree(bCounters);
+    cudaFree(bPack); cudaFree(shardCursor);
+    cudaFree(freeSlots); cudaFree(freeCount);
+    bPos = bVel = bMom = nullptr; bMass = bGain = nullptr; bPack = nullptr;
+    bState = bMergeTo = bNum = bCounters = shardCursor = nullptr;
+    freeSlots = freeCount = nullptr; freeCap = 0;
+    hostBNum = 0; eatenPending = 0; bstats = BodyStats{};
     pos = vel = pos2 = vel2 = nullptr; temp = temp2 = nullptr;
     key = keyOut = val = valOut = nullptr; sortTmp = nullptr; sortTmpBytes = 0;
     spdTmp = nullptr; spdOut = nullptr; spdTmpBytes = 0;
@@ -766,6 +1187,7 @@ void Sim::Impl::releaseGrid() {
     cudaFree(fieldNum); cudaFree(fieldOut);
     cudaFree(accG); cudaFree(green); cudaFree(rhoSpec); cudaFree(greenSpec);
     cudaFree(redTmp); cudaFree(redOut); cudaFree(cntOut);
+    cudaFree(bodyCell); bodyCell = nullptr;   // G×G 라 격자와 함께 산다
     rho = pot = prs = rhoCrop = green = nullptr; accG = nullptr;
     fieldNum = fieldOut = nullptr;
     rhoSpec = greenSpec = nullptr; redTmp = nullptr; redOut = nullptr; cntOut = nullptr;
@@ -868,6 +1290,26 @@ void Sim::Impl::allocate() {
     activeN = n;
     starN = 0;
 
+    // 천체 — 개수 상한이 고정이라 파티클 수·격자와 무관하게 늘 같은 크기다(총 100 KB 남짓).
+    CK(cudaMalloc(&bPos,   sizeof(float2) * MAX_BODIES));
+    CK(cudaMalloc(&bVel,   sizeof(float2) * MAX_BODIES));
+    CK(cudaMalloc(&bMom,   sizeof(float2) * MAX_BODIES));
+    CK(cudaMalloc(&bMass,  sizeof(float)  * MAX_BODIES));
+    CK(cudaMalloc(&bGain,  sizeof(float)  * MAX_BODIES));
+    CK(cudaMalloc(&bState, sizeof(int)    * MAX_BODIES));
+    CK(cudaMalloc(&bMergeTo, sizeof(int)  * MAX_BODIES));
+    CK(cudaMalloc(&bPack,  sizeof(float)  * MAX_BODIES * 5));
+    CK(cudaMalloc(&bNum,   sizeof(int)));
+    CK(cudaMalloc(&bCounters, sizeof(int) * 4));
+    CK(cudaMalloc(&shardCursor, sizeof(int)));
+    CK(cudaMalloc(&bodyCell, sizeof(int) * allocG * allocG));
+    // 빈 자리 목록은 파티클 수만큼 잡을 필요가 없다 — 한 스텝에 부서질 수 있는 양의 몇 배면
+    // 충분하고, 넘치는 만큼은 그냥 기록하지 않는다(다음 압축이 정리한다).
+    freeCap = (n < 65536) ? n : 65536;
+    CK(cudaMalloc(&freeSlots, sizeof(int) * (freeCap > 0 ? freeCap : 1)));
+    CK(cudaMalloc(&freeCount, sizeof(int)));
+    clearBodies();
+
     if (!evA) { cudaEventCreate(&evA); cudaEventCreate(&evB); }
     allocSoft = -1.f;   // 그린함수 재생성 강제
 }
@@ -950,6 +1392,126 @@ void Sim::Impl::integrateOnce(float dt) {
                                       cfg.blackHoleGM, cfg.blackHoleRs);
 }
 
+void Sim::Impl::clearBodies() {
+    if (!bState) return;
+    kFillInt<<<grid1(MAX_BODIES), BS>>>(bState, MAX_BODIES, BODY_FREE);
+    kFillInt<<<grid1(MAX_BODIES), BS>>>(bMergeTo, MAX_BODIES, -1);
+    kHideRange<<<grid1(MAX_BODIES), BS>>>(bPos, 0, MAX_BODIES);
+    CK(cudaMemset(bVel,  0, sizeof(float2) * MAX_BODIES));
+    CK(cudaMemset(bMom,  0, sizeof(float2) * MAX_BODIES));
+    CK(cudaMemset(bMass, 0, sizeof(float)  * MAX_BODIES));
+    CK(cudaMemset(bGain, 0, sizeof(float)  * MAX_BODIES));
+    CK(cudaMemset(bNum,      0, sizeof(int)));
+    CK(cudaMemset(bCounters, 0, sizeof(int) * 4));
+    CK(cudaMemset(shardCursor, 0, sizeof(int)));
+    CK(cudaMemset(freeCount,   0, sizeof(int)));
+    hostBNum = 0;
+    eatenPending = 0;
+    bstats = BodyStats{};
+}
+
+// 씨앗 → 흡수 → 충돌 → 파편 → 이동 을 한 번 돈다.
+//
+// 실행 범위(hostBNum)는 **지난 스텝에 읽어 둔 값**을 쓴다. 이번 스텝에 갓 태어난 씨앗은
+// 질량이 0 이라 충돌에도 중력에도 기여하지 않으므로, 한 스텝 늦게 참여시켜도 결과가 같다.
+// 그 대신 스텝당 디바이스→호스트 복사가 한 번으로 줄어든다.
+void Sim::Impl::stepBodies(float dt) {
+    if (!bState || allocN <= 0) return;
+    const int G = allocG, S = stride(), per = periodic() ? 1 : 0;
+    const float cell = 1.0f / (float)G;
+    const float grab = cfg.bodyGrabCells;
+    const int   num  = hostBNum;
+
+    // 이번 스텝에 들어온 질량·운동량을 담을 자리를 비운다.
+    CK(cudaMemset(bGain, 0, sizeof(float)  * MAX_BODIES));
+    CK(cudaMemset(bMom,  0, sizeof(float2) * MAX_BODIES));
+
+    // (1) 어느 칸을 어느 천체가 차지했는지 적는다
+    kFillInt<<<grid1(G * G), BS>>>(bodyCell, G * G, -1);
+    if (num > 0)
+        kMarkBodyCell<<<grid1(num), BS>>>(bPos, bMass, bState, bodyCell, num, G, per, cell, grab);
+
+    // (2) 빽빽해진 자리에 새 천체를 만든다
+    {
+        dim3 b(16, 16), g((G + 15) / 16, (G + 15) / 16);
+        kSeedBodies<<<g, b>>>(rho, bodyCell, bPos, bVel, bMass, bMom, bState, bNum,
+                              G, S, per, cfg.bodySeedDensity, invMeanRho());
+    }
+
+    // gm 은 파티클 한 알이 갖는 중력 상수 몫 — 탈출속도를 재는 데 쓴다.
+    const float gm = cfg.gravity / (float)allocN;
+
+    // (3) 반지름 안의 가스 중 붙잡을 수 있는 것을 먹는다
+    if (num > 0)
+        kAccrete<<<grid1(allocN), BS>>>(pos, vel, bodyCell, bPos, bVel, bMass, bState,
+                                        bGain, bMom, allocN, G, per, cell, grab, gm,
+                                        bCounters, freeSlots, freeCount, freeCap);
+
+    if (num > 0) {
+        // (4) 부딪힌 천체를 합치거나 부순다
+        kBodyCollide<<<grid1(num), BS>>>(bPos, bVel, bMass, bState, bMergeTo, num,
+                                         cell, grab, gm, bCounters + 1, bCounters + 2);
+        kBodyMerge<<<grid1(num), BS>>>(bVel, bMass, bState, bMergeTo, bGain, bMom, num);
+
+        // (5) 부서진 천체를 가스로 되돌린다.
+        //     대부분의 스텝에는 부서진 것이 없어 블록이 곧바로 빠져나온다.
+        {
+            dim3 g(MAX_SHARDS / BS, num);
+            kShatter<<<g, BS>>>(bPos, bVel, bMass, bState, pos, vel, temp, isStar,
+                                freeSlots, freeCount, allocN, shardCursor, cell, grab,
+                                (unsigned)(steps * 2654435761u + 12345u));
+        }
+        kClampCount<<<1, 1>>>(freeCount, freeCap);
+
+        // (6) 먹은 것을 반영해 움직이고, 죽은 슬롯을 비운다
+        kBodyIntegrate<<<grid1(num), BS>>>(accG, bPos, bVel, bMass, bGain, bMom, bState,
+                                           num, G, per, dt);
+        kBodyRetire<<<grid1(num), BS>>>(bPos, bMass, bState, bMergeTo, num);
+    }
+
+    // (7) 다음 스텝이 쓸 값을 읽어 온다
+    int counts[4] = { 0, 0, 0, 0 };
+    CK(cudaMemcpy(counts, bCounters, sizeof(int) * 4, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(&hostBNum, bNum, sizeof(int), cudaMemcpyDeviceToHost));
+    if (hostBNum > MAX_BODIES) hostBNum = MAX_BODIES;
+    eatenPending    = counts[0];
+    bstats.merges   = counts[1];
+    bstats.shatters = counts[2];
+}
+
+// 먹혀서 생긴 빈 자리를 걷어내고 살아 있는 파티클을 앞으로 모은다.
+// 「살아 있는 것은 항상 [0, activeN)」 이라는 불변식을 되돌리는 자리라, 이걸 안 하면
+// 활성 개수 표시가 계속 부풀고 형태 추가가 멀쩡한 파티클을 덮는다.
+void Sim::Impl::compactParticles() {
+    const int n = allocN;
+    if (n <= 0 || !alive) return;
+
+    kMarkAliveAll<<<grid1(n), BS>>>(pos, alive, n);
+    size_t bytes = selTmpBytes;
+    thrust::counting_iterator<int> ids(0);
+    CK(cub::DeviceSelect::Flagged(selTmp, bytes, ids, alive, selIdx, selNum, n));
+    if (g_failed) return;
+
+    int kept = 0;
+    CK(cudaMemcpy(&kept, selNum, sizeof(int), cudaMemcpyDeviceToHost));
+    if (kept > 0)
+        kCompact<<<grid1(kept), BS>>>(pos, vel, temp, isStar,
+                                      pos2, vel2, temp2, isStar2, selIdx, kept);
+    std::swap(pos, pos2); std::swap(vel, vel2);
+    std::swap(temp, temp2); std::swap(isStar, isStar2);
+    if (kept < n) {
+        kHideRange<<<grid1(n - kept), BS>>>(pos, kept, n - kept);
+        CK(cudaMemset(isStar + kept, 0, sizeof(unsigned char) * (n - kept)));
+    }
+    activeN = kept;
+    ringCursor = kept % n;
+
+    // 빈 자리 목록과 누적 카운터를 함께 비운다 — 걷어낸 뒤에는 가리키던 자리가 전부 어긋난다.
+    CK(cudaMemset(freeCount, 0, sizeof(int)));
+    CK(cudaMemset(bCounters, 0, sizeof(int)));
+    eatenPending = 0;
+}
+
 // ---------------------------------------------------------------------------
 Sim::Sim() : impl_(new Impl()) {}
 Sim::~Sim() {
@@ -1006,6 +1568,9 @@ size_t gridBytesFor(int G, Boundary b) {
     // cuFFT 계획이 쓰는 내부 작업버퍼. 실측 없이 정확히 알 수 없어 스펙트럼 크기만큼 잡아 둔다 —
     // 모자라게 잡으면 "들어간다"고 판정한 뒤 계획 생성에서 실패한다.
     bytes += spec;
+    // 천체가 어느 칸을 차지했는지 적는 지도(G×G int). 천체 자체의 버퍼는 개수 상한이
+    // 고정이라 100 KB 남짓이고 여기 섞을 만큼 크지 않다.
+    bytes += (size_t)G * G * sizeof(int);
     return bytes;
 }
 } // namespace
@@ -1104,13 +1669,15 @@ void Sim::reset() {
     d->activeN = (d->cfg.preset == Preset::Empty) ? 0 : n;
     // 새 장면이므로 형태를 넣을 자리도 처음으로 되돌린다.
     d->ringCursor = d->activeN % (n > 0 ? n : 1);
-    // 리셋하면 별도 사라진다
+    // 리셋하면 별도 천체도 사라진다
     CK(cudaMemset(d->isStar, 0, sizeof(unsigned char) * n));
     d->starN = 0;
+    d->clearBodies();
     CK(cudaDeviceSynchronize());
 
     // 회전 프리셋은 중력을 한 번 풀어 그 세기에 맞는 궤도 속도를 넣는다.
-    if (d->cfg.preset == Preset::SpiralDisk || d->cfg.preset == Preset::TidalPair) {
+    if (d->cfg.preset == Preset::SpiralDisk || d->cfg.preset == Preset::TidalPair
+        || d->cfg.preset == Preset::Accretion) {
         kClearF<<<grid1(S * S), BS>>>(d->rho, S * S);
         kScatter<<<grid1(n), BS>>>(d->pos, d->rho, n, G, S, d->periodic() ? 1 : 0);
         d->solveGravity();
@@ -1118,7 +1685,11 @@ void Sim::reset() {
         const float potScale = d->potentialScale();
         kGridAccel<<<g, b>>>(d->pot, d->prs, d->rho, d->accG, G, S, potScale, 0,
                              d->periodic() ? 1 : 0);
-        const float fudge = (d->cfg.preset == Preset::TidalPair) ? 0.90f : 0.97f;
+        // 강착 원반은 궤도 속도를 일부러 조금 모자라게 준다. 딱 맞으면 영원히 돌기만 하고
+        // 아무것도 뭉치지 않는다 — 모자라면 안쪽으로 서서히 감기면서 밀도가 오른다.
+        float fudge = 0.97f;
+        if (d->cfg.preset == Preset::TidalPair)      fudge = 0.90f;
+        else if (d->cfg.preset == Preset::Accretion) fudge = 0.88f;
         kSetOrbit<<<grid1(n), BS>>>(d->accG, d->pos, d->vel, n, G,
                                     d->periodic() ? 1 : 0, (int)d->cfg.preset, fudge);
         CK(cudaDeviceSynchronize());
@@ -1163,9 +1734,14 @@ void Sim::step() {
         }
     }
 
-    // (2) 산란
+    // (2) 산란 — 가스에 이어 천체 질량도 같은 격자에 얹는다.
+    // 천체를 안 얹으면 천체는 남의 중력만 받는 유령이 되어, 원반 한가운데가 다 먹혀 비어도
+    // 주변 가스가 그 자리로 끌려오지 않는다.
     kClearF<<<grid1(S * S), BS>>>(d->rho, S * S);
     kScatter<<<grid1(n), BS>>>(d->pos, d->rho, n, G, S, per);
+    if (d->cfg.bodiesEnabled && d->hostBNum > 0)
+        kScatterBodies<<<grid1(d->hostBNum), BS>>>(d->bPos, d->bMass, d->bState,
+                                                   d->rho, d->hostBNum, G, S, per);
 
     // (3) 중력
     d->solveGravity();
@@ -1244,6 +1820,13 @@ void Sim::step() {
         dtUse = dtWanted / (float)sub;
         if (dtUse > dtLimit) dtUse = dtLimit;     // 상한에 걸렸으면 한계값으로 자른다
     }
+    // (6-b) 천체 — 씨앗·흡수·충돌·파편·이동. 파티클을 움직이기 전에 돈다.
+    //       흡수가 파티클을 지우므로, 지워진 것을 그대로 적분해 봐야 헛일이다.
+    if (d->cfg.bodiesEnabled) {
+        d->stepBodies(dtUse);
+        if (d->eatenPending >= Impl::COMPACT_THRESHOLD) d->compactParticles();
+    }
+
     for (int s = 0; s < sub; ++s) {
         if (s > 0) {
             // 두 번째 서브스텝부터는 위치가 바뀌었으니 격자·중력을 다시 푼다.
@@ -1335,6 +1918,59 @@ void Sim::Impl::refreshAccel() {
 
 int Sim::activeCount() const { return impl_->activeN; }
 int Sim::starCount() const   { return impl_->starN; }
+
+BodyStats Sim::bodyStats() const { return impl_->bstats; }
+
+// 천체를 화면에 그릴 형태로 호스트에 옮긴다.
+// 등급 집계도 여기서 함께 한다 — 어차피 한 번 가져온 배열을 훑는 김에 세는 것이 싸다.
+int Sim::readBodies(BodyView* out, int maxCount) const {
+    Impl* d = impl_;
+    if (!out || maxCount <= 0 || !d->bPack || d->hostBNum <= 0 || g_failed) {
+        d->bstats.count = d->bstats.asteroids = d->bstats.planets = d->bstats.stars = 0;
+        d->bstats.heaviest = 0.f;
+        return 0;
+    }
+    CK(cudaMemset(d->bCounters + 3, 0, sizeof(int)));
+    // 등급 경계는 비율로 적혀 있다 — 여기서 실제 알갱이 수로 바꾼다.
+    const float nAll = (float)(d->allocN > 0 ? d->allocN : 1);
+    kPackBodies<<<grid1(d->hostBNum), BS>>>(d->bPos, d->bMass, d->bState, d->bPack,
+                                            d->hostBNum, 1.0f / (float)d->allocG,
+                                            d->cfg.bodyGrabCells,
+                                            d->cfg.bodyPlanetFrac * nAll,
+                                            d->cfg.bodyStarFrac * nAll,
+                                            d->bCounters + 3);
+    int num = 0;
+    CK(cudaMemcpy(&num, d->bCounters + 3, sizeof(int), cudaMemcpyDeviceToHost));
+    if (num <= 0 || g_failed) {
+        d->bstats.count = d->bstats.asteroids = d->bstats.planets = d->bstats.stars = 0;
+        d->bstats.heaviest = 0.f;
+        return 0;
+    }
+    if (num > MAX_BODIES) num = MAX_BODIES;
+
+    static float host[MAX_BODIES * 5];
+    CK(cudaMemcpy(host, d->bPack, sizeof(float) * num * 5, cudaMemcpyDeviceToHost));
+
+    BodyStats st{};
+    st.merges = d->bstats.merges;
+    st.shatters = d->bstats.shatters;
+    const int put = (num < maxCount) ? num : maxCount;
+    for (int i = 0; i < num; ++i) {
+        const float* o = host + i * 5;
+        const int grade = (int)o[4];
+        ++st.count;
+        if (grade == 2)      ++st.stars;
+        else if (grade == 1) ++st.planets;
+        else                 ++st.asteroids;
+        if (o[2] > st.heaviest) st.heaviest = o[2];
+        if (i < put) {
+            out[i].x = o[0]; out[i].y = o[1];
+            out[i].mass = o[2]; out[i].radius = o[3]; out[i].grade = grade;
+        }
+    }
+    d->bstats = st;
+    return put;
+}
 
 int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, bool autoOrbit) {
     Impl* d = impl_;

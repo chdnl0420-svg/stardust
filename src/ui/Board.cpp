@@ -73,7 +73,7 @@ void DrawBoard(App& app, bool& boardOpen) {
     // ---------------- 장면 ----------------
     Title("장면");
     struct Scene { Preset p; const char* name; const char* help; };
-    const Scene scenes[6] = {
+    const Scene scenes[7] = {
         { Preset::SpiralDisk,  "나선 은하",   "은하 하나가 돌면서 나선 팔을 만듭니다." },
         { Preset::TidalPair,   "은하 충돌",   "은하 둘이 스치며 긴 꼬리를 남깁니다." },
         { Preset::HeadOnShock, "정면 충돌",   "가스 덩어리 둘이 부딪혀 달아오릅니다. 온도로 보면 잘 보입니다." },
@@ -83,9 +83,15 @@ void DrawBoard(App& app, bool& boardOpen) {
           "화면의 세 원은 왼쪽부터 지평선(들어가면 못 나옴) · 광자 구면(원궤도 속도가 광속이 되는 곳) · "
           "최소 안정 궤도입니다. 마지막 원 안쪽에는 안정된 궤도가 아예 없어서 나선을 그리며 빨려 듭니다.\n\n"
           "이 셋은 따로 넣은 규칙이 아니라 곡률 항 하나에서 저절로 나옵니다." },
+        { Preset::Accretion,   "천체 만들기",
+          "가스가 뭉쳐 천체가 되고, 그 천체가 주변 가스를 먹으며 자랍니다. "
+          "많이 먹을수록 소행성에서 행성으로, 행성에서 별로 커집니다.\n\n"
+          "천체끼리 부딪히면 속도로 갈립니다. 느리면 서로의 중력이 붙잡아 합쳐지고, "
+          "빠르면 뿌리치고 부서져 가스로 되돌아갑니다. 흩어진 파편은 다시 뭉쳐 새 천체가 됩니다.\n\n"
+          "부서질지 합쳐질지는 탈출 속도 하나로 정해집니다 — 따로 넣은 규칙이 아닙니다." },
         { Preset::Empty,       "빈 우주",     "아무것도 없습니다. 아래 모양을 골라 화면을 클릭해 채우세요." },
     };
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         const bool sel = (app.cfg.preset == scenes[i].p);
         if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.17f, 0.44f, 0.62f, 1.0f));
         if (ImGui::Button(scenes[i].name, ImVec2(half, 0))) {
