@@ -55,12 +55,13 @@ void DrawHud(const App& app) {
     const float dtWanted = 0.0016f * app.cfg.timeScale;
     if (t.dtUsed > 0.0f && t.dtUsed < dtWanted * 0.99f) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
-        ImGui::Text("CFL 로 간격 축소 %.0f%% (최대속력 %.2f)",
+        // HUD 는 입력을 안 받아 마우스를 올려도 설명이 안 뜬다 — 문장 자체를 알아볼 수 있게 쓴다.
+        ImGui::Text("빨라서 시간을 %.0f%% 잘게 쪼개는 중 (최고 속도 %.2f)",
                     100.0f * (1.0f - t.dtUsed / dtWanted), t.maxSpeed);
         ImGui::PopStyleColor();
     }
     if (app.stepsLastFrame > 1)
-        ImGui::TextDisabled("프레임당 스텝 %d회", app.stepsLastFrame);
+        ImGui::TextDisabled("화면 한 장에 %d번 계산 (배속)", app.stepsLastFrame);
 
     if (!app.running) {
         ImGui::Separator();

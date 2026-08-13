@@ -480,6 +480,50 @@ static void testTimeScaleNoDoubleApply() {
           "배속을 올려도 시간 간격은 그대로다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 15. 같은 요청을 반복해도 버퍼를 다시 잡지 않는다.
+//
+//     앱은 매 프레임 설정을 코어에 넘긴다. 그때 남은 그래픽 메모리를 재할당 조건에 넣으면,
+//     그 값이 다른 프로그램 때문에 오르내리는 탓에 같은 요청인데도 깎인 결과가 흔들려
+//     수 GB 짜리 버퍼를 초당 수십 번 해제하고 다시 잡는다.
+//     실측(2026-08-13): 파티클을 3000만으로 올린 뒤 시스템이 재부팅됐다
+//     (BugCheck 0xD1 DRIVER_IRQL_NOT_LESS_OR_EQUAL / nvlddmkm.sys, GPU 응답없음 이벤트는 없었다).
+//
+//     버퍼를 다시 잡으면 초기조건도 다시 만들어져 경과 시간이 0 으로 돌아간다 — 그것으로 판정한다.
+// ---------------------------------------------------------------------------
+static void testNoReallocOnSameRequest() {
+    printf("\n[15] 같은 설정을 반복해 넘겨도 버퍼를 다시 잡지 않는다\n");
+    Sim sim;
+    SimConfig cfg;
+    cfg.particleCount = 500000;
+    cfg.gridSize = 256;
+    cfg.preset = Preset::SpiralDisk;
+    sim.init(cfg);
+    for (int i = 0; i < 50; ++i) sim.step();
+
+    const double tBefore = sim.simTime();
+    const int nBefore = sim.activeCount();
+
+    // 매 프레임 동기화를 흉내낸다 — 200번 같은 설정을 넘긴다.
+    for (int i = 0; i < 200; ++i) sim.reconfigure(cfg);
+    const double tAfterSame = sim.simTime();
+
+    // 요청이 실제로 바뀌면 그때는 다시 잡아야 한다.
+    SimConfig bigger = cfg;
+    bigger.particleCount = 700000;
+    sim.reconfigure(bigger);
+    const double tAfterChange = sim.simTime();
+    const int nAfterChange = sim.activeCount();
+
+    char buf[240];
+    snprintf(buf, sizeof(buf),
+             "200회 반복 후 simTime=%.6f (전 %.6f) / 요청 변경 후 simTime=%.6f, 파티클 %d -> %d",
+             tAfterSame, tBefore, tAfterChange, nBefore, nAfterChange);
+    check(tBefore > 0.0 && tAfterSame == tBefore          // 같은 요청 → 그대로
+          && tAfterChange == 0.0 && nAfterChange == 700000, // 바뀐 요청 → 다시 잡고 초기화
+          "같은 요청은 그대로 두고 바뀐 요청만 다시 잡는다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -502,6 +546,7 @@ int main() {
     testStarBookkeeping();
     testPeriodicSoftening();
     testTimeScaleNoDoubleApply();
+    testNoReallocOnSameRequest();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

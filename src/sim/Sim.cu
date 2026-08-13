@@ -608,6 +608,16 @@ struct Sim::Impl {
     GravityLaw allocLaw = GravityLaw::InverseSquare;
     float allocSoft = -1.f;
 
+    // 마지막으로 **요청받은** 값. 실제로 잡은 것(allocN 등)과 다를 수 있다 — VRAM 이 모자라
+    // 깎였을 때가 그렇다. 재할당 여부는 이 요청이 바뀌었는지로만 판정한다.
+    //
+    // 왜 요청 기준인가: 남은 VRAM 은 다른 프로그램 때문에 매 순간 오르내린다. 그 값을 재할당
+    // 조건에 넣으면 요청이 그대로인데도 깎인 결과가 프레임마다 흔들려, 수 GB 짜리 버퍼를
+    // 초당 수십 번 해제하고 다시 잡는다. 그래픽 드라이버가 그것을 버티지 못하고 죽는다
+    // (2026-08-13 실측: 파티클 3000만으로 올린 뒤 시스템이 재부팅됨 — BugCheck 0xD1 / nvlddmkm.sys).
+    int requestedN = -1, requestedG = -1;
+    Boundary requestedBoundary = Boundary::Isolated;
+
     cudaEvent_t evA = nullptr, evB = nullptr;
 
     // 속도 리덕션용 (CFL)
@@ -930,8 +940,11 @@ size_t Sim::estimateBytes(int particleCount, int gridSize, Boundary boundary) {
 
 int Sim::maxParticlesFor(int gridSize, Boundary boundary, size_t freeBytes) {
     const size_t grid = gridBytesFor(gridSize, boundary);
-    // cuFFT 내부 작업버퍼와 단편화를 감안해 가용량의 80%만 쓴다.
-    const size_t budget = (size_t)(freeBytes * 0.80);
+    // 가용량을 다 쓰지 않는다. 남겨 두는 몫은 cuFFT 내부 작업버퍼, 메모리 단편화,
+    // 그리고 **이 앱이 도는 동안 다른 프로그램이 새로 요구하는 그래픽 메모리**를 위한 것이다.
+    // 꽉 채워 잡으면 다른 프로그램이 메모리를 달라고 할 때 드라이버가 우리 것을 밀어내면서
+    // 불안정해진다. 80% 에서 65% 로 낮췄다(2026-08-13 드라이버 크래시 이후).
+    const size_t budget = (size_t)(freeBytes * 0.65);
     if (budget <= grid) return 0;
     size_t n = (budget - grid) / kBytesPerParticle;
     if (n > 200000000ull) n = 200000000ull;   // 상한 2억
@@ -961,18 +974,46 @@ void clampToVram(SimConfig& cfg, int currentAllocN) {
 void Sim::init(const SimConfig& cfg) {
     impl_->cfg = cfg;
     clampToVram(impl_->cfg, 0);
+    // 요청은 클램프 전 값으로 기억한다 — reconfigure 가 이 값과 견줘 재할당 여부를 정한다.
+    impl_->requestedN        = cfg.particleCount;
+    impl_->requestedG        = cfg.gridSize;
+    impl_->requestedBoundary = cfg.boundary;
     impl_->allocate();
     reset();
 }
 
 void Sim::reconfigure(const SimConfig& cfg) {
     Impl* d = impl_;
+
+    // 버퍼를 다시 잡을지는 **요청이 바뀌었는지**로만 판정한다.
+    // 남은 VRAM 은 다른 프로그램 때문에 계속 변하므로, 그것을 조건에 넣으면 같은 요청에도
+    // 깎인 결과가 흔들려 대용량 버퍼를 매 프레임 재할당하게 된다(위 requestedN 주석 참조).
+    const bool sameRequest = (cfg.particleCount == d->requestedN)
+                          && (cfg.gridSize     == d->requestedG)
+                          && (cfg.boundary     == d->requestedBoundary);
+
+    if (sameRequest) {
+        // 재할당과 무관한 값(중력·압력·배속 등)만 갈아 끼운다.
+        // 파티클 수·격자·경계는 실제로 잡아 둔 것을 유지해야 계산과 버퍼가 어긋나지 않는다.
+        SimConfig next = cfg;
+        next.particleCount = d->allocN;
+        next.gridSize      = d->allocG;
+        next.boundary      = d->allocBoundary;
+        d->cfg = next;
+        return;
+    }
+
     SimConfig next = cfg;
     clampToVram(next, d->allocN);
     const bool needRealloc = (next.particleCount != d->allocN)
                           || (next.gridSize != d->allocG)
                           || (next.boundary != d->allocBoundary);
     d->cfg = next;
+    // 요청은 클램프 **전** 값으로 기억한다. 클램프 후 값을 기억하면, 다음 프레임에 같은 요청이
+    // 들어왔을 때 "바뀌었다"고 판정해 또 재할당한다.
+    d->requestedN        = cfg.particleCount;
+    d->requestedG        = cfg.gridSize;
+    d->requestedBoundary = cfg.boundary;
     if (needRealloc) { d->allocate(); reset(); }
 }
 
