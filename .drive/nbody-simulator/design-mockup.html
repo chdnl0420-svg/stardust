@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nbody-simulator — UI 시안 (동작 프로토타입)</title>
+<style>
+  :root{
+    --bg:#141416; --view:#000; --panel:#1f1f23; --panel2:#26262b;
+    --widget:#33333a; --widget-h:#3d3d46; --accent:#4a9eda; --accent-d:#2b6f9e;
+    --text:#d6d6da; --text-dim:#8a8a93; --line:#34343c;
+    --ok:#5ec27a; --warn:#e0a34a; --bad:#e06a5a;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:"Pretendard","Noto Sans KR","Segoe UI",system-ui,sans-serif;
+    font-size:12px; overflow:hidden;
+  }
+  .app{display:flex; height:100vh; width:100vw;}
+
+  .view{position:relative; flex:1; background:var(--view); overflow:hidden;}
+  #sim{display:block; width:100%; height:100%; cursor:crosshair;}
+
+  .hud{
+    position:absolute; top:10px; left:12px;
+    background:rgba(15,15,18,.72); border:1px solid var(--line); border-radius:6px;
+    padding:8px 11px; font-family:"JetBrains Mono",Consolas,monospace; font-size:11px;
+    line-height:1.65; pointer-events:none; backdrop-filter:blur(3px); min-width:214px;
+  }
+  .hud b{color:var(--accent); font-weight:600;}
+  .hud .dim{color:var(--text-dim);}
+  .hud .big{font-size:15px; color:var(--ok); font-weight:600;}
+  .hud.hide{display:none;}
+
+  .toolbar{
+    position:absolute; left:50%; bottom:14px; transform:translateX(-50%);
+    display:flex; gap:4px; background:rgba(20,20,24,.86);
+    border:1px solid var(--line); border-radius:8px; padding:5px; backdrop-filter:blur(3px);
+  }
+  .tool{
+    width:44px; height:38px; border:1px solid transparent; border-radius:5px;
+    background:var(--widget); color:var(--text); cursor:pointer;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; font-size:9px;
+  }
+  .tool span{font-size:15px; line-height:1;}
+  .tool:hover{background:var(--widget-h);}
+  .tool.on{background:var(--accent-d); border-color:var(--accent);}
+
+  .board{
+    width:306px; flex:0 0 306px; background:var(--panel);
+    border-left:1px solid var(--line); display:flex; flex-direction:column;
+    transition:margin-right .18s ease;
+  }
+  .board.hidden{margin-right:-306px;}
+  .board-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:9px 11px; border-bottom:1px solid var(--line); background:var(--panel2);
+  }
+  .board-head h1{font-size:12px; font-weight:600;}
+  .board-head .ver{font-size:10px; color:var(--text-dim);}
+  .board-body{flex:1; overflow-y:auto; padding:4px 0 24px;}
+  .board-body::-webkit-scrollbar{width:9px;}
+  .board-body::-webkit-scrollbar-thumb{background:#3a3a42; border-radius:5px;}
+
+  .sec{border-bottom:1px solid #2a2a31;}
+  .sec-h{
+    display:flex; align-items:center; gap:6px; padding:7px 11px; cursor:pointer;
+    user-select:none; font-weight:600; font-size:11.5px; color:#e2e2e6;
+  }
+  .sec-h:hover{background:var(--panel2);}
+  .sec-h .arw{color:var(--text-dim); font-size:9px; width:9px; transition:transform .15s;}
+  .sec.closed .arw{transform:rotate(-90deg);}
+  .sec-c{padding:2px 11px 10px;}
+  .sec.closed .sec-c{display:none;}
+
+  .row{display:flex; align-items:center; gap:7px; margin:5px 0; min-height:20px;}
+  .row label{flex:0 0 82px; color:var(--text-dim); font-size:11px;}
+  .row .val{
+    flex:0 0 58px; text-align:right; font-family:"JetBrains Mono",Consolas,monospace;
+    font-size:10.5px; color:var(--text); white-space:nowrap;
+  }
+  input[type=range]{flex:1; -webkit-appearance:none; height:4px; border-radius:2px; background:var(--widget); outline:none;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:11px; height:11px; border-radius:50%; background:var(--accent); cursor:pointer;}
+  select{flex:1; background:var(--widget); color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 5px; font-size:11px; font-family:inherit;}
+  .chk{display:flex; align-items:center; gap:7px; margin:6px 0; cursor:pointer; user-select:none;}
+  .chk .box{width:14px; height:14px; border-radius:3px; background:var(--widget); border:1px solid #4a4a54; display:flex; align-items:center; justify-content:center; font-size:10px; color:#fff;}
+  .chk.on .box{background:var(--accent); border-color:var(--accent);}
+  .chk span.t{font-size:11.5px;}
+  .chk .hint{margin-left:auto; font-size:10px; color:var(--text-dim);}
+  .chk.dis{opacity:.42; pointer-events:none;}
+
+  .btns{display:flex; gap:4px; flex-wrap:wrap; margin-top:4px;}
+  .btn{background:var(--widget); border:1px solid var(--line); border-radius:4px; color:var(--text); padding:5px 8px; font-size:11px; cursor:pointer; font-family:inherit;}
+  .btn:hover{background:var(--widget-h);}
+  .btn.pri{background:var(--accent-d); border-color:var(--accent);}
+  .btn.wide{flex:1;}
+  .btn.rec{background:#7a2a2a; border-color:#a04040;}
+
+  .preset{display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:3px;}
+  .preset .btn{text-align:left; padding:6px 8px; line-height:1.35;}
+  .preset .btn small{display:block; color:var(--text-dim); font-size:9.5px;}
+  .preset .btn.on{background:var(--accent-d); border-color:var(--accent);}
+  .preset .btn.on small{color:#cfe6f7;}
+
+  .perf{font-family:"JetBrains Mono",Consolas,monospace; font-size:10.5px; line-height:1.75;}
+  .perf .bar{height:6px; border-radius:3px; background:var(--widget); margin:3px 0 7px; overflow:hidden; display:flex;}
+  .perf .bar i{display:block; height:100%;}
+  .perf .k{color:var(--text-dim);}
+  .legend{display:flex; gap:9px; flex-wrap:wrap; font-size:9.5px; color:var(--text-dim); margin-top:2px;}
+  .legend i{display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:3px; vertical-align:-1px;}
+
+  .note{font-size:10px; color:var(--text-dim); line-height:1.55; margin-top:6px; padding:6px 7px; background:#1a1a1e; border-left:2px solid var(--accent-d); border-radius:0 4px 4px 0;}
+  .note.warn{border-left-color:var(--warn);}
+
+  .fab{position:absolute; top:10px; right:12px; z-index:5; background:rgba(20,20,24,.86); border:1px solid var(--line); border-radius:6px; color:var(--text); padding:6px 10px; cursor:pointer; font-size:11px; font-family:inherit;}
+  .fab:hover{background:var(--widget-h);}
+
+  .banner{
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    background:rgba(20,20,24,.94); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; text-align:center; font-size:12px; line-height:1.7; max-width:460px;
+  }
+  .banner b{color:var(--bad);}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <main class="view">
+    <canvas id="sim"></canvas>
+
+    <div class="hud" id="hud">
+      <div><span class="big" id="hFps">--</span> <span class="dim">FPS</span> &nbsp; <span id="hMs">--</span> ms/frame</div>
+      <div class="dim">──────────────────────</div>
+      <div><span class="dim">파티클</span> <b id="hN">-</b></div>
+      <div><span class="dim">격자</span> <b id="hG">-</b> <span class="dim" id="hB"></span></div>
+      <div><span class="dim">시각</span> <b id="hT">0.000</b> <span class="dim" id="hA"></span></div>
+      <div class="dim">──────────────────────</div>
+      <div><span class="dim">중력반복</span> <span id="hJac">-</span> &nbsp; <span class="dim">압력</span> <span id="hPr">-</span></div>
+      <div><span class="dim">최대밀도</span> <span id="hRho">-</span></div>
+    </div>
+
+    <div class="banner" id="banner" style="display:none"></div>
+
+    <button class="fab" id="fab" style="display:none">설정 보드 열기 ▸</button>
+
+    <div class="toolbar">
+      <button class="tool on" data-tool="0"><span>🖐</span>카메라</button>
+      <button class="tool" data-tool="1"><span>💨</span>뿌리기</button>
+      <button class="tool" data-tool="2"><span>🕳</span>중력우물</button>
+      <button class="tool" data-tool="3"><span>🌀</span>형태추가</button>
+      <button class="tool" data-tool="4"><span>🧽</span>지우개</button>
+    </div>
+  </main>
+
+  <aside class="board" id="board">
+    <div class="board-head">
+      <h1>설정 보드</h1>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span class="ver" id="verTag">WebGPU 시안</span>
+        <button class="btn" id="close" style="padding:2px 7px;">◂</button>
+      </div>
+    </div>
+
+    <div class="board-body">
+
+      <section class="sec">
+        <div class="sec-h"><span class="arw">▼</span>시뮬레이션</div>
+        <div class="sec-c">
+          <div class="btns">
+            <button class="btn pri wide" id="btnPause">⏸ 일시정지</button>
+            <button class="btn" id="btnStep">⏭ 한 스텝</button>
+            <button class="btn" id="btnReset">↺ 리셋</button>
+          </div>
+          <div class="row"><label>파티클 수</label><input type="range" id="sN" min="1" max="40" value="3"><span class="val" id="vN">30만</span></div>
+          <div class="row"><label>격자 해상도</label>
+            <select id="sG"><option value="128" selected>128²</option><option value="256">256²</option><option value="512">512²</option></select>
+          </div>
+          <div class="row"><label>시간 배속</label><input type="range" id="sDt" min="1" max="40" value="10"><span class="val" id="vDt">1.0x</span></div>
+          <div class="row"><label>중력 반복</label><input type="range" id="sJac" min="1" max="60" value="12"><span class="val" id="vJac">12회</span></div>
+          <div class="note">중력 반복은 격자를 몇 번 훑어 중력장을 풀지다. 늘리면 정확하고 느려진다. 이전 프레임 결과에서 이어 풀기 때문에 적은 횟수로도 수렴한다.</div>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec-h"><span class="arw">▼</span>중력</div>
+        <div class="sec-c">
+          <div class="row"><label>중력 세기</label><input type="range" id="sGrav" min="0" max="200" value="60"><span class="val" id="vGrav">0.60</span></div>
+          <div class="row"><label>경계 조건</label>
+            <select id="sBound"><option value="0" selected>고립 (은하)</option><option value="1">주기 (우주론)</option></select>
+          </div>
+          <div class="row"><label>소프트닝</label><input type="range" id="sSoft" min="5" max="60" value="20"><span class="val" id="vSoft">2.0 셀</span></div>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec-h"><span class="arw">▼</span>가스</div>
+        <div class="sec-c">
+          <label class="chk on" id="cPres"><span class="box">✓</span><span class="t">압력</span><span class="hint">끄면 무압력 중력계</span></label>
+          <div class="row"><label>압력 세기</label><input type="range" id="sPres" min="0" max="200" value="45"><span class="val" id="vPres">0.45</span></div>
+          <div class="row"><label>단열지수 γ</label><input type="range" id="sGam" min="10" max="25" value="16"><span class="val" id="vGam">1.6</span></div>
+          <label class="chk on" id="cTemp"><span class="box">✓</span><span class="t">온도 추적</span><span class="hint">충격파가 색으로</span></label>
+          <label class="chk" id="cCool"><span class="box"></span><span class="t">복사 냉각</span><span class="hint">식으며 뭉침</span></label>
+          <div class="row"><label>냉각률</label><input type="range" id="sCool" min="0" max="100" value="25"><span class="val" id="vCool">0.25</span></div>
+          <label class="chk" id="cStar"><span class="box"></span><span class="t">별 형성</span><span class="hint">밀도 임계</span></label>
+          <div class="row"><label>임계 밀도</label><input type="range" id="sStar" min="1" max="200" value="70"><span class="val" id="vStar">70</span></div>
+        </div>
+      </section>
+
+      <section class="sec closed">
+        <div class="sec-h"><span class="arw">▼</span>우주</div>
+        <div class="sec-c">
+          <label class="chk dis" id="cExp"><span class="box"></span><span class="t">우주 팽창</span><span class="hint">주기 경계 전용</span></label>
+          <div class="row"><label>허블 상수</label><input type="range" id="sHub" min="0" max="100" value="30"><span class="val" id="vHub">0.30</span></div>
+          <div class="note">팽창은 주기 경계에서만 물리적 의미가 있다. 고립 경계를 고르면 자동으로 잠긴다 — 지금 잠겨 있는 것이 그 동작이다.</div>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec-h"><span class="arw">▼</span>표시</div>
+        <div class="sec-c">
+          <div class="row"><label>렌더 모드</label>
+            <select id="sMode"><option value="0" selected>밀도 필드</option><option value="1">파티클 점</option></select>
+          </div>
+          <div class="row"><label>색 기준</label>
+            <select id="sColor"><option value="0" selected>밀도</option><option value="1">온도</option><option value="2">속도</option></select>
+          </div>
+          <div class="row"><label>컬러맵</label>
+            <select id="sCmap"><option value="0" selected>천체</option><option value="1">흑백</option><option value="2">열화상</option></select>
+          </div>
+          <div class="row"><label>밝기</label><input type="range" id="sBri" min="1" max="300" value="100"><span class="val" id="vBri">1.00</span></div>
+          <div class="row"><label>대비</label><input type="range" id="sGmm" min="5" max="40" value="18"><span class="val" id="vGmm">1.8</span></div>
+          <label class="chk on" id="cHud"><span class="box">✓</span><span class="t">HUD 표시</span></label>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec-h"><span class="arw">▼</span>마우스 도구</div>
+        <div class="sec-c">
+          <div class="row"><label>도구</label>
+            <select id="sTool">
+              <option value="0" selected>카메라 (줌·팬)</option><option value="1">가스 뿌리기</option>
+              <option value="2">중력 우물</option><option value="3">형태 추가</option><option value="4">지우개</option>
+            </select>
+          </div>
+          <div class="row"><label>브러시 크기</label><input type="range" id="sBrush" min="1" max="100" value="28"><span class="val" id="vBrush">0.028</span></div>
+          <div class="row"><label>형태</label>
+            <select id="sShape"><option value="0" selected>회전 원반</option><option value="1">정지 덩어리</option><option value="2">가스 고리</option></select>
+          </div>
+          <div class="row"><label>형태 반지름</label><input type="range" id="sSr" min="1" max="60" value="14"><span class="val" id="vSr">0.14</span></div>
+          <div class="row"><label>형태 파티클</label><input type="range" id="sSn" min="1" max="60" value="15"><span class="val" id="vSn">15만</span></div>
+          <label class="chk on" id="cOrb"><span class="box">✓</span><span class="t">궤도속도 자동</span><span class="hint">중력 측정 기반</span></label>
+          <div class="note">화면을 클릭해 보세요. 형태 추가를 고르면 그 자리에 회전 원반이 생기고, 궤도속도 자동이 켜져 있으면 그 지점의 중력을 재서 원 궤도가 되는 속도를 넣습니다.</div>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec-h"><span class="arw">▼</span>프리셋</div>
+        <div class="sec-c">
+          <div class="preset" id="presets">
+            <button class="btn on" data-p="0">나선팔<small>회전 원반 · 고립</small></button>
+            <button class="btn" data-p="1">조석 꼬리<small>두 원반 스침 · 고립</small></button>
+            <button class="btn" data-p="2">충격파<small>정면충돌 · 압력 on</small></button>
+            <button class="btn" data-p="3">구조 형성<small>균일 난수 · 주기</small></button>
+            <button class="btn" data-p="4" style="grid-column:1/3">빈 판<small>마우스로 직접 만든다</small></button>
+          </div>
+          <div class="note">프리셋을 고르면 경계 조건·압력·팽창이 그 시나리오에 맞게 함께 바뀐다. 이후 개별 토글로 덮어쓸 수 있다.</div>
+        </div>
+      </section>
+
+      <section class="sec closed">
+        <div class="sec-h"><span class="arw">▼</span>녹화</div>
+        <div class="sec-c">
+          <div class="btns"><button class="btn rec wide" id="recBtn">⏺ 스냅샷 저장</button></div>
+          <div class="row"><label>출력 형식</label><select><option selected>PNG 시퀀스</option></select></div>
+          <div class="note">동영상 인코더를 앱에 넣지 않는다 — PNG 로 뽑고 필요하면 외부 도구로 합친다. 의존성을 늘리지 않기 위해서다.</div>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec-h"><span class="arw">▼</span>성능</div>
+        <div class="sec-c">
+          <div class="perf">
+            <div><span class="k">프레임</span> <span id="pMs">--</span> ms / 예산 16.7 ms</div>
+            <div class="bar"><i id="pBar" style="width:0%;background:#4a9eda"></i></div>
+            <div><span class="k">파티클</span> <span id="pN">-</span> · <span class="k">격자</span> <span id="pG">-</span></div>
+            <div><span class="k">GPU</span> <span id="pAdapter">-</span></div>
+          </div>
+          <div class="note warn">이 시안은 브라우저(WebGPU)에서 도는 검증용이다. 실제 앱은 CUDA + FFT 포아송이라 같은 설정에서 훨씬 빠르다 — 실측 근거는 method-search/scorecard.md 에 있다.</div>
+        </div>
+      </section>
+
+    </div>
+  </aside>
+</div>
+
+<script type="module">
+// ============================================================
+//  동작 프로토타입 — WebGPU
+//   목적: 설정 보드의 값이 실제 시뮬레이션에 반영되는지 검증
+//   중력은 야코비 반복(warm start)으로 푼다. 실제 앱은 CUDA + FFT.
+// ============================================================
+const $ = id => document.getElementById(id);
+const banner = $('banner');
+function fail(msg){ banner.style.display='block'; banner.innerHTML = msg; }
+
+const WGSL = /* wgsl */`
+struct Params {
+  n        : u32,
+  G        : u32,
+  flags    : u32,   // bit0 압력, bit1 온도, bit2 냉각, bit3 별형성, bit4 주기경계
+  tool     : u32,
+  dt       : f32,
+  grav     : f32,
+  pres     : f32,
+  gamma    : f32,
+  soft     : f32,
+  cool     : f32,
+  starRho  : f32,
+  time     : f32,
+  brushX   : f32,
+  brushY   : f32,
+  brushR   : f32,
+  brushAmt : f32,
+};
+@group(0) @binding(0) var<uniform> P : Params;
+@group(0) @binding(1) var<storage, read_write> pos  : array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> vel  : array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> temp : array<f32>;
+@group(0) @binding(4) var<storage, read_write> gMass: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> rho  : array<f32>;
+@group(0) @binding(6) var<storage, read_write> phiA : array<f32>;
+@group(0) @binding(7) var<storage, read_write> phiB : array<f32>;
+@group(0) @binding(8) var<storage, read_write> accG : array<vec2<f32>>;
+
+const MASSFIX : f32 = 4096.0;
+
+fn pcg(vIn:u32)->u32{
+  var s=vIn*747796405u+2891336453u;
+  var w=((s>>((s>>28u)+4u))^s)*277803737u;
+  return (w>>22u)^w;
+}
+fn rnd(s:u32)->f32{ return f32(pcg(s))*2.3283064365386963e-10; }
+fn idx(x:i32,y:i32)->u32{
+  let G=i32(P.G);
+  var xx=x; var yy=y;
+  if((P.flags & 16u)!=0u){ xx=((x%G)+G)%G; yy=((y%G)+G)%G; }
+  else { xx=clamp(x,0,G-1); yy=clamp(y,0,G-1); }
+  return u32(yy)*P.G+u32(xx);
+}
+
+// ---------- 초기화 ----------
+@compute @workgroup_size(256)
+fn init(@builtin(global_invocation_id) gid:vec3<u32>){
+  let i=gid.x; if(i>=P.n){ return; }
+  let preset = P.tool;   // init 시에는 tool 자리에 preset 번호를 넘긴다
+  let u1=rnd(i*4u+1u); let u2=rnd(i*4u+2u); let u3=rnd(i*4u+3u); let u4=rnd(i*4u+4u);
+  var p=vec2<f32>(0.5,0.5); var v=vec2<f32>(0.0,0.0);
+  if(preset==0u){
+    let r=sqrt(u1)*0.20; let th=u2*6.2831853;
+    p=vec2<f32>(0.5+r*cos(th), 0.5+r*sin(th));
+    let vt=0.55*sqrt(max(r,2e-3));
+    v=vec2<f32>(-sin(th)*vt, cos(th)*vt);
+  } else if(preset==1u){
+    let side=select(-1.0,1.0,u3>0.5);
+    let r=sqrt(u1)*0.10; let th=u2*6.2831853;
+    p=vec2<f32>(0.5+side*0.17+r*cos(th), 0.5-side*0.06+r*sin(th));
+    let vt=0.42*sqrt(max(r,2e-3));
+    v=vec2<f32>(-sin(th)*vt+side*0.055, cos(th)*vt+side*0.030);
+  } else if(preset==2u){
+    let side=select(-1.0,1.0,u3>0.5);
+    let r=sqrt(u1)*0.085; let th=u2*6.2831853;
+    p=vec2<f32>(0.5+side*0.19+r*cos(th), 0.5+r*sin(th));
+    v=vec2<f32>(-side*0.10,(u4-0.5)*0.004);
+  } else if(preset==3u){
+    p=vec2<f32>(u1,u2);
+    v=vec2<f32>((u3-0.5)*0.02,(u4-0.5)*0.02);
+  } else {
+    // 빈 판: 화면 밖에 숨겨 둔다 (마우스로 꺼내 쓴다)
+    p=vec2<f32>(-1.0,-1.0);
+  }
+  pos[i]=p; vel[i]=v; temp[i]=0.02;
+}
+
+@compute @workgroup_size(256)
+fn clearGrid(@builtin(global_invocation_id) gid:vec3<u32>){
+  let i=gid.x; if(i>=P.G*P.G){ return; }
+  atomicStore(&gMass[i],0u);
+}
+
+@compute @workgroup_size(256)
+fn scatter(@builtin(global_invocation_id) gid:vec3<u32>){
+  let i=gid.x; if(i>=P.n){ return; }
+  let p=pos[i];
+  if(p.x<0.0){ return; }
+  let g=p*f32(P.G);
+  let ix=i32(floor(g.x)); let iy=i32(floor(g.y));
+  let fx=g.x-floor(g.x); let fy=g.y-floor(g.y);
+  atomicAdd(&gMass[idx(ix,  iy  )], u32((1.0-fx)*(1.0-fy)*MASSFIX));
+  atomicAdd(&gMass[idx(ix+1,iy  )], u32(fx*(1.0-fy)*MASSFIX));
+  atomicAdd(&gMass[idx(ix,  iy+1)], u32((1.0-fx)*fy*MASSFIX));
+  atomicAdd(&gMass[idx(ix+1,iy+1)], u32(fx*fy*MASSFIX));
+}
+
+@compute @workgroup_size(256)
+fn massToRho(@builtin(global_invocation_id) gid:vec3<u32>){
+  let i=gid.x; if(i>=P.G*P.G){ return; }
+  rho[i]=f32(atomicLoad(&gMass[i]))/MASSFIX;
+}
+
+// 야코비 1회: phiB <- 이웃평균 - h^2 * 4piG rho
+@compute @workgroup_size(16,16)
+fn jacobi(@builtin(global_invocation_id) gid:vec3<u32>){
+  let x=i32(gid.x); let y=i32(gid.y);
+  if(gid.x>=P.G || gid.y>=P.G){ return; }
+  let i=u32(y)*P.G+u32(x);
+  let h2=1.0/(f32(P.G)*f32(P.G));
+  var mean=(phiA[idx(x-1,y)]+phiA[idx(x+1,y)]+phiA[idx(x,y-1)]+phiA[idx(x,y+1)])*0.25;
+  // 고립 경계: 테두리는 0 으로 고정해 바깥이 비어 있게 만든다
+  if((P.flags & 16u)==0u){
+    if(x==0||y==0||x==i32(P.G)-1||y==i32(P.G)-1){ phiB[i]=0.0; return; }
+  }
+  phiB[i]=mean - 0.25*h2*P.grav*rho[i]*f32(P.G)*f32(P.G)*0.25;
+}
+
+// 격자 가속도 = -grad(phi) + (-grad(P)/rho)
+@compute @workgroup_size(16,16)
+fn gridAccel(@builtin(global_invocation_id) gid:vec3<u32>){
+  let x=i32(gid.x); let y=i32(gid.y);
+  if(gid.x>=P.G || gid.y>=P.G){ return; }
+  let i=u32(y)*P.G+u32(x);
+  let Gf=f32(P.G);
+  var ax = -(phiA[idx(x+1,y)]-phiA[idx(x-1,y)])*0.5*Gf;
+  var ay = -(phiA[idx(x,y+1)]-phiA[idx(x,y-1)])*0.5*Gf;
+  if((P.flags & 1u)!=0u){
+    let r=max(rho[i],1e-4);
+    let pl=P.pres*pow(max(rho[idx(x-1,y)],0.0),P.gamma);
+    let pr=P.pres*pow(max(rho[idx(x+1,y)],0.0),P.gamma);
+    let pd=P.pres*pow(max(rho[idx(x,y-1)],0.0),P.gamma);
+    let pu=P.pres*pow(max(rho[idx(x,y+1)],0.0),P.gamma);
+    ax += -(pr-pl)*0.5*Gf/r;
+    ay += -(pu-pd)*0.5*Gf/r;
+  }
+  accG[i]=vec2<f32>(ax,ay);
+}
+
+fn sampleAcc(p:vec2<f32>)->vec2<f32>{
+  let g=p*f32(P.G);
+  let ix=i32(floor(g.x)); let iy=i32(floor(g.y));
+  let fx=g.x-floor(g.x); let fy=g.y-floor(g.y);
+  return accG[idx(ix,iy)]*((1.0-fx)*(1.0-fy))
+       + accG[idx(ix+1,iy)]*(fx*(1.0-fy))
+       + accG[idx(ix,iy+1)]*((1.0-fx)*fy)
+       + accG[idx(ix+1,iy+1)]*(fx*fy);
+}
+
+@compute @workgroup_size(256)
+fn integrate(@builtin(global_invocation_id) gid:vec3<u32>){
+  let i=gid.x; if(i>=P.n){ return; }
+  var p=pos[i];
+  if(p.x<0.0){ return; }
+  var v=vel[i];
+  let a=sampleAcc(p);
+  v+=a*P.dt;
+  // 온도: 압축(수렴)하면 오르고 서서히 식는다
+  if((P.flags & 2u)!=0u){
+    var t=temp[i];
+    t += dot(a,v)*P.dt*0.6;
+    if((P.flags & 4u)!=0u){ t -= t*P.cool*P.dt*3.0; }
+    temp[i]=clamp(t,0.0,20.0);
+  }
+  p+=v*P.dt;
+  if((P.flags & 16u)!=0u){ p=fract(p+vec2<f32>(1.0,1.0)); }
+  else {
+    if(p.x<0.002){ p.x=0.002; v.x=abs(v.x)*0.25; }
+    if(p.x>0.998){ p.x=0.998; v.x=-abs(v.x)*0.25; }
+    if(p.y<0.002){ p.y=0.002; v.y=abs(v.y)*0.25; }
+    if(p.y>0.998){ p.y=0.998; v.y=-abs(v.y)*0.25; }
+  }
+  pos[i]=p; vel[i]=v;
+}
+
+// 마우스 도구: 브러시 안의 파티클을 조작하거나, 숨은 파티클을 꺼내 배치한다
+@compute @workgroup_size(256)
+fn brush(@builtin(global_invocation_id) gid:vec3<u32>){
+  let i=gid.x; if(i>=P.n){ return; }
+  let c=vec2<f32>(P.brushX,P.brushY);
+  var p=pos[i];
+  if(P.tool==3u){
+    // 형태 추가: 숨은 파티클(x<0) 중 앞에서부터 brushAmt 개를 꺼낸다
+    if(p.x>=0.0){ return; }
+    if(f32(i)>P.brushAmt){ return; }
+    let u1=rnd(i*7u+u32(P.time*1000.0)); let u2=rnd(i*7u+1u+u32(P.time*1000.0));
+    let r=sqrt(u1)*P.brushR; let th=u2*6.2831853;
+    pos[i]=c+vec2<f32>(r*cos(th),r*sin(th));
+    let a=sampleAcc(clamp(c+vec2<f32>(r*cos(th),r*sin(th)),vec2<f32>(0.001),vec2<f32>(0.999)));
+    let ar=max(-dot(a,vec2<f32>(cos(th),sin(th))),0.0);
+    let vt=sqrt(ar*max(r,1e-3));
+    vel[i]=vec2<f32>(-sin(th)*vt,cos(th)*vt);
+    temp[i]=0.02;
+    return;
+  }
+  if(p.x<0.0){ return; }
+  let d=p-c; let r2=dot(d,d);
+  if(r2>P.brushR*P.brushR){ return; }
+  if(P.tool==1u){        // 뿌리기: 바깥으로 밀어낸다
+    vel[i]+=normalize(d+vec2<f32>(1e-6,0.0))*P.brushAmt;
+  } else if(P.tool==2u){ // 중력우물: 안쪽으로 당긴다
+    vel[i]-=normalize(d+vec2<f32>(1e-6,0.0))*P.brushAmt;
+  } else if(P.tool==4u){ // 지우개: 화면 밖으로 숨긴다
+    pos[i]=vec2<f32>(-1.0,-1.0);
+  }
+}
+
+// ---------- 렌더 ----------
+// vertex/fragment 단계는 read_write storage 를 못 읽는다(WebGPU 제약).
+// 같은 버퍼를 read-only 로 다시 바인딩해 group(1) 에 둔다.
+struct RParam { mode:u32, cmap:u32, colorBy:u32, gridG:u32, bright:f32, gammaD:f32, aspect:f32, _p2:f32 };
+@group(1) @binding(0) var<uniform> R : RParam;
+@group(1) @binding(1) var<storage, read> rPos  : array<vec2<f32>>;
+@group(1) @binding(2) var<storage, read> rVel  : array<vec2<f32>>;
+@group(1) @binding(3) var<storage, read> rTemp : array<f32>;
+@group(1) @binding(4) var<storage, read> rRho  : array<f32>;
+
+struct VOut { @builtin(position) pos:vec4<f32>, @location(0) uv:vec2<f32> };
+@vertex
+fn vsQuad(@builtin(vertex_index) vi:u32)->VOut{
+  var q=array<vec2<f32>,6>(
+    vec2<f32>(-1.0,-1.0),vec2<f32>(1.0,-1.0),vec2<f32>(-1.0,1.0),
+    vec2<f32>(-1.0,1.0),vec2<f32>(1.0,-1.0),vec2<f32>(1.0,1.0));
+  var o:VOut;
+  let v=q[vi];
+  o.pos=vec4<f32>(v,0.0,1.0);
+  o.uv=vec2<f32>((v.x+1.0)*0.5,(1.0-v.y)*0.5);
+  return o;
+}
+
+fn cmapAstro(t:f32)->vec3<f32>{
+  let x=clamp(t,0.0,1.0);
+  let c1=vec3<f32>(0.05,0.06,0.19); let c2=vec3<f32>(0.16,0.14,0.47);
+  let c3=vec3<f32>(0.47,0.27,0.67); let c4=vec3<f32>(0.88,0.55,0.27);
+  let c5=vec3<f32>(1.0,0.84,0.51);  let c6=vec3<f32>(1.0,1.0,0.94);
+  if(x<0.18){ return mix(vec3<f32>(0.0),c1,x/0.18); }
+  if(x<0.38){ return mix(c1,c2,(x-0.18)/0.20); }
+  if(x<0.58){ return mix(c2,c3,(x-0.38)/0.20); }
+  if(x<0.76){ return mix(c3,c4,(x-0.58)/0.18); }
+  if(x<0.90){ return mix(c4,c5,(x-0.76)/0.14); }
+  return mix(c5,c6,(x-0.90)/0.10);
+}
+fn cmapThermal(t:f32)->vec3<f32>{
+  let x=clamp(t,0.0,1.0);
+  return vec3<f32>(smoothstep(0.0,0.55,x), smoothstep(0.35,0.9,x), smoothstep(0.72,1.0,x));
+}
+fn applyCmap(t:f32)->vec3<f32>{
+  if(R.cmap==1u){ let g=clamp(t,0.0,1.0); return vec3<f32>(g,g,g); }
+  if(R.cmap==2u){ return cmapThermal(t); }
+  return cmapAstro(t);
+}
+
+@fragment
+fn fsField(in:VOut)->@location(0) vec4<f32>{
+  var uv=in.uv;
+  // 정사각 뷰포트로 맞춘다
+  if(R.aspect>1.0){ uv.x=(uv.x-0.5)*R.aspect+0.5; } else { uv.y=(uv.y-0.5)/R.aspect+0.5; }
+  if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0){ return vec4<f32>(0.0,0.0,0.0,1.0); }
+  let G=i32(R.gridG);
+  let gx=clamp(i32(uv.x*f32(G)),0,G-1);
+  let gy=clamp(i32(uv.y*f32(G)),0,G-1);
+  let d=rRho[u32(gy)*R.gridG+u32(gx)];
+  let t=pow(clamp(log(1.0+d*R.bright)*0.30,0.0,1.0),1.0/R.gammaD);
+  return vec4<f32>(applyCmap(t),1.0);
+}
+
+struct PtOut { @builtin(position) pos:vec4<f32>, @location(0) col:vec3<f32> };
+@vertex
+fn vsPoint(@builtin(vertex_index) vi:u32)->PtOut{
+  var o:PtOut;
+  let p=rPos[vi];
+  if(p.x<0.0){ o.pos=vec4<f32>(2.0,2.0,0.0,1.0); o.col=vec3<f32>(0.0); return o; }
+  var x=p.x; var y=p.y;
+  if(R.aspect>1.0){ x=(x-0.5)/R.aspect+0.5; } else { y=(y-0.5)*R.aspect+0.5; }
+  o.pos=vec4<f32>(x*2.0-1.0, 1.0-y*2.0, 0.0, 1.0);
+  var t=0.5;
+  if(R.colorBy==1u){ t=clamp(rTemp[vi]*0.5,0.0,1.0); }
+  else if(R.colorBy==2u){ t=clamp(length(rVel[vi])*4.0,0.0,1.0); }
+  o.col=applyCmap(t)*R.bright*0.5;
+  return o;
+}
+@fragment
+fn fsPoint(in:PtOut)->@location(0) vec4<f32>{ return vec4<f32>(in.col,1.0); }
+`;
+
+// ------------------------------------------------------------
+const cv = $('sim');
+let device, ctx, fmt;
+let bufs = {}, bgl, bglR, emptyBGL, emptyBG, bg, bg2, rbg, pipe = {}, rParamBuf, paramBuf;
+let N = 300_000, G = 128, preset = 0, running = true;
+let simTime = 0, frames = 0, fpsT = performance.now(), lastMs = 0;
+let brushPending = null;
+let ptPipe = null, fieldPipe = null;
+
+const S = {
+  dt:1.0, grav:0.60, pres:0.45, gamma:1.6, soft:2.0, cool:0.25, starRho:70,
+  jac:12, bound:0, mode:0, colorBy:0, cmap:0, bright:1.0, gammaD:1.8,
+  tool:0, brush:0.028, shape:0, sr:0.14, sn:150000, orbit:true,
+  fPres:true, fTemp:true, fCool:false, fStar:false, fExp:false,
+};
+
+async function boot(){
+  if(!navigator.gpu){ fail('이 브라우저에서 <b>WebGPU를 쓸 수 없습니다.</b><br>Chrome/Edge 최신 버전에서 열어 주세요.'); return; }
+  const adapter = await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+  if(!adapter){ fail('<b>GPU 어댑터를 얻지 못했습니다.</b>'); return; }
+  device = await adapter.requestDevice();
+  $('pAdapter').textContent = (adapter.info?.vendor||'?') + ' / ' + (adapter.info?.architecture||'?');
+  device.addEventListener?.('uncapturederror', e=>console.error(e.error.message));
+
+  ctx = cv.getContext('webgpu');
+  fmt = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({device, format:fmt, alphaMode:'opaque'});
+
+  const mod = device.createShaderModule({code:WGSL});
+  const ci = await mod.getCompilationInfo();
+  const errs = ci.messages.filter(m=>m.type==='error');
+  if(errs.length){ fail('셰이더 컴파일 실패:<br>'+errs.map(m=>`${m.lineNum}: ${m.message}`).join('<br>')); return; }
+
+  const ent = [{binding:0, visibility:GPUShaderStage.COMPUTE, buffer:{type:'uniform'}}];
+  for(let b=1;b<=8;b++) ent.push({binding:b, visibility:GPUShaderStage.COMPUTE, buffer:{type:'storage'}});
+  bgl = device.createBindGroupLayout({entries:ent});
+
+  const VF = GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT;
+  bglR = device.createBindGroupLayout({entries:[
+    {binding:0, visibility:VF, buffer:{type:'uniform'}},
+    {binding:1, visibility:VF, buffer:{type:'read-only-storage'}},
+    {binding:2, visibility:VF, buffer:{type:'read-only-storage'}},
+    {binding:3, visibility:VF, buffer:{type:'read-only-storage'}},
+    {binding:4, visibility:VF, buffer:{type:'read-only-storage'}},
+  ]});
+
+  // 렌더 파이프라인은 group0 을 비워 둔다. 같은 버퍼를 쓰기용(bg)과 읽기용(rbg)으로
+  // 한 패스에 동시에 걸면 WebGPU 가 동기화 충돌로 거부한다.
+  emptyBGL = device.createBindGroupLayout({entries:[]});
+  emptyBG  = device.createBindGroup({layout:emptyBGL, entries:[]});
+  const plyt  = device.createPipelineLayout({bindGroupLayouts:[bgl]});
+  const plytR = device.createPipelineLayout({bindGroupLayouts:[emptyBGL, bglR]});
+
+  for(const e of ['init','clearGrid','scatter','massToRho','jacobi','gridAccel','integrate','brush'])
+    pipe[e] = device.createComputePipeline({layout:plyt, compute:{module:mod, entryPoint:e}});
+
+  fieldPipe = device.createRenderPipeline({
+    layout:plytR, vertex:{module:mod, entryPoint:'vsQuad'},
+    fragment:{module:mod, entryPoint:'fsField', targets:[{format:fmt}]},
+    primitive:{topology:'triangle-list'},
+  });
+  ptPipe = device.createRenderPipeline({
+    layout:plytR, vertex:{module:mod, entryPoint:'vsPoint'},
+    fragment:{module:mod, entryPoint:'fsPoint', targets:[{format:fmt,
+      blend:{color:{srcFactor:'one',dstFactor:'one'},alpha:{srcFactor:'one',dstFactor:'one'}}}]},
+    primitive:{topology:'point-list'},
+  });
+
+  paramBuf  = device.createBuffer({size:64, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  rParamBuf = device.createBuffer({size:32, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+
+  alloc();
+  bindUI();
+  resetSim();
+  requestAnimationFrame(loop);
+}
+
+function alloc(){
+  for(const k in bufs) bufs[k].destroy?.();
+  const cells = G*G;
+  // 야코비 핑퐁 복사와 퍼텐셜 초기화에 COPY_SRC/COPY_DST 가 필요하다
+  const mk = b => device.createBuffer({size:b,
+    usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  bufs = {
+    pos:mk(N*8), vel:mk(N*8), temp:mk(N*4),
+    gMass:mk(cells*4), rho:mk(cells*4),
+    phiA:mk(cells*4), phiB:mk(cells*4), accG:mk(cells*8),
+  };
+  bg = device.createBindGroup({layout:bgl, entries:[
+    {binding:0,resource:{buffer:paramBuf}},
+    {binding:1,resource:{buffer:bufs.pos}},
+    {binding:2,resource:{buffer:bufs.vel}},
+    {binding:3,resource:{buffer:bufs.temp}},
+    {binding:4,resource:{buffer:bufs.gMass}},
+    {binding:5,resource:{buffer:bufs.rho}},
+    {binding:6,resource:{buffer:bufs.phiA}},
+    {binding:7,resource:{buffer:bufs.phiB}},
+    {binding:8,resource:{buffer:bufs.accG}},
+  ]});
+  // 야코비 핑퐁용 두 번째 바인드그룹: phi 읽기/쓰기 버퍼를 뒤집어 끼운다.
+  // 이러면 반복마다 격자를 복사할 필요가 없다.
+  bg2 = device.createBindGroup({layout:bgl, entries:[
+    {binding:0,resource:{buffer:paramBuf}},
+    {binding:1,resource:{buffer:bufs.pos}},
+    {binding:2,resource:{buffer:bufs.vel}},
+    {binding:3,resource:{buffer:bufs.temp}},
+    {binding:4,resource:{buffer:bufs.gMass}},
+    {binding:5,resource:{buffer:bufs.rho}},
+    {binding:6,resource:{buffer:bufs.phiB}},
+    {binding:7,resource:{buffer:bufs.phiA}},
+    {binding:8,resource:{buffer:bufs.accG}},
+  ]});
+  rbg = device.createBindGroup({layout:bglR, entries:[
+    {binding:0,resource:{buffer:rParamBuf}},
+    {binding:1,resource:{buffer:bufs.pos}},
+    {binding:2,resource:{buffer:bufs.vel}},
+    {binding:3,resource:{buffer:bufs.temp}},
+    {binding:4,resource:{buffer:bufs.rho}},
+  ]});
+}
+
+function flags(){
+  return (S.fPres?1:0)|(S.fTemp?2:0)|(S.fCool?4:0)|(S.fStar?8:0)|(S.bound==1?16:0);
+}
+function writeParams(toolOverride, brush){
+  const ab=new ArrayBuffer(64);
+  const u=new Uint32Array(ab,0,4), f=new Float32Array(ab,16,12);
+  u[0]=N; u[1]=G; u[2]=flags(); u[3]=(toolOverride!==undefined)?toolOverride:S.tool;
+  f[0]=S.dt*0.0016; f[1]=S.grav; f[2]=S.pres*2e-6; f[3]=S.gamma;
+  f[4]=S.soft; f[5]=S.cool; f[6]=S.starRho; f[7]=simTime;
+  f[8]=brush?brush.x:0; f[9]=brush?brush.y:0; f[10]=brush?brush.r:0; f[11]=brush?brush.amt:0;
+  device.queue.writeBuffer(paramBuf,0,ab);
+}
+function writeR(){
+  const ab=new ArrayBuffer(32);
+  const u=new Uint32Array(ab,0,4), f=new Float32Array(ab,16,4);
+  u[0]=S.mode; u[1]=S.cmap; u[2]=S.colorBy; u[3]=G;
+  f[0]=S.bright; f[1]=S.gammaD; f[2]=cv.width/Math.max(1,cv.height); f[3]=0;
+  device.queue.writeBuffer(rParamBuf,0,ab);
+}
+
+function resetSim(){
+  simTime=0;
+  writeParams(preset);
+  const e=device.createCommandEncoder();
+  const p=e.beginComputePass();
+  p.setPipeline(pipe.init); p.setBindGroup(0,bg);
+  p.dispatchWorkgroups(Math.ceil(N/256)); p.end();
+  device.queue.submit([e.finish()]);
+  // 퍼텐셜 초기화
+  const z=new Float32Array(G*G);
+  device.queue.writeBuffer(bufs.phiA,0,z); device.queue.writeBuffer(bufs.phiB,0,z);
+}
+
+function step(){
+  writeParams();
+  const wgN=Math.ceil(N/256), wgC=Math.ceil(G*G/256), wgG=Math.ceil(G/16);
+  const e=device.createCommandEncoder();
+  const p=e.beginComputePass();
+  p.setBindGroup(0,bg);
+  p.setPipeline(pipe.clearGrid); p.dispatchWorkgroups(wgC);
+  p.setPipeline(pipe.scatter);   p.dispatchWorkgroups(wgN);
+  p.setPipeline(pipe.massToRho); p.dispatchWorkgroups(wgC);
+  p.end();
+  // 야코비 반복. 바인드그룹을 뒤집어 끼우는 진짜 핑퐁이라 복사가 없다.
+  // 짝수 회 돌리면 마지막 결과가 phiA 에 남아 gridAccel 이 그대로 읽는다.
+  const iters = S.jac%2===0 ? S.jac : S.jac+1;
+  const bgs=[bg,bg2];
+  for(let k=0;k<iters;k++){
+    const pass=e.beginComputePass();
+    pass.setBindGroup(0,bgs[k%2]);
+    pass.setPipeline(pipe.jacobi);
+    pass.dispatchWorkgroups(wgG,wgG);
+    pass.end();
+  }
+  const p2=e.beginComputePass();
+  p2.setBindGroup(0,bg);
+  p2.setPipeline(pipe.gridAccel); p2.dispatchWorkgroups(wgG,wgG);
+  p2.setPipeline(pipe.integrate); p2.dispatchWorkgroups(wgN);
+  p2.end();
+  device.queue.submit([e.finish()]);
+  simTime += S.dt*0.0016;
+}
+
+function applyBrush(b){
+  writeParams(S.tool,b);
+  const e=device.createCommandEncoder();
+  const p=e.beginComputePass();
+  p.setPipeline(pipe.brush); p.setBindGroup(0,bg);
+  p.dispatchWorkgroups(Math.ceil(N/256)); p.end();
+  device.queue.submit([e.finish()]);
+}
+
+function render(){
+  writeR();
+  const e=device.createCommandEncoder();
+  const view=ctx.getCurrentTexture().createView();
+  const pass=e.beginRenderPass({colorAttachments:[{view, clearValue:{r:0,g:0,b:0,a:1}, loadOp:'clear', storeOp:'store'}]});
+  pass.setBindGroup(0,emptyBG);
+  pass.setBindGroup(1,rbg);
+  if(S.mode===0){ pass.setPipeline(fieldPipe); pass.draw(6); }
+  else { pass.setPipeline(ptPipe); pass.draw(Math.min(N,2_000_000)); }
+  pass.end();
+  device.queue.submit([e.finish()]);
+}
+
+function resize(){
+  const r=devicePixelRatio||1;
+  cv.width=Math.max(1,Math.floor(cv.clientWidth*r));
+  cv.height=Math.max(1,Math.floor(cv.clientHeight*r));
+}
+window.addEventListener('resize',resize);
+
+function loop(){
+  resize();
+  const t0=performance.now();
+  if(brushPending){ applyBrush(brushPending); brushPending=null; }
+  if(running) step();
+  render();
+  lastMs = lastMs*0.9 + (performance.now()-t0)*0.1;
+  frames++;
+  const now=performance.now();
+  if(now-fpsT>400){
+    const fps=frames*1000/(now-fpsT); frames=0; fpsT=now;
+    $('hFps').textContent=fps.toFixed(1);
+    $('hMs').textContent=lastMs.toFixed(1);
+    $('pMs').textContent=lastMs.toFixed(1);
+    const pct=Math.min(100,lastMs/16.7*100);
+    const bar=$('pBar'); bar.style.width=pct+'%';
+    bar.style.background = pct<70?'#5ec27a' : pct<100?'#e0a34a' : '#e06a5a';
+    $('hT').textContent=simTime.toFixed(3);
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---------------- UI 배선 ----------------
+function fmtN(v){ return v>=100 ? (v/100).toFixed(1)+'천만' : v+'0만'; }
+function bindUI(){
+  document.querySelectorAll('.sec-h').forEach(h=>h.addEventListener('click',()=>h.parentElement.classList.toggle('closed')));
+
+  const chk=(id,key,after)=>{
+    const el=$(id);
+    el.addEventListener('click',()=>{
+      if(el.classList.contains('dis')) return;
+      el.classList.toggle('on');
+      el.querySelector('.box').textContent = el.classList.contains('on')?'✓':'';
+      S[key]=el.classList.contains('on');
+      after&&after();
+    });
+  };
+  chk('cPres','fPres'); chk('cTemp','fTemp'); chk('cCool','fCool');
+  chk('cStar','fStar'); chk('cExp','fExp'); chk('cOrb','orbit');
+  $('cHud').addEventListener('click',()=>{
+    const el=$('cHud'); el.classList.toggle('on');
+    el.querySelector('.box').textContent = el.classList.contains('on')?'✓':'';
+    $('hud').classList.toggle('hide',!el.classList.contains('on'));
+  });
+
+  const sl=(id,vid,key,f,fmt)=>{
+    const el=$(id);
+    const upd=()=>{ const v=f(+el.value); S[key]=v; $(vid).textContent=fmt(v); };
+    el.addEventListener('input',upd); upd();
+  };
+  sl('sDt','vDt','dt',v=>v/10,v=>v.toFixed(1)+'x');
+  sl('sJac','vJac','jac',v=>v,v=>v+'회');
+  sl('sGrav','vGrav','grav',v=>v/100,v=>v.toFixed(2));
+  sl('sSoft','vSoft','soft',v=>v/10,v=>v.toFixed(1)+' 셀');
+  sl('sPres','vPres','pres',v=>v/100,v=>v.toFixed(2));
+  sl('sGam','vGam','gamma',v=>v/10,v=>v.toFixed(1));
+  sl('sCool','vCool','cool',v=>v/100,v=>v.toFixed(2));
+  sl('sStar','vStar','starRho',v=>v,v=>String(v));
+  sl('sBri','vBri','bright',v=>v/100,v=>v.toFixed(2));
+  sl('sGmm','vGmm','gammaD',v=>v/10,v=>v.toFixed(1));
+  sl('sBrush','vBrush','brush',v=>v/1000,v=>v.toFixed(3));
+  sl('sSr','vSr','sr',v=>v/100,v=>v.toFixed(2));
+  sl('sSn','vSn','sn',v=>v*10000,v=>(v/10000*1)+'만'.replace('1만','만'));
+  $('sSn').addEventListener('input',()=>{ $('vSn').textContent=$('sSn').value+'만'; S.sn=+$('sSn').value*10000; });
+  $('vSn').textContent=$('sSn').value+'만';
+
+  $('sN').addEventListener('input',()=>{
+    N=+$('sN').value*100000;
+    $('vN').textContent = N>=10000000 ? (N/10000000).toFixed(1)+'천만' : (N/10000)+'만';
+    $('hN').textContent = N.toLocaleString(); $('pN').textContent=N.toLocaleString();
+    alloc(); resetSim();
+  });
+  $('sG').addEventListener('change',()=>{
+    G=+$('sG').value; $('hG').textContent=G+'²'; $('pG').textContent=G+'²';
+    alloc(); resetSim();
+  });
+  $('sBound').addEventListener('change',()=>{
+    S.bound=+$('sBound').value;
+    $('hB').textContent = S.bound?'· 주기경계':'· 고립경계';
+    $('cExp').classList.toggle('dis', S.bound===0);
+    if(S.bound===0){ $('cExp').classList.remove('on'); $('cExp').querySelector('.box').textContent=''; S.fExp=false; }
+  });
+  $('sMode').addEventListener('change',()=>S.mode=+$('sMode').value);
+  $('sColor').addEventListener('change',()=>S.colorBy=+$('sColor').value);
+  $('sCmap').addEventListener('change',()=>S.cmap=+$('sCmap').value);
+
+  const setTool=i=>{
+    S.tool=i;
+    document.querySelectorAll('.tool').forEach((x,k)=>x.classList.toggle('on',k===i));
+    $('sTool').selectedIndex=i;
+  };
+  document.querySelectorAll('.tool').forEach(t=>t.addEventListener('click',()=>setTool(+t.dataset.tool)));
+  $('sTool').addEventListener('change',()=>setTool(+$('sTool').value));
+
+  $('btnPause').addEventListener('click',()=>{
+    running=!running;
+    $('btnPause').textContent = running?'⏸ 일시정지':'▶ 재생';
+  });
+  $('btnStep').addEventListener('click',()=>{ running=false; $('btnPause').textContent='▶ 재생'; step(); });
+  $('btnReset').addEventListener('click',resetSim);
+
+  document.querySelectorAll('#presets .btn').forEach(b=>{
+    b.addEventListener('click',()=>{
+      document.querySelectorAll('#presets .btn').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      preset=+b.dataset.p;
+      // 프리셋이 경계·압력을 함께 바꾼다
+      if(preset===3){ $('sBound').value='1'; } else { $('sBound').value='0'; }
+      $('sBound').dispatchEvent(new Event('change'));
+      const wantPres = (preset===2);
+      const c=$('cPres');
+      c.classList.toggle('on', wantPres || preset!==2 ? c.classList.contains('on')||wantPres : false);
+      if(wantPres && !c.classList.contains('on')){ c.classList.add('on'); }
+      c.querySelector('.box').textContent = c.classList.contains('on')?'✓':'';
+      S.fPres=c.classList.contains('on');
+      resetSim();
+      running=true; $('btnPause').textContent='⏸ 일시정지';
+    });
+  });
+
+  $('close').addEventListener('click',()=>{ $('board').classList.add('hidden'); $('fab').style.display='block'; });
+  $('fab').addEventListener('click',()=>{ $('board').classList.remove('hidden'); $('fab').style.display='none'; });
+  $('recBtn').addEventListener('click',()=>{
+    const a=document.createElement('a');
+    a.download='nbody-'+Date.now()+'.png';
+    a.href=cv.toDataURL('image/png'); a.click();
+  });
+
+  // 마우스
+  const toView = ev=>{
+    const r=cv.getBoundingClientRect();
+    let x=(ev.clientX-r.left)/r.width, y=(ev.clientY-r.top)/r.height;
+    const asp=r.width/r.height;
+    if(asp>1){ x=(x-0.5)*asp+0.5; } else { y=(y-0.5)/asp+0.5; }
+    return {x,y};
+  };
+  let down=false;
+  cv.addEventListener('pointerdown',ev=>{
+    if(S.tool===0) return;
+    down=true; cv.setPointerCapture(ev.pointerId);
+    const v=toView(ev);
+    brushPending={x:v.x,y:v.y, r:(S.tool===3?S.sr:S.brush), amt:(S.tool===3?S.sn:0.06)};
+  });
+  cv.addEventListener('pointermove',ev=>{
+    if(!down||S.tool===0||S.tool===3) return;
+    const v=toView(ev);
+    brushPending={x:v.x,y:v.y, r:S.brush, amt:0.06};
+  });
+  cv.addEventListener('pointerup',()=>down=false);
+
+  N=+$('sN').value*100000;
+  $('vN').textContent=(N/10000)+'만';
+  $('hN').textContent=N.toLocaleString(); $('pN').textContent=N.toLocaleString();
+  $('hG').textContent=G+'²'; $('pG').textContent=G+'²'; $('hB').textContent='· 고립경계';
+  $('hJac').textContent=S.jac+'회'; $('hPr').textContent=S.fPres?'on':'off';
+  $('sJac').addEventListener('input',()=>$('hJac').textContent=$('sJac').value+'회');
+  $('cPres').addEventListener('click',()=>setTimeout(()=>$('hPr').textContent=S.fPres?'on':'off',0));
+}
+
+// 검증용 훅: 브라우저 pane 이 안 보여 rAF 가 멈춰도 수동으로 돌려 확인할 수 있게 한다.
+window.__nb = {
+  get N(){return N}, get G(){return G}, S,
+  runN(k){ for(let i=0;i<k;i++) step(); render(); return {N,G,t:simTime}; },
+  reset(p){ if(p!==undefined){ preset=p; } resetSim(); return {preset}; },
+  brush(x,y,tool,r,amt){ const old=S.tool; S.tool=tool; applyBrush({x,y,r,amt}); S.tool=old; render(); },
+  // 화면 캡처 없이 GPU 버퍼를 직접 읽어 검증한다 (pane 이 숨겨져도 동작)
+  async readRho(){
+    const bytes=G*G*4;
+    const rb=device.createBuffer({size:bytes, usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const e=device.createCommandEncoder();
+    e.copyBufferToBuffer(bufs.rho,0,rb,0,bytes);
+    device.queue.submit([e.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const a=new Float32Array(rb.getMappedRange().slice(0));
+    rb.unmap(); rb.destroy();
+    let mx=0,sum=0,nz=0,cx=0,cy=0;
+    for(let i=0;i<a.length;i++){
+      const v=a[i]; sum+=v; if(v>mx)mx=v;
+      if(v>0.5){ nz++; cx+=(i%G); cy+=Math.floor(i/G); }
+    }
+    return {maxRho:+mx.toFixed(1), totalMass:+sum.toFixed(0), occupiedCells:nz,
+            centroid: nz?[+(cx/nz/G).toFixed(3),+(cy/nz/G).toFixed(3)]:null};
+  },
+  async readPos(k){
+    const bytes=Math.min(k,N)*8;
+    const rb=device.createBuffer({size:bytes, usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const e=device.createCommandEncoder();
+    e.copyBufferToBuffer(bufs.pos,0,rb,0,bytes);
+    device.queue.submit([e.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const a=new Float32Array(rb.getMappedRange().slice(0));
+    rb.unmap(); rb.destroy();
+    return Array.from(a.slice(0,8)).map(v=>+v.toFixed(4));
+  },
+  async stats(){
+    const img=new Image(); img.src=cv.toDataURL('image/png'); await img.decode();
+    const c2=document.createElement('canvas'); c2.width=80; c2.height=80;
+    const x=c2.getContext('2d'); x.drawImage(img,0,0,80,80);
+    const d=x.getImageData(0,0,80,80).data;
+    let sum=0,max=0,nz=0;
+    for(let i=0;i<d.length;i+=4){ const v=(d[i]+d[i+1]+d[i+2])/3; sum+=v; if(v>max)max=v; if(v>8)nz++; }
+    return {mean:+(sum/6400).toFixed(2), max, litPct:+(nz/64).toFixed(1)};
+  },
+};
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# 빌드 산출물
+build/
+out/
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.log
+
+# 프로토타입 출력 — 재생성 가능하고 크다
+proto/out/
+proto/out2/
+proto/out3/
+*.raw
+
+# vendoring 한 외부 라이브러리 (Dear ImGui 등)
+extern/
+
+# 에디터
+.vs/
+.vscode/
+*.user

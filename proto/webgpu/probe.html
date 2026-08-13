@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>WebGPU 환경 프로브</title>
+<style>
+  body { font-family: Consolas, monospace; background: #111; color: #ddd; padding: 20px; }
+  h1 { font-size: 16px; color: #6cf; }
+  pre { white-space: pre-wrap; line-height: 1.5; }
+  .ok { color: #7d7; }
+  .bad { color: #f77; }
+</style>
+</head>
+<body>
+<h1>WebGPU 환경 프로브</h1>
+<pre id="out">측정 중...</pre>
+<script>
+const lines = [];
+function log(s) { lines.push(s); document.getElementById('out').textContent = lines.join('\n'); }
+
+async function main() {
+  if (!navigator.gpu) {
+    log('RESULT: NO_WEBGPU — navigator.gpu 없음');
+    return;
+  }
+  log('navigator.gpu: OK');
+
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) {
+    log('RESULT: NO_ADAPTER — requestAdapter가 null');
+    return;
+  }
+
+  // adapter.info는 최신 스펙, 구버전은 requestAdapterInfo()
+  let info = adapter.info;
+  if (!info && adapter.requestAdapterInfo) {
+    try { info = await adapter.requestAdapterInfo(); } catch (e) { info = null; }
+  }
+  if (info) {
+    log('ADAPTER vendor=' + info.vendor + ' architecture=' + info.architecture
+      + ' device=' + info.device + ' description=' + info.description);
+  } else {
+    log('ADAPTER info: 사용 불가');
+  }
+
+  const feats = [...adapter.features].sort();
+  log('FEATURES: ' + feats.join(', '));
+  log('HAS_TIMESTAMP_QUERY: ' + (adapter.features.has('timestamp-query') ? 'YES' : 'NO'));
+
+  const L = adapter.limits;
+  const keys = [
+    'maxBufferSize', 'maxStorageBufferBindingSize', 'maxComputeWorkgroupSizeX',
+    'maxComputeInvocationsPerWorkgroup', 'maxComputeWorkgroupsPerDimension',
+    'maxComputeWorkgroupStorageSize', 'maxStorageBuffersPerShaderStage',
+    'maxBindGroups', 'maxTextureDimension2D',
+  ];
+  for (const k of keys) log('LIMIT ' + k + ' = ' + L[k]);
+
+  const maxBufMB = (L.maxBufferSize / (1024 * 1024)).toFixed(0);
+  const maxSSBOMB = (L.maxStorageBufferBindingSize / (1024 * 1024)).toFixed(0);
+  log('=> maxBufferSize = ' + maxBufMB + ' MiB, maxStorageBufferBindingSize = ' + maxSSBOMB + ' MiB');
+
+  // 파티클 1000만 기준 필요 버퍼 크기 계산 (pos float2 + vel float2 = 16B)
+  const N = 10_000_000;
+  const needMB = (N * 16 / (1024 * 1024)).toFixed(1);
+  log('=> N=10M 위치+속도 버퍼 = ' + needMB + ' MiB (단일 SSBO 한도 ' + maxSSBOMB + ' MiB)');
+
+  // 실제 device 생성 + timestamp-query 요청
+  const wanted = [];
+  if (adapter.features.has('timestamp-query')) wanted.push('timestamp-query');
+  let device;
+  try {
+    device = await adapter.requestDevice({
+      requiredFeatures: wanted,
+      requiredLimits: {
+        maxBufferSize: L.maxBufferSize,
+        maxStorageBufferBindingSize: L.maxStorageBufferBindingSize,
+        maxComputeInvocationsPerWorkgroup: L.maxComputeInvocationsPerWorkgroup,
+        maxComputeWorkgroupsPerDimension: L.maxComputeWorkgroupsPerDimension,
+      },
+    });
+  } catch (e) {
+    log('DEVICE 생성 실패: ' + e.message);
+    return;
+  }
+  log('DEVICE: OK (features=' + [...device.features].join(',') + ')');
+
+  // 큰 버퍼를 실제로 할당해 본다 — 한도가 아니라 실제 가용량 확인
+  const tries = [128, 256, 512, 1024, 1536, 2048];
+  let lastOk = 0;
+  const held = [];
+  for (const mb of tries) {
+    if (mb * 1024 * 1024 > L.maxBufferSize) { log('ALLOC ' + mb + ' MiB: 한도 초과라 건너뜀'); continue; }
+    try {
+      const b = device.createBuffer({ size: mb * 1024 * 1024, usage: GPUBufferUsage.STORAGE });
+      held.push(b);
+      lastOk = mb;
+      log('ALLOC ' + mb + ' MiB: OK (누적 ' + held.reduce((a, x) => a + x.size, 0) / (1024 * 1024) + ' MiB)');
+    } catch (e) {
+      log('ALLOC ' + mb + ' MiB: 실패 — ' + e.message);
+      break;
+    }
+  }
+  for (const b of held) b.destroy();
+  log('=> 단일 할당 성공 최대 ' + lastOk + ' MiB');
+
+  log('RESULT: WEBGPU_READY');
+}
+
+main().catch(e => log('EXCEPTION: ' + (e && e.stack ? e.stack : e)));
+</script>
+</body>
+</html>

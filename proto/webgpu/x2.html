@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>라운드2 — 지역성·산란변형·SPH 직접비교</title>
+<style>
+  body { font-family: Consolas, monospace; background:#0d0d10; color:#dde; padding:18px; }
+  h1 { font-size:15px; color:#6cf; margin:0 0 10px; }
+  pre { white-space:pre-wrap; line-height:1.45; font-size:12px; }
+</style>
+</head>
+<body>
+<h1>라운드2 — CIC/NGP × 무작위/정렬 × 격자크기, 그리고 SPH 이웃순회 직접비교 (RTX 3070 Ti / WebGPU)</h1>
+<pre id="out">측정 준비 중...</pre>
+<script type="module">
+const lines = [];
+const outEl = document.getElementById('out');
+function log(s) { lines.push(s); outEl.textContent = lines.join('\n'); }
+
+const WGSL = /* wgsl */`
+struct Params {
+  n       : u32,
+  gw      : u32,
+  gh      : u32,
+  dispXn  : u32,   // 파티클 패스의 X방향 workgroup 수
+  dispXc  : u32,   // 격자 패스의 X방향 workgroup 수
+  perCell : u32,   // 정렬 생성 시 셀당 파티클 수
+  _p0     : u32,
+  _p1     : u32,
+  cell    : f32,
+  dt      : f32,
+  massFix : f32,
+  gravK   : f32,
+  h       : f32,
+  h2      : f32,
+  _p2     : f32,
+  _p3     : f32,
+};
+
+@group(0) @binding(0) var<uniform> P : Params;
+@group(0) @binding(1) var<storage, read_write> pos   : array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> vel   : array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> gMass : array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> gMomX : array<atomic<i32>>;
+@group(0) @binding(5) var<storage, read_write> gMomY : array<atomic<i32>>;
+@group(0) @binding(6) var<storage, read_write> gAccX : array<f32>;
+@group(0) @binding(7) var<storage, read_write> gAccY : array<f32>;
+@group(0) @binding(8) var<storage, read_write> dens  : array<f32>;
+
+fn pcg(vIn: u32) -> u32 {
+  var state = vIn * 747796405u + 2891336453u;
+  var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+fn rnd01(s: u32) -> f32 { return f32(pcg(s)) * 2.3283064365386963e-10; }
+
+// 파티클 선형 인덱스 (2D 디스패치 대응)
+fn pidx(gid: vec3<u32>) -> u32 { return gid.y * (P.dispXn * 256u) + gid.x; }
+fn cidx(gid: vec3<u32>) -> u32 { return gid.y * (P.dispXc * 256u) + gid.x; }
+
+// ---------- 초기화: 무작위 순서 ----------
+@compute @workgroup_size(256)
+fn initRandom(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  pos[i] = vec2<f32>(rnd01(i * 2u + 1u), rnd01(i * 2u + 2u));
+  vel[i] = vec2<f32>(0.0, 0.0);
+}
+
+// ---------- 초기화: 셀 순서(완전 정렬 상태) ----------
+// 파티클 i는 셀 c = i / perCell 안의 무작위 위치. 격자를 행우선으로 채운다.
+@compute @workgroup_size(256)
+fn initSorted(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  let c = i / P.perCell;
+  let cx = c % P.gw;
+  let cy = c / P.gw;
+  let jx = rnd01(i * 2u + 1u);
+  let jy = rnd01(i * 2u + 2u);
+  pos[i] = vec2<f32>((f32(cx) + jx) * P.cell, (f32(cy) + jy) * P.cell);
+  vel[i] = vec2<f32>(0.0, 0.0);
+}
+
+// ---------- 격자 클리어 ----------
+@compute @workgroup_size(256)
+fn clearGrid(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = cidx(gid);
+  if (i >= P.gw * P.gh) { return; }
+  atomicStore(&gMass[i], 0u);
+  atomicStore(&gMomX[i], 0);
+  atomicStore(&gMomY[i], 0);
+}
+
+fn depositCell(cx: i32, cy: i32, w: f32, v: vec2<f32>) {
+  let gx = clamp(cx, 0, i32(P.gw) - 1);
+  let gy = clamp(cy, 0, i32(P.gh) - 1);
+  let idx = u32(gy) * P.gw + u32(gx);
+  atomicAdd(&gMass[idx], u32(w * P.massFix));
+  atomicAdd(&gMomX[idx], i32(w * v.x * P.massFix));
+  atomicAdd(&gMomY[idx], i32(w * v.y * P.massFix));
+}
+
+// ---------- 산란 A: CIC (4셀) ----------
+@compute @workgroup_size(256)
+fn scatterCIC(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  let p = pos[i];
+  let v = vel[i];
+  let g = p / P.cell;
+  let ix = i32(floor(g.x));
+  let iy = i32(floor(g.y));
+  let fx = g.x - floor(g.x);
+  let fy = g.y - floor(g.y);
+  depositCell(ix,     iy,     (1.0 - fx) * (1.0 - fy), v);
+  depositCell(ix + 1, iy,     fx * (1.0 - fy),         v);
+  depositCell(ix,     iy + 1, (1.0 - fx) * fy,         v);
+  depositCell(ix + 1, iy + 1, fx * fy,                 v);
+}
+
+// ---------- 산란 B: NGP (1셀) ----------
+@compute @workgroup_size(256)
+fn scatterNGP(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  let p = pos[i];
+  let v = vel[i];
+  let g = p / P.cell;
+  depositCell(i32(floor(g.x)), i32(floor(g.y)), 1.0, v);
+}
+
+// ---------- 격자 연산 (FFT 자리표시) ----------
+@compute @workgroup_size(16, 16)
+fn gridSolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x;
+  let y = gid.y;
+  if (x >= P.gw || y >= P.gh) { return; }
+  let idx = y * P.gw + x;
+  let xm = select(x - 1u, 0u, x == 0u);
+  let xp = select(x + 1u, P.gw - 1u, x + 1u >= P.gw);
+  let ym = select(y - 1u, 0u, y == 0u);
+  let yp = select(y + 1u, P.gh - 1u, y + 1u >= P.gh);
+  let mL = f32(atomicLoad(&gMass[y * P.gw + xm]));
+  let mR = f32(atomicLoad(&gMass[y * P.gw + xp]));
+  let mD = f32(atomicLoad(&gMass[ym * P.gw + x]));
+  let mU = f32(atomicLoad(&gMass[yp * P.gw + x]));
+  gAccX[idx] = (mR - mL) * P.gravK;
+  gAccY[idx] = (mU - mD) * P.gravK;
+}
+
+fn sampleAcc(cx: i32, cy: i32) -> vec2<f32> {
+  let gx = clamp(cx, 0, i32(P.gw) - 1);
+  let gy = clamp(cy, 0, i32(P.gh) - 1);
+  let idx = u32(gy) * P.gw + u32(gx);
+  return vec2<f32>(gAccX[idx], gAccY[idx]);
+}
+
+// ---------- 보간 A: CIC ----------
+@compute @workgroup_size(256)
+fn gatherCIC(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  var p = pos[i];
+  var v = vel[i];
+  let g = p / P.cell;
+  let ix = i32(floor(g.x));
+  let iy = i32(floor(g.y));
+  let fx = g.x - floor(g.x);
+  let fy = g.y - floor(g.y);
+  let a = sampleAcc(ix,     iy)     * ((1.0 - fx) * (1.0 - fy))
+        + sampleAcc(ix + 1, iy)     * (fx * (1.0 - fy))
+        + sampleAcc(ix,     iy + 1) * ((1.0 - fx) * fy)
+        + sampleAcc(ix + 1, iy + 1) * (fx * fy);
+  v = v + a * P.dt;
+  p = fract(p + v * P.dt + vec2<f32>(1.0, 1.0));
+  pos[i] = p;
+  vel[i] = v;
+}
+
+// ---------- 보간 B: NGP ----------
+@compute @workgroup_size(256)
+fn gatherNGP(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  var p = pos[i];
+  var v = vel[i];
+  let g = p / P.cell;
+  let a = sampleAcc(i32(floor(g.x)), i32(floor(g.y)));
+  v = v + a * P.dt;
+  p = fract(p + v * P.dt + vec2<f32>(1.0, 1.0));
+  pos[i] = p;
+  vel[i] = v;
+}
+
+// ---------- SPH: 이웃 9셀 순회로 밀도 계산 ----------
+// 정렬 생성 상태를 전제하므로 cellStart[c] = c * perCell 로 계산된다(배열 불필요).
+// = SPH에 가장 유리한 조건(완전 정렬 + 균등 분포 + 워프 발산 최소).
+@compute @workgroup_size(256)
+fn sphDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  let p = pos[i];
+  let g = p / P.cell;
+  let cx = i32(floor(g.x));
+  let cy = i32(floor(g.y));
+  var rho = 0.0;
+  for (var dy = -1; dy <= 1; dy = dy + 1) {
+    for (var dx = -1; dx <= 1; dx = dx + 1) {
+      let nx = clamp(cx + dx, 0, i32(P.gw) - 1);
+      let ny = clamp(cy + dy, 0, i32(P.gh) - 1);
+      let c = u32(ny) * P.gw + u32(nx);
+      let s = c * P.perCell;
+      if (s >= P.n) { continue; }
+      let e = min(s + P.perCell, P.n);
+      for (var j = s; j < e; j = j + 1u) {
+        let d = pos[j] - p;
+        let r2 = dot(d, d);
+        if (r2 < P.h2) {
+          let q = 1.0 - r2 / P.h2;
+          rho = rho + q * q * q;
+        }
+      }
+    }
+  }
+  dens[i] = rho;
+}
+
+// ---------- SPH: 압력력 (두 번째 이웃 순회) ----------
+@compute @workgroup_size(256)
+fn sphForce(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = pidx(gid);
+  if (i >= P.n) { return; }
+  let p = pos[i];
+  let rhoI = max(dens[i], 1e-6);
+  let g = p / P.cell;
+  let cx = i32(floor(g.x));
+  let cy = i32(floor(g.y));
+  var f = vec2<f32>(0.0, 0.0);
+  for (var dy = -1; dy <= 1; dy = dy + 1) {
+    for (var dx = -1; dx <= 1; dx = dx + 1) {
+      let nx = clamp(cx + dx, 0, i32(P.gw) - 1);
+      let ny = clamp(cy + dy, 0, i32(P.gh) - 1);
+      let c = u32(ny) * P.gw + u32(nx);
+      let s = c * P.perCell;
+      if (s >= P.n) { continue; }
+      let e = min(s + P.perCell, P.n);
+      for (var j = s; j < e; j = j + 1u) {
+        let d = p - pos[j];
+        let r2 = dot(d, d);
+        if (r2 < P.h2 && r2 > 1e-12) {
+          let r = sqrt(r2);
+          let rhoJ = max(dens[j], 1e-6);
+          let w = (P.h - r) * (P.h - r);
+          f = f + (d / r) * (w * (rhoI + rhoJ) * 0.5);
+        }
+      }
+    }
+  }
+  var v = vel[i];
+  v = v + f * P.dt * 1e-6;
+  vel[i] = v;
+  pos[i] = fract(p + v * P.dt + vec2<f32>(1.0, 1.0));
+}
+`;
+
+const ENTRIES = ['initRandom','initSorted','clearGrid','scatterCIC','scatterNGP',
+                 'gridSolve','gatherCIC','gatherNGP','sphDensity','sphForce'];
+
+function dispatchFor(count) {
+  const wg = Math.ceil(count / 256);
+  const x = Math.min(wg, 65535);
+  const y = Math.ceil(wg / x);
+  return { x, y, wgx: x };
+}
+
+async function main() {
+  if (!navigator.gpu) { log('NO_WEBGPU'); return; }
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const hasTS = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({
+    requiredFeatures: hasTS ? ['timestamp-query'] : [],
+    requiredLimits: {
+      maxBufferSize: adapter.limits.maxBufferSize,
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxComputeWorkgroupsPerDimension: adapter.limits.maxComputeWorkgroupsPerDimension,
+    },
+  });
+  let gpuErr = null;
+  device.addEventListener?.('uncapturederror', e => { if (!gpuErr) gpuErr = e.error.message; });
+
+  const module = device.createShaderModule({ code: WGSL });
+  const ci = await module.getCompilationInfo();
+  const errs = ci.messages.filter(m => m.type === 'error');
+  if (errs.length) { for (const m of errs) log('WGSL ERROR ' + m.lineNum + ': ' + m.message); log('RESULT: SHADER_FAILED'); return; }
+
+  const bglEntries = [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } }];
+  for (let b = 1; b <= 8; b++) bglEntries.push({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } });
+  const bgl = device.createBindGroupLayout({ entries: bglEntries });
+  const plyt = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+  const pipe = {};
+  for (const e of ENTRIES) pipe[e] = device.createComputePipeline({ layout: plyt, compute: { module, entryPoint: e } });
+  log('device OK / timestamp-query=' + hasTS + ' / 파이프라인 ' + ENTRIES.length + '개 컴파일 성공');
+
+  async function setup(N, G, sorted) {
+    const cells = G * G;
+    const dn = dispatchFor(N);
+    const dc = dispatchFor(cells);
+    const perCell = Math.max(1, Math.ceil(N / cells));
+
+    const paramsBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const ab = new ArrayBuffer(64);
+    new Uint32Array(ab, 0, 8).set([N, G, G, dn.wgx, dc.wgx, perCell, 0, 0]);
+    const h = 1.0 / G;
+    new Float32Array(ab, 32, 8).set([1.0 / G, 0.0015, 4096.0, 2.0e-7, h, h * h, 0, 0]);
+    device.queue.writeBuffer(paramsBuf, 0, ab);
+
+    const mk = b => device.createBuffer({ size: b, usage: GPUBufferUsage.STORAGE });
+    const bufs = {
+      pos: mk(N * 8), vel: mk(N * 8),
+      gMass: mk(cells * 4), gMomX: mk(cells * 4), gMomY: mk(cells * 4),
+      gAccX: mk(cells * 4), gAccY: mk(cells * 4), dens: mk(N * 4),
+    };
+    const bindGroup = device.createBindGroup({
+      layout: bgl,
+      entries: [
+        { binding: 0, resource: { buffer: paramsBuf } },
+        { binding: 1, resource: { buffer: bufs.pos } },
+        { binding: 2, resource: { buffer: bufs.vel } },
+        { binding: 3, resource: { buffer: bufs.gMass } },
+        { binding: 4, resource: { buffer: bufs.gMomX } },
+        { binding: 5, resource: { buffer: bufs.gMomY } },
+        { binding: 6, resource: { buffer: bufs.gAccX } },
+        { binding: 7, resource: { buffer: bufs.gAccY } },
+        { binding: 8, resource: { buffer: bufs.dens } },
+      ],
+    });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    const initName = sorted ? 'initSorted' : 'initRandom';
+    pass.setPipeline(pipe[initName]); pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(dn.x, dn.y);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    const memMB = (N * 20 + cells * 20) / 1048576;
+    return { bufs, bindGroup, paramsBuf, dn, dc, G, cells, memMB, perCell };
+  }
+
+  function encodePasses(enc, ctx, names, querySet, q0) {
+    let q = q0;
+    for (const name of names) {
+      const desc = {};
+      if (querySet) desc.timestampWrites = { querySet, beginningOfPassWriteIndex: q, endOfPassWriteIndex: q + 1 };
+      const pass = enc.beginComputePass(desc);
+      pass.setPipeline(pipe[name]); pass.setBindGroup(0, ctx.bindGroup);
+      if (name === 'gridSolve') pass.dispatchWorkgroups(Math.ceil(ctx.G / 16), Math.ceil(ctx.G / 16));
+      else if (name === 'clearGrid') pass.dispatchWorkgroups(ctx.dc.x, ctx.dc.y);
+      else pass.dispatchWorkgroups(ctx.dn.x, ctx.dn.y);
+      pass.end();
+      q += 2;
+    }
+    return q;
+  }
+
+  async function measure(ctx, names, steps) {
+    for (let i = 0; i < 15; i++) { const e = device.createCommandEncoder(); encodePasses(e, ctx, names, null, 0); device.queue.submit([e.finish()]); }
+    await device.queue.onSubmittedWorkDone();
+    const t0 = performance.now();
+    for (let i = 0; i < steps; i++) { const e = device.createCommandEncoder(); encodePasses(e, ctx, names, null, 0); device.queue.submit([e.finish()]); }
+    await device.queue.onSubmittedWorkDone();
+    const ms = (performance.now() - t0) / steps;
+
+    let bd = null;
+    if (hasTS) {
+      const T = 8, qc = names.length * 2 * T;
+      const qs = device.createQuerySet({ type: 'timestamp', count: qc });
+      const rb = device.createBuffer({ size: qc * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+      const mb = device.createBuffer({ size: qc * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const e = device.createCommandEncoder();
+      let q = 0; for (let i = 0; i < T; i++) q = encodePasses(e, ctx, names, qs, q);
+      e.resolveQuerySet(qs, 0, qc, rb, 0); e.copyBufferToBuffer(rb, 0, mb, 0, qc * 8);
+      device.queue.submit([e.finish()]);
+      await mb.mapAsync(GPUMapMode.READ);
+      const ts = new BigUint64Array(mb.getMappedRange().slice(0)); mb.unmap();
+      const s = new Array(names.length).fill(0);
+      for (let i = 0; i < T; i++) for (let p = 0; p < names.length; p++) {
+        s[p] += Number(ts[(i * names.length + p) * 2 + 1] - ts[(i * names.length + p) * 2]) / 1e6;
+      }
+      bd = s.map(x => x / T);
+      qs.destroy(); rb.destroy(); mb.destroy();
+    }
+    return { ms, bd };
+  }
+
+  function teardown(ctx) { for (const k in ctx.bufs) ctx.bufs[k].destroy(); ctx.paramsBuf.destroy(); }
+
+  const N = 10_000_000;
+  log('');
+  log('=== A. X1 파이프라인: 산란방식 × 파티클순서 × 격자크기 (N=' + N.toLocaleString() + ') ===');
+  log('  산란   순서      격자     메모리    ms/step     FPS   clear/scatter/grid/gather');
+  const A = [];
+  for (const G of [1024, 2048, 4096]) {
+    for (const mode of ['CIC', 'NGP']) {
+      for (const sorted of [false, true]) {
+        try {
+          const ctx = await setup(N, G, sorted);
+          const names = ['clearGrid', 'scatter' + mode, 'gridSolve', 'gather' + mode];
+          const r = await measure(ctx, names, 60);
+          teardown(ctx);
+          if (gpuErr) { log('  GPU ERROR: ' + gpuErr); gpuErr = null; continue; }
+          A.push({ G, mode, sorted, ms: r.ms });
+          log('  ' + mode.padEnd(5) + '  ' + (sorted ? '정렬 ' : '무작위') + '  ' + (G + '^2').padStart(7)
+            + '  ' + ctx.memMB.toFixed(0).padStart(5) + 'MB  ' + r.ms.toFixed(3).padStart(8)
+            + '  ' + (1000 / r.ms).toFixed(1).padStart(7) + '   '
+            + (r.bd ? r.bd.map(x => x.toFixed(2)).join('/') : 'n/a'));
+        } catch (e) { log('  ' + mode + ' ' + (sorted ? '정렬' : '무작위') + ' ' + G + '^2 FAILED: ' + e.message); }
+      }
+    }
+  }
+
+  log('');
+  log('=== B. SPH 이웃순회 (밀도+압력력 2패스) — SPH에 최선 조건: 완전정렬 + 균등분포 ===');
+  log('  N            격자     셀당   ms/step     FPS   density/force');
+  for (const [n, G] of [[1_000_000, 1024], [10_000_000, 2048], [10_000_000, 4096]]) {
+    try {
+      const ctx = await setup(n, G, true);
+      const r = await measure(ctx, ['sphDensity', 'sphForce'], 20);
+      teardown(ctx);
+      if (gpuErr) { log('  GPU ERROR: ' + gpuErr); gpuErr = null; continue; }
+      log('  ' + String(n).padStart(10) + '  ' + (G + '^2').padStart(7) + '  ' + String(ctx.perCell).padStart(4)
+        + '  ' + r.ms.toFixed(3).padStart(9) + '  ' + (1000 / r.ms).toFixed(1).padStart(7)
+        + '   ' + (r.bd ? r.bd.map(x => x.toFixed(2)).join('/') : 'n/a'));
+    } catch (e) { log('  SPH ' + n + ' ' + G + '^2 FAILED: ' + e.message); }
+  }
+
+  log('');
+  log('RESULT: DONE');
+}
+
+main().catch(e => log('EXCEPTION: ' + (e && e.stack ? e.stack : e)));
+</script>
+</body>
+</html>
