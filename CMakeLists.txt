@@ -57,7 +57,7 @@ add_executable(nbody WIN32
   src/main.cpp
   src/app/App.cpp
   src/gfx/GLContext.cpp
-  src/gfx/RenderField.cpp
+  src/gfx/RenderField.cu
   src/ui/Board.cpp
   src/ui/Hud.cpp
   ${IMGUI_DIR}/imgui.cpp
@@ -65,7 +65,9 @@ add_executable(nbody WIN32
   ${IMGUI_DIR}/imgui_tables.cpp
   ${IMGUI_DIR}/imgui_widgets.cpp
   ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
-  ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+  # OpenGL2 백엔드를 쓴다. GL3 코어 컨텍스트를 만들려면 wglCreateContextAttribsARB 배선이 필요한데
+  # 증분 1 의 목표(창이 뜨고 파티클이 뭉치는 것을 본다)에는 GL 1.1 로 충분하다.
+  ${IMGUI_DIR}/backends/imgui_impl_opengl2.cpp
 )
 target_include_directories(nbody PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -77,4 +79,14 @@ target_link_libraries(nbody PRIVATE
   opengl32
   dwmapi
 )
+
+# CUDA 13 은 런타임 DLL 을 bin\x64\ 에 둔다(bin 직하에는 없다).
+# 실행 파일 옆에 복사해 두지 않으면 더블클릭 실행이 STATUS_DLL_NOT_FOUND 로 죽는다.
+file(GLOB NBODY_CUDA_DLLS
+  "${CUDAToolkit_BIN_DIR}/x64/cufft64_*.dll"
+  "${CUDAToolkit_BIN_DIR}/cufft64_*.dll")
+foreach(dll ${NBODY_CUDA_DLLS})
+  add_custom_command(TARGET nbody POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "$<TARGET_FILE_DIR:nbody>")
+endforeach()
 endif()
