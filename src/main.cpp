@@ -241,7 +241,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             if (ImGui::Button("설정 보드 열기 ▸")) g_boardOpen = true;
             ImGui::End();
         }
-        if (DrawBoard(app, g_boardOpen)) app.applyConfig();
+        // 보드는 app.cfg 값만 만진다. 코어 반영은 App::tick 이 매 프레임 한다.
+        DrawBoard(app, g_boardOpen);
 
         ImGui::Render();
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());

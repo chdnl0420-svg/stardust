@@ -975,8 +975,20 @@ void Sim::step() {
     const float cell     = 1.0f / (float)G;
     const float vmax     = d->measureMaxSpeed();
     const float CFL      = 0.35f;                 // 한 스텝에 셀의 35% 이상 못 가게 한다
+
+    // 배속을 내렸으면 CFL 한계까지 다 쓰지 않고 그 비율만큼 더 줄인다.
+    //
+    // 왜 필요한가 (round-06 QA-1 실측): 전에는 `dtUse` 가 늘 `dtLimit` 으로 잘려
+    // 배속 0.25 와 3.0 의 dtUsed 가 0.000101 로 똑같았다 — 배속 슬라이더가 통째로 무효였다.
+    // 요청 dt(=0.0016×배속)의 최솟값이 1.6e-4 인데 CFL 한계가 1.0e-4 라, 슬라이더를 어디에 두든
+    // 항상 한계가 이겼기 때문이다.
+    // 느리게 하는 쪽은 안정성과 충돌하지 않으므로(dt 를 줄이는 것은 언제나 안전하다) 한계 자체를 낮춘다.
+    // 빠르게 하는 쪽은 여기서 못 한다 — CFL 은 넘으면 적분이 무너지는 안정성 한계라
+    // dt 를 늘릴 수 없다. 그쪽은 App::tick 이 한 프레임에 스텝을 여러 번 돌려 처리한다.
+    const float slowFactor = (d->cfg.timeScale < 1.0f) ? d->cfg.timeScale : 1.0f;
+
     float dtLimit = dtWanted;
-    if (vmax > 1e-6f) dtLimit = CFL * cell / vmax;
+    if (vmax > 1e-6f) dtLimit = CFL * cell / vmax * slowFactor;
 
     // 한 프레임에 몇 번까지 나눠 돌지. 1 이면 "쪼개지 않고 시간 간격만 자른다".
     //

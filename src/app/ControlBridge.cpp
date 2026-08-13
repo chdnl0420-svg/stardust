@@ -119,7 +119,7 @@ std::string ControlBridge::statusBody(const App& app) const {
     sim.measureCentroid(centroidX, centroidY);
     const double meanTemp = sim.measureMeanTemperature();
 
-    char buf[1400];
+    char buf[1700];
     snprintf(buf, sizeof(buf),
         "ok=1\n"
         "fps=%.2f\nframeMs=%.3f\n"
@@ -129,9 +129,14 @@ std::string ControlBridge::statusBody(const App& app) const {
         "pressure=%d\npressureK=%.4f\ngamma=%.3f\n"
         "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
         "running=%d\nsimTime=%.5f\nactiveCount=%d\nstarCount=%d\n"
-        "renderMode=%s\ncolorBy=%s\nrecording=%d\nrecordedFrames=%d\n"
+        // 표시 설정은 set 으로 바꿀 수 있는데 상태에는 없어서 되읽을 방법이 없었다
+        // (round-06 QA-2 — 컬러맵·밝기·대비·HUD·줌팬 4항목이 자동 검증 불가로 남았다).
+        "renderMode=%s\ncolorBy=%s\ncolormap=%s\n"
+        "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\n"
+        "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
+        "recording=%d\nrecordedFrames=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
-        "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\n"
+        "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
         "vramFreeMB=%.0f\n",
@@ -148,9 +153,13 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.view.mode == RenderMode::Points ? "points" : "field",
         app.view.colorBy == ColorBy::Temperature ? "temperature"
             : app.view.colorBy == ColorBy::Speed ? "speed" : "density",
+        app.view.cmap == ColorMap::Gray ? "gray"
+            : app.view.cmap == ColorMap::Thermal ? "thermal" : "astro",
+        app.view.brightness, app.view.gamma, app.view.showHud ? 1 : 0,
+        app.zoom, app.panX, app.panY,
         app.recording ? 1 : 0, app.recordedFrames,
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
-        t.substeps, t.dtUsed, t.maxSpeed,
+        t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame,
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
         Sim::deviceFreeBytes() / 1048576.0);
@@ -202,21 +211,18 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     }
 
     if (cmd == "set") {
-        bool needApply = false;
         if (has(kv, "particleCount")) {
             int n = getInt(kv, "particleCount", app.cfg.particleCount);
-            if (n > 0) { app.cfg.particleCount = n; needApply = true; }
+            if (n > 0) app.cfg.particleCount = n;
         }
         if (has(kv, "gridSize")) {
             int g = getInt(kv, "gridSize", app.cfg.gridSize);
             // 격자는 2의 거듭제곱만 쓴다(주기 wrap 을 비트 마스크로 처리하기 때문).
-            if (g == 1024 || g == 2048 || g == 4096) { app.cfg.gridSize = g; needApply = true; }
+            if (g == 1024 || g == 2048 || g == 4096) app.cfg.gridSize = g;
         }
-        if (has(kv, "boundary")) {
+        if (has(kv, "boundary"))
             app.cfg.boundary = (kv["boundary"] == "periodic") ? Boundary::Periodic
                                                               : Boundary::Isolated;
-            needApply = true;
-        }
         if (has(kv, "law"))
             app.cfg.law = (kv["law"] == "inverse_r") ? GravityLaw::InverseR
                                                      : GravityLaw::InverseSquare;
@@ -255,7 +261,11 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "panX")) app.panX = getFloat(kv, "panX", app.panX);
         if (has(kv, "panY")) app.panY = getFloat(kv, "panY", app.panY);
 
-        if (needApply) app.applyConfig();
+        // 무엇이 바뀌었든 그 자리에서 코어에 넘긴다.
+        // 전에는 파티클 수·격자·경계에서만 넘겨서, 중력·압력·냉각 같은 값을 단독으로 바꾸면
+        // 계산에는 안 가는데 아래 statusBody 는 app.cfg 의 새 값을 돌려줘 성공한 것처럼 보였다
+        // (round-06 리뷰 P1 #2). 재할당 여부는 Sim::reconfigure 가 판단하므로 항상 불러도 된다.
+        app.applyConfig();
         writeResponse(statusBody(app));
         return false;
     }

@@ -18,7 +18,7 @@ UI 갈래: **데스크톱 앱** (Win32 + OpenGL + Dear ImGui). 유니티 NGUI �
 - [x] 앱을 실행하면 창이 뜨고 파티클이 중력으로 뭉치는 것을 본다 — 확인: `src/main.cpp` `WinMain` + `src/ui/Hud.cpp` `DrawHud`. **화면 스크린샷은 8번 칸 QA 에서**
 - [x] 설정 보드를 접기/펼치기하고 9섹션이 시안대로 놓인 것을 본다 — 확인: `src/ui/Board.cpp` `DrawBoard` 의 `CollapsingHeader` 9개
 - [x] 일시정지·한 스텝·리셋을 눌러 시뮬레이션을 제어한다 — 확인: `src/ui/Board.cpp` + `src/app/App.cpp` `App::tick`
-- [x] 시간 배속을 조절해 시뮬레이션이 빨라지고 느려지는 것을 본다 — 확인: `src/sim/Sim.cu` `Sim::step` 의 `dt = 0.0016f * cfg.timeScale`
+- [ ] 시간 배속을 조절해 시뮬레이션이 빨라지고 느려지는 것을 본다 — **round-06 되돌림**: CFL 클램프가 `dt` 를 항상 덮어써 x0.25 와 x3.0 의 `dtUsed` 가 0.000101 로 동일(`round-06-qa.md` QA-1). 값은 코어에 가는데 효과가 0 이다
 - [x] 창 크기를 조절해도 화면이 정상으로 유지된다 — 확인: `src/main.cpp` `case WM_SIZE` + `src/gfx/RenderField.cu` `ensureSize` (격자와 독립)
 - [x] 성능 섹션에서 단계별 소요 ms 와 예산 대비 막대를 본다 — 확인: `src/ui/Board.cpp` 「성능」 `ProgressBar`
 
@@ -30,28 +30,28 @@ UI 갈래: **데스크톱 앱** (Win32 + OpenGL + Dear ImGui). 유니티 NGUI �
 - [x] VRAM 이 모자라면 최대 가능 수로 잘리고 보드에 안내가 뜬다 — 확인: `Sim::maxParticlesFor` + `clampToVram`. 회귀테스트 [9] **5억 요청 → 8,573만으로 클램프**(가용 7081MB), 잘린 상태로도 정상 동작. 안내는 `src/ui/Board.cpp` 의 `"VRAM 이 모자라 %d 개로 줄였습니다"` + 「최대치로 맞추기」 버튼
 
 ### 중력
-- [x] 중력 세기를 조절해 뭉치는 정도가 달라지는 것을 본다 — 확인: 회귀테스트 `testGravityResponds` 실측 52.4 → 42653.9 (814배)
+- [ ] 중력 세기를 조절해 뭉치는 정도가 달라지는 것을 본다 — **round-06 되돌림**: 회귀테스트(`Sim` 직접 호출)는 통과하지만 **설정 보드 슬라이더는 코어에 전달되지 않는다**(`Board.cpp:88` 이 `needApply` 를 안 켠다 · `round-06-review.md` P1 #1)
 - [x] 중력 공식을 1/r² ↔ 1/r 로 바꿔 그림이 달라지는 것을 본다 — 확인: `kPoissonPeriodic` 의 `denom` 분기, `kGreen` 의 `-1/r` ↔ `log(r)`
 - [x] 경계 조건을 고립 ↔ 주기로 바꾼다 — 확인: `Impl::solveGravity` 의 두 경로
-- [x] 소프트닝을 조절해 근거리 거동이 달라지는 것을 본다 — 확인: `Impl::buildGreen` 의 `eps = softeningCells * cell`
+- [ ] 소프트닝을 조절해 근거리 거동이 달라지는 것을 본다 — **round-06 되돌림**: 보드 슬라이더가 코어에 안 감(P1 #1). 더해 **주기 경계에서는 소프트닝이 아예 안 쓰인다**(P2 #19 — `Sim.cu:731` 주파수 커널이 `softeningCells` 와 무관)
 - [x] 격자 중력이 직접 O(N²) 대비 허용 오차 안에 있다 — 확인: `testForceAccuracy` **실측 0.0729(256²) / 0.1200(512²)**, 판정선 0.15
 
 ### 가스
-- [x] 압력을 켜고 꺼서 뭉침 정도가 달라지는 것을 본다 — 확인: `Sim::step` 의 `kPressure` + `kGridAccel(usePressure)`
+- [ ] 압력을 켜고 꺼서 뭉침 정도가 달라지는 것을 본다 — **round-06 되돌림**: 물리는 정상(QA D1 압력off 2585.8 → on 89.08)이나 **보드 체크박스가 코어에 안 간다**(P1 #1)
 - [x] **두 가스 덩어리를 충돌시켜 충격파 전선(밀도 불연속)이 서는 것을 본다** — 확인: `build/shots5/06-shock-pressure.png`·`07-shock-temperature.png` — 두 덩어리가 압축돼 달아오르고 사이에 경계가 섰다. 압력 off 최대밀도 4455.6 → on 89.8 (압력이 붕괴를 떠받친다). 압력을 평균밀도로 정규화(`Impl::invMeanRho`)해 파티클 수와 무관하게 만들었다
-- [x] 온도 추적을 켜서 충돌면이 달아오르는 것을 색으로 본다 — 확인: `build/shots5/07-shock-temperature.png` (색 기준=온도, 컬러맵=열화상). `kIntegrate` 의 압축 가열 항 + `Sim::fieldDevicePtr(Field::Temperature)`
-- [x] 복사 냉각을 켜서 가스가 식으며 더 뭉치는 것을 본다 — 확인: `build/shots5/08-cooling-on.png`. **평균온도 냉각off 0.4309 → on 0.0570** (7.6배). 온도를 압력에 연결(`kPressure` 의 `P *= (1+T)`)해 냉각이 뭉침에 영향을 주게 했다
-- [x] 별 형성을 켜서 조밀·차가운 가스가 별로 바뀌는 것을 본다 — 확인: `kStarFormation` (밀도 AND 온도 임계). `build/shots5/09-star-formation.png`, **별 1,994,049개 / 파티클 2,000,000**. 보드에 개수와 비율 표시
-- [x] 단열지수 γ 를 조절해 압력 반응이 달라지는 것을 본다 — 확인: `kPressure` 의 `powf(rho, gamma)`
+- [ ] 온도 추적을 켜서 충돌면이 달아오르는 것을 색으로 본다 — **round-06 되돌림**: 화면은 정상(QA D2 평균온도 0.4730)이나 **보드 체크박스가 코어에 안 간다**(P1 #1)
+- [ ] 복사 냉각을 켜서 가스가 식으며 더 뭉치는 것을 본다 — **round-06 되돌림**: 물리는 정상(QA D3 평균온도 0.4629 → 0.0554)이나 **보드 체크박스가 코어에 안 간다**(P1 #1)
+- [ ] 별 형성을 켜서 조밀·차가운 가스가 별로 바뀌는 것을 본다 — **round-06 되돌림**: 개수는 나오지만(QA D4 별 1,994,530) ①보드 체크박스가 코어에 안 가고(P1 #1) ②**정렬이 `isStar` 를 함께 옮기지 않아 별 표식이 다른 파티클에 붙고**(P1 #5) ③**지우개 압축이 `isStar` 를 압축하지 않는다**(P1 #6)
+- [ ] 단열지수 γ 를 조절해 압력 반응이 달라지는 것을 본다 — **round-06 되돌림**: 보드 슬라이더가 코어에 안 감(P1 #1). MCP 경유로는 정상(QA D5 135.75 vs 104.77)
 
 ### 우주
-- [x] 우주 팽창을 켜서 구조 형성이 팽창과 경쟁하는 것을 본다 — 확인: `kIntegrate` 의 허블 감쇠 항(주기 경계에서만 적용). `build/shots5/10-web-noexpansion.png` vs `11-web-expansion.png`, 같은 1200스텝에서 점유셀 1,008,033 → 1,008,049 (팽창이 뭉침을 늦춰 더 퍼져 있다)
+- [ ] 우주 팽창을 켜서 구조 형성이 팽창과 경쟁하는 것을 본다 — **round-06 되돌림**: 물리는 정상(QA E1 점유셀 1,008,059 → 1,008,070)이나 **보드 체크박스가 코어에 안 간다**(P1 #1)
 - [x] 고립 경계를 고르면 팽창 토글이 자동으로 잠긴다 — 확인: `src/ui/Board.cpp` 「우주」 `BeginDisabled(!periodic)`
 
 ### 표시
 - [x] 밀도 필드와 파티클 점을 전환해 본다 — 확인: `RenderField::draw` 의 두 경로(`kShade` / `kSplatPoints`+`kAccumToRGBA`). `build/shots5/01-field-density.png` vs `02-points-density.png`
 - [x] 색 기준을 밀도/온도/속도로 바꾼다 — 확인: `Sim::fieldDevicePtr(Field)` 가 온도·속도를 밀도 가중 평균으로 격자에 만든다. `build/shots5/03-points-temperature.png`·`04-points-speed.png`
-- [x] 컬러맵을 천체/흑백/열화상으로 바꾼다 — 확인: `src/gfx/RenderField.cu` `kShade` 의 `cmapKind` 분기
+- [ ] 컬러맵을 천체/흑백/열화상으로 바꾼다 — **round-06 되돌림**: 밀도 필드 모드만 된다. **점 렌더 모드는 컬러맵을 무시**한다(`round-06-review.md` P2 #26 — `RenderField.cu:100` 이 커널에 `cmapKind` 를 안 넘긴다)
 - [x] 밝기와 대비를 조절해 어두운 구조를 드러낸다 — 확인: `kShade` 의 `__logf(1+d*bright)` · `__powf(., invGamma)`
 - [x] HUD 를 끄고 켠다 — 확인: `src/ui/Hud.cpp` `if (!app.view.showHud) return;`
 
@@ -69,7 +69,7 @@ UI 갈래: **데스크톱 앱** (Win32 + OpenGL + Dear ImGui). 유니티 NGUI �
 - [x] 조석 꼬리 프리셋에서 두 원반이 스치며 꼬리가 뻗는 것을 본다 — 확인: `kPlace case 1` + 가까운 중심 선택, 테스트 점유셀 3226
 - [x] 충격파 프리셋에서 정면충돌로 전선이 서는 것을 본다 — 확인: `kPlace case 2`, 테스트 점유셀 2870
 - [x] 구조 형성 프리셋에서 우주 거미줄이 자라는 것을 본다 — 확인: `kPlace case 3` + 주기 경계 전환, 테스트 점유셀 65337
-- [x] 프리셋을 고르면 경계·압력·팽창이 함께 바뀐다 — 확인: `src/app/App.cpp` `ApplyPresetDefaults` (설정 보드와 MCP 가 같은 함수를 쓴다). MCP 테스트 [3-b] — 나선팔 pressure=0 / 충격파 pressure=1, 구조형성 boundary=periodic·expansion=0
+- [ ] 프리셋을 고르면 경계·압력·팽창이 함께 바뀐다 — **round-06 되돌림**: MCP 경로는 정상(QA H5)이나 **보드의 프리셋 버튼은 `applyConfig()` 보다 `sim.reset()` 을 먼저 불러 옛 프리셋으로 리셋된다**(`Board.cpp:194` · P1 #3)
 
 ### 녹화
 - [x] 스냅샷 버튼으로 현재 화면을 PNG 로 저장한다 — 확인: `src/ui/Board.cpp` 「📷 스냅샷 저장」 → `src/main.cpp` 의 캡처 절 → `WritePngRGBA`. `captures/snap-HHMMSS-mmm.png`

@@ -1,0 +1,352 @@
+{
+ "rows": [
+  {
+   "verdict": "PASS",
+   "id": "A1a",
+   "label": "앱이 뜨고 상태를 읽는다",
+   "detail": "activeCount=2000000 grid=1024 fps=0",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "A1b",
+   "label": "파티클이 중력으로 뭉치는 것을 본다",
+   "detail": "최대밀도 27.28 -> 623.42",
+   "png": "01-start.png / 02-clumped.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "A2",
+   "label": "설정 보드 9섹션이 화면에 있다",
+   "detail": "판정 근거는 스크린샷 — 시안(design-mockup.html) 과 대조한다",
+   "png": "02-clumped.png"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "A3",
+   "label": "일시정지·한 스텝을 눌러 제어한다",
+   "detail": "running 1->0, steps undefined -> undefined",
+   "png": ""
+  },
+  {
+   "verdict": "FAIL",
+   "id": "A3b",
+   "label": "리셋으로 초기 상태로 돌아간다",
+   "detail": "steps=undefined activeCount=2000000 maxDensity=27.3",
+   "png": ""
+  },
+  {
+   "verdict": "FAIL",
+   "id": "A4",
+   "label": "시간 배속을 조절해 진행 속도가 달라진다",
+   "detail": "같은 200스텝 최대밀도 x0.25=37.14  x2.0=37.14",
+   "png": ""
+  },
+  {
+   "verdict": "FAIL",
+   "id": "A6",
+   "label": "성능 섹션에서 단계별 소요 ms 를 본다",
+   "detail": "필드 0종: ",
+   "png": "03-perf.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "B1",
+   "label": "파티클 수를 바꾸면 즉시 반영된다",
+   "detail": "500000 -> 500000, 3000000 -> 3000000",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "B2",
+   "label": "격자 해상도 1024/2048/4096 을 바꾼다",
+   "detail": "2048 -> 4096 -> 1024",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "B4",
+   "label": "정렬 주기를 조절한다",
+   "detail": "8 -> 8, 64 -> 64",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "B5",
+   "label": "VRAM 이 모자라면 최대 가능 수로 잘린다",
+   "detail": "5억 요청 -> 88592435 개로 클램프",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "B5b",
+   "label": "보드에 클램프 안내가 뜬다",
+   "detail": "판정 근거는 스크린샷",
+   "png": "04-vram-clamp.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "B3",
+   "label": "파티클 1000만 개에서 60 FPS 로 돈다",
+   "detail": "activeCount=10000000 fps=148.55 msFrame=undefined",
+   "png": "05-10m-particles.png"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "C1",
+   "label": "중력 세기를 조절해 뭉치는 정도가 달라진다",
+   "detail": "최대밀도 g=0.15 -> 431.34 / g=1.6 -> 431.32",
+   "png": "06-gravity-strong.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "C2",
+   "label": "중력 공식을 1/r2 <-> 1/r 로 바꿔 그림이 달라진다",
+   "detail": "최대밀도 1/r2=452.38  1/r=28.66",
+   "png": "07-law-inverse-square.png / 08-law-inverse-r.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "C3",
+   "label": "경계 조건을 고립 <-> 주기로 바꾼다",
+   "detail": "isolated -> periodic",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "C4",
+   "label": "소프트닝을 조절해 근거리 거동이 달라진다",
+   "detail": "최대밀도 eps=0.6 -> 391.78 / eps=4.0 -> 135.73",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "D1",
+   "label": "압력을 켜고 꺼서 뭉침 정도가 달라진다 / 충격파 전선이 선다",
+   "detail": "최대밀도 압력off=2585.8  on=89.08",
+   "png": "09-pressure-off.png / 10-pressure-on.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "D2",
+   "label": "온도 추적을 켜서 충돌면이 달아오르는 것을 색으로 본다",
+   "detail": "평균온도=0.472953 colorBy=temperature",
+   "png": "11-temperature.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "D3",
+   "label": "복사 냉각을 켜서 가스가 식는다",
+   "detail": "평균온도 냉각off=0.462887  on=0.05539",
+   "png": "12-cooling-on.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "D4",
+   "label": "별 형성을 켜서 조밀·차가운 가스가 별로 바뀐다",
+   "detail": "별 1994530 / 파티클 2000000",
+   "png": "13-star-formation.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "D5",
+   "label": "단열지수 gamma 를 조절해 압력 반응이 달라진다",
+   "detail": "최대밀도 g=1.1 -> 135.75 / g=2.0 -> 104.77",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "E1",
+   "label": "우주 팽창을 켜서 구조 형성이 팽창과 경쟁한다",
+   "detail": "점유셀 팽창off=1008059  on=1008070",
+   "png": "14-web-noexpansion.png / 15-web-expansion.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "E2",
+   "label": "고립 경계를 고르면 팽창 토글이 잠긴다",
+   "detail": "판정 근거는 스크린샷 — 「우주」 섹션이 회색으로 비활성",
+   "png": "16-expansion-locked.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "F1",
+   "label": "밀도 필드와 파티클 점을 전환한다",
+   "detail": "field -> points",
+   "png": "17-render-field.png / 18-render-points.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "F2",
+   "label": "색 기준을 밀도/온도/속도로 바꾼다",
+   "detail": "temperature, speed",
+   "png": "19-colorby-temperature.png / 20-colorby-speed.png"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "F3",
+   "label": "컬러맵을 천체/흑백/열화상으로 바꾼다",
+   "detail": "undefined, undefined, undefined",
+   "png": "21-colormap-astro.png / 22-colormap-gray.png / 23-colormap-thermal.png"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "F4",
+   "label": "밝기와 대비를 조절해 어두운 구조를 드러낸다",
+   "detail": "밝기 undefined -> undefined, 감마 undefined -> undefined",
+   "png": "24-brightness-low.png / 25-brightness-high.png"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "F5",
+   "label": "HUD 를 끄고 켠다",
+   "detail": "hud undefined -> undefined",
+   "png": "26-hud-off.png / 27-hud-on.png"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "G1",
+   "label": "카메라를 줌·팬해 원하는 곳을 확대한다",
+   "detail": "zoom undefined -> undefined",
+   "png": "28-zoom-in.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "G2",
+   "label": "빈 판에서 형태(회전 원반)를 추가해 초기조건을 만든다",
+   "detail": "빈판 0 -> 원반 추가 후 400000",
+   "png": "29-empty.png / 30-add-disk.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "G3",
+   "label": "형태 종류를 원반·덩어리·고리 중에서 고르고, 요청한 개수만큼 정확히 들어간다",
+   "detail": "400000 -> 700000 -> 1000000 (요청 누계 1000000)",
+   "png": "31-three-shapes.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "G4",
+   "label": "돌아가는 중에 가스를 뿌려 흐름을 흔든다",
+   "detail": "최대속력 2.7371 -> 5.0352",
+   "png": "32-spray.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "G5",
+   "label": "중력 우물을 놓아 물질을 끌어모은다",
+   "detail": "우물까지 질량중심 거리 0.5147 -> 0.5126",
+   "png": "33-well.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "G6",
+   "label": "지우개로 지우고, 지운 뒤 재추가도 정확하다",
+   "detail": "1000000 -> 지움 600000 -> 재추가 800000",
+   "png": "34-erase.png / 35-readd.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "H1",
+   "label": "나선팔 — 회전 원반이 구조를 만든다",
+   "detail": "점유셀=99617 최대밀도=540.06 경계=isolated 압력=0",
+   "png": "36-preset-spiral.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "H2",
+   "label": "조석 꼬리 — 두 원반이 스치며 꼬리가 뻗는다",
+   "detail": "점유셀=25610 최대밀도=1681.09 경계=isolated 압력=0",
+   "png": "36-preset-tidal.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "H3",
+   "label": "충격파 — 정면충돌로 전선이 선다",
+   "detail": "점유셀=93029 최대밀도=94.91 경계=isolated 압력=1",
+   "png": "36-preset-shock.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "H4",
+   "label": "구조 형성 — 우주 거미줄이 자란다",
+   "detail": "점유셀=1008278 최대밀도=8.08 경계=periodic 압력=0",
+   "png": "36-preset-web.png"
+  },
+  {
+   "verdict": "PASS",
+   "id": "H5",
+   "label": "프리셋을 고르면 경계·압력·팽창이 함께 바뀐다",
+   "detail": "나선팔 pressure=0/boundary=isolated, 충격파 pressure=1, 구조형성 boundary=periodic",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "I2",
+   "label": "녹화를 시작·정지해 PNG 시퀀스를 얻는다",
+   "detail": "on=1 프레임=48 파일=48개 첫파일=5626KB",
+   "png": ""
+  },
+  {
+   "verdict": "PASS",
+   "id": "I1",
+   "label": "현재 화면을 PNG 로 저장한다",
+   "detail": "1600x900, 540KB (보드의 「스냅샷 저장」 버튼 클릭은 창 입력이라 별도 확인 필요, 기존 snap-*.png 0개)",
+   "png": "37-snapshot.png"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "J1",
+   "label": "강한 중력에서도 파티클이 튕겨 나가지 않는다 (CFL 클램프)",
+   "detail": "중력2.0 800스텝: 질량 상대변화=NaN 최대속력=6.7788 dtUsed=0.00005",
+   "png": "38-strong-gravity.png"
+  }
+ ],
+ "pass": 33,
+ "fail": 10,
+ "blocked": 0,
+ "finalSt": {
+  "ok": 1,
+  "fps": 559.37,
+  "frameMs": 1.874,
+  "particleCount": 2000000,
+  "gridSize": 1024,
+  "boundary": "isolated",
+  "law": "inverse_square",
+  "preset": "spiral",
+  "gravity": 2,
+  "softeningCells": 1.5,
+  "timeScale": 1,
+  "sortInterval": 16,
+  "pressure": 0,
+  "pressureK": 1.2,
+  "gamma": 1.667,
+  "temperature": 1,
+  "cooling": 0,
+  "starFormation": 0,
+  "expansion": 0,
+  "running": 0,
+  "simTime": 0.04646,
+  "activeCount": 2000000,
+  "starCount": 0,
+  "renderMode": "field",
+  "colorBy": "density",
+  "recording": 0,
+  "recordedFrames": 48,
+  "stepMs": 1.3643,
+  "scatterMs": 0.4093,
+  "poissonMs": 0.4775,
+  "gatherMs": 0.3411,
+  "gasMs": 0,
+  "substeps": 1,
+  "dtUsed": 0.00005,
+  "maxSpeed": 6.7788,
+  "totalMass": 2000000,
+  "maxDensity": 544.8,
+  "occupiedCells": 92664,
+  "centroidX": 0.50097,
+  "centroidY": 0.50009,
+  "meanTemp": 0.816932,
+  "vramFreeMB": 6785
+ }
+}

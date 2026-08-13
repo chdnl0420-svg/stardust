@@ -30,9 +30,8 @@ const char* PresetName(Preset p) {
 
 } // namespace
 
-bool DrawBoard(App& app, bool& boardOpen) {
-    bool needApply = false;
-    if (!boardOpen) return false;
+void DrawBoard(App& app, bool& boardOpen) {
+    if (!boardOpen) return;
 
     ImGuiIO& io = ImGui::GetIO();
     const float boardW = 320.0f;
@@ -53,13 +52,16 @@ bool DrawBoard(App& app, bool& boardOpen) {
         ImGui::SameLine();
         if (ImGui::Button("⏭ 한 스텝")) { app.running = false; app.stepOnce = true; }
         ImGui::SameLine();
-        if (ImGui::Button("↺ 리셋")) app.sim.reset();
+        if (ImGui::Button("↺ 리셋")) {
+            // 지금 화면에 있는 설정으로 초기조건을 다시 만든다.
+            // 코어에 먼저 넘기지 않으면 이번 프레임에 만진 값이 빠진 채로 리셋된다.
+            app.applyConfig();
+            app.sim.reset();
+        }
 
         int n = app.cfg.particleCount / 100000;
-        if (ImGui::SliderInt("파티클 수", &n, 1, 300, "%d0만")) {
+        if (ImGui::SliderInt("파티클 수", &n, 1, 300, "%d0만"))
             app.cfg.particleCount = n * 100000;
-            needApply = true;
-        }
         // 코어가 VRAM 에 안 들어가는 요청을 최대 가능 수로 잘랐으면 그 사실을 알린다.
         // 조용히 줄이면 사용자는 슬라이더 값이 반영된 줄 안다.
         if (app.sim.particleCount() < app.cfg.particleCount) {
@@ -74,11 +76,12 @@ bool DrawBoard(App& app, bool& boardOpen) {
 
         const char* gridItems[] = { "1024²", "2048²", "4096²" };
         int gridIdx = (app.cfg.gridSize == 1024) ? 0 : (app.cfg.gridSize == 2048) ? 1 : 2;
-        if (ImGui::Combo("격자 해상도", &gridIdx, gridItems, 3)) {
+        if (ImGui::Combo("격자 해상도", &gridIdx, gridItems, 3))
             app.cfg.gridSize = (gridIdx == 0) ? 1024 : (gridIdx == 1) ? 2048 : 4096;
-            needApply = true;
-        }
+
         ImGui::SliderFloat("시간 배속", &app.cfg.timeScale, 0.1f, 4.0f, "%.1fx");
+        if (app.cfg.timeScale > 1.0f)
+            SectionNote("배속을 1보다 올리면 한 프레임에 스텝을 여러 번 돈다 — 계산량도 그만큼 늘어난다.");
         ImGui::SliderInt("정렬 주기", &app.cfg.sortInterval, 1, 120, "%d 스텝");
         SectionNote("정렬 주기는 성능에만 영향을 준다. 실측상 40스텝까지는 유지되고 80부터 나빠진다.");
     }
@@ -94,10 +97,8 @@ bool DrawBoard(App& app, bool& boardOpen) {
         }
         const char* bndItems[] = { "고립 (은하)", "주기 (우주론)" };
         int bndIdx = (app.cfg.boundary == Boundary::Isolated) ? 0 : 1;
-        if (ImGui::Combo("경계 조건", &bndIdx, bndItems, 2)) {
+        if (ImGui::Combo("경계 조건", &bndIdx, bndItems, 2))
             app.cfg.boundary = (bndIdx == 0) ? Boundary::Isolated : Boundary::Periodic;
-            needApply = true;
-        }
         ImGui::SliderFloat("소프트닝", &app.cfg.softeningCells, 0.5f, 6.0f, "%.1f 셀");
     }
 
@@ -191,7 +192,9 @@ bool DrawBoard(App& app, bool& boardOpen) {
             if (ImGui::Button(PresetName(order[i]), ImVec2(138, 0))) {
                 // 경계·압력·팽창을 시나리오에 맞게 함께 바꾼다(App.cpp 의 공통 규칙)
                 ApplyPresetDefaults(app.cfg, order[i]);
-                needApply = true;
+                // 순서가 중요하다 — 코어에 새 프리셋을 넘긴 뒤에 초기조건을 다시 만든다.
+                // 전에는 reset() 이 먼저라 옛 프리셋으로 배치됐다(round-06 리뷰 P1 #3).
+                app.applyConfig();
                 app.sim.reset();
                 app.running = true;
             }
@@ -245,6 +248,10 @@ bool DrawBoard(App& app, bool& boardOpen) {
         ImGui::Text("산란 %.3f   FFT %.3f", t.scatterMs, t.poissonMs);
         ImGui::Text("보간 %.3f   가스 %.3f", t.gatherMs, t.gasMs);
         ImGui::Text("스텝 합계 %.3f ms", t.totalMs);
+        // 배속을 올리면 한 프레임에 여러 스텝을 돈다. 위 항목은 스텝 하나의 시간이라
+        // 그 곱이 프레임에 실린 계산량이 된다.
+        if (app.stepsLastFrame > 1)
+            ImGui::Text("프레임당 스텝 %d 회 (배속 %.1fx)", app.stepsLastFrame, app.cfg.timeScale);
         ImGui::Separator();
         ImGui::Text("파티클 %d", app.sim.particleCount());
         ImGui::Text("격자 %d²", app.sim.gridSize());
@@ -253,7 +260,6 @@ bool DrawBoard(App& app, bool& boardOpen) {
     }
 
     ImGui::End();
-    return needApply;
 }
 
 void DrawToolbar(App& app, int viewW, int viewH) {

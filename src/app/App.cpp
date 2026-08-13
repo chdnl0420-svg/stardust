@@ -15,10 +15,35 @@ void App::applyConfig() {
 }
 
 void App::tick() {
-    if (running || stepOnce) {
+    // 설정 보드·제어 채널이 만진 값을 매 프레임 코어에 넘긴다.
+    //
+    // 전에는 위젯마다 "이건 바뀌었으니 반영하라"는 표시(needApply)를 손으로 켰는데,
+    // 켜야 할 곳 17군데가 빠져 있었다 — 중력 세기·힘 공식·소프트닝·압력·γ·온도·냉각·별 형성·
+    // 팽창·시간 배속·정렬 주기가 전부 화면에서만 바뀌고 계산에는 안 갔다(round-06 리뷰 P1 #1).
+    // 표시를 빠뜨릴 수 있는 구조 자체를 없애고, 재할당이 필요한지는 코어가 판단하게 둔다
+    // (Sim::reconfigure 는 파티클 수·격자·경계가 바뀔 때만 버퍼를 다시 잡는다).
+    sim.reconfigure(cfg);
+
+    stepsLastFrame = 0;
+    if (stepOnce) {                 // "한 스텝" 은 배속과 무관하게 정확히 한 번이다
         sim.step();
+        stepsLastFrame = 1;
         stepOnce = false;
+        return;
     }
+    if (!running) return;
+
+    // 배속 > 1 은 시간 간격을 늘려서는 못 낸다(CFL 안정성 한계 — Sim::step 의 주석 참조).
+    // 대신 한 프레임에 스텝을 여러 번 돌린다. 계산량이 그 배수만큼 늘어 프레임 예산을
+    // 넘길 수 있다는 뜻이라, 상한을 8 로 막아 슬라이더 최대값(4.0)에서도 안전하게 둔다.
+    int reps = 1;
+    if (cfg.timeScale > 1.0f) {
+        reps = (int)(cfg.timeScale + 0.5f);
+        if (reps < 1) reps = 1;
+        if (reps > 8) reps = 8;
+    }
+    for (int i = 0; i < reps; ++i) sim.step();
+    stepsLastFrame = reps;
 }
 
 void App::screenToSim(int px, int py, int viewW, int viewH, float& u, float& v) const {

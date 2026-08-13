@@ -327,6 +327,42 @@ static void testMouseTools() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 11. 시간 배속 — 슬라이더를 내리면 화면 속 시간이 실제로 느리게 흘러야 한다.
+//     round-06 QA 실측: 배속 0.25 와 3.0 의 dtUsed 가 0.000101 로 소수점 여섯째 자리까지 같았다.
+//     CFL(Courant 조건 — 한 스텝에 파티클이 격자 한 칸 넘게 움직이면 적분이 무너진다) 클램프가
+//     요청 dt 를 항상 덮어써 배속이 통째로 사라진 것이었다.
+//     CFL 은 안정성 한계라 배속을 올린다고 dt 를 늘릴 수는 없다. 대신 내리는 쪽은 지켜져야 한다.
+// ---------------------------------------------------------------------------
+static void testTimeScale() {
+    printf("\n[11] 시간 배속이 물리 시간에 반영된다\n");
+    // 같은 초기조건·같은 스텝 수로 돌리고 흐른 물리 시간(simTime)을 견준다.
+    auto simTimeAfter = [](float ts, float& dtOut) {
+        Sim sim;
+        SimConfig cfg;
+        cfg.particleCount = 200000;
+        cfg.gridSize = 256;
+        cfg.timeScale = ts;
+        cfg.preset = Preset::SpiralDisk;
+        sim.init(cfg);
+        for (int i = 0; i < 100; ++i) sim.step();
+        dtOut = sim.timings().dtUsed;
+        return sim.simTime();
+    };
+    float dtSlow = 0.0f, dtNorm = 0.0f;
+    const double tSlow = simTimeAfter(0.25f, dtSlow);
+    const double tNorm = simTimeAfter(1.0f,  dtNorm);
+
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "배속0.25 simTime=%.6f dt=%.7f / 배속1.0 simTime=%.6f dt=%.7f (비율 %.2f배)",
+             tSlow, dtSlow, tNorm, dtNorm, tSlow > 0 ? tNorm / tSlow : 0.0);
+    // 0.25 배속이면 같은 스텝 수에서 물리 시간이 확연히 적어야 한다.
+    // 판정선을 정확히 4배가 아니라 2.5배로 둔 것은, CFL 한계가 두 경우에 조금씩 다르게
+    // 걸려 비율이 딱 4.0 으로 떨어지지 않기 때문이다.
+    check(tNorm > tSlow * 2.5, "배속을 내리면 시간이 느리게 흐른다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -345,6 +381,7 @@ int main() {
     testLongRun();
     testVramClamp();
     testMouseTools();
+    testTimeScale();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
