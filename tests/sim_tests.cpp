@@ -363,6 +363,86 @@ static void testTimeScale() {
     check(tNorm > tSlow * 2.5, "배속을 내리면 시간이 느리게 흐른다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 12. 별 표식이 파티클을 따라다닌다 — 정렬·지우개가 파티클을 옮길 때 함께 옮겨야 한다.
+//     별 형성 커널은 빈 슬롯인지보다 별 표식을 먼저 보므로, 지우고 남은 꼬리에 표식이 남아 있으면
+//     이미 지운 별이 계속 세어진다(round-06 리뷰 P1 #6).
+// ---------------------------------------------------------------------------
+static void testStarBookkeeping() {
+    printf("\n[12] 별 표식이 정렬·지우개를 넘어 어긋나지 않는다\n");
+    Sim sim;
+    SimConfig cfg;
+    cfg.particleCount = 200000;
+    cfg.gridSize = 256;
+    cfg.preset = Preset::HeadOnShock;
+    cfg.pressureEnabled = true;
+    cfg.temperatureEnabled = true;
+    cfg.coolingEnabled = true;
+    cfg.coolingRate = 0.9f;
+    cfg.starFormationEnabled = true;
+    cfg.starDensityThreshold = 20.0f;
+    cfg.starTempThreshold = 0.5f;
+    cfg.sortInterval = 5;             // 자주 정렬해 재배치 경로를 확실히 태운다
+    sim.init(cfg);
+    for (int i = 0; i < 120; ++i) sim.step();
+
+    const int starsBefore = sim.starCount();
+    const int aliveBefore = sim.activeCount();
+
+    // 판 대부분을 지운다. 살아남은 것보다 별이 많아지면 표식이 함께 정리되지 않은 것이다.
+    const int erased = sim.eraseAt(0.5f, 0.5f, 0.45f);
+    sim.step();
+    const int starsAfter = sim.starCount();
+    const int aliveAfter = sim.activeCount();
+
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "지우기 전 별=%d/%d  지움=%d  지운 뒤 별=%d/%d",
+             starsBefore, aliveBefore, erased, starsAfter, aliveAfter);
+    check(starsBefore > 0 && erased > 0 && starsAfter <= aliveAfter,
+          "지운 뒤 별 수가 살아있는 수를 넘지 않는다", buf);
+}
+
+// ---------------------------------------------------------------------------
+// 13. 주기 경계의 소프트닝 — 고립 경계는 실공간 그린함수에 넣지만 주기 경계는 주파수공간에서
+//     처리해야 한다. 그 인자가 아예 없어서 슬라이더가 무시되고 있었다(리뷰 P2 #19).
+// ---------------------------------------------------------------------------
+static void testPeriodicSoftening() {
+    printf("\n[13] 주기 경계에서도 소프트닝이 먹는다\n");
+    // 정지한 덩어리를 놓고 무너지기 시작하는 동안의 최대속력을 본다.
+    // 소프트닝이 직접 바꾸는 것은 가까운 거리의 힘 세기이므로, 그 힘이 만든 속도로 재는 것이 가장 곧다.
+    //
+    // 밀도로는 못 잰다 — 지표를 세 번 바꿔 가며 확인했다:
+    //   - 구조 형성 프리셋: 균일 난수라 이 스텝 수에서 거의 안 뭉쳐 두 조건이 똑같이 9.21.
+    //   - 회전 원반 프리셋: 리셋이 그 중력에 맞는 궤도 속도를 넣어(kSetOrbit) 상쇄된다(40.06 vs 37.89).
+    //   - 정지 덩어리 250스텝: 완전히 무너지고 나면 최대밀도의 상한을 격자 해상도가 정해
+    //     소프트닝과 무관해진다(43.64 vs 43.53).
+    auto speedWith = [](float soft) {
+        Sim sim;
+        SimConfig cfg;
+        cfg.particleCount = 200000;
+        cfg.gridSize = 256;
+        cfg.boundary = Boundary::Periodic;
+        cfg.preset = Preset::Empty;
+        cfg.softeningCells = soft;
+        cfg.gravity = 0.9f;
+        cfg.pressureEnabled = false;
+        sim.init(cfg);
+        sim.addShape(0.5f, 0.5f, ShapeKind::StaticBlob, 0.18f, 200000, false);
+        // 속력이 부동소수 잡음과 구분될 만큼 자라되 붕괴가 끝나기 전인 구간을 쓴다.
+        // 30스텝에서는 0.0001 대라 자리수 아래에 묻혀 비율을 믿을 수 없었다.
+        for (int i = 0; i < 150; ++i) sim.step();
+        return (double)sim.timings().maxSpeed;
+    };
+    // 소프트닝을 키우면 가까운 거리의 힘이 뭉툭해져 덜 가속된다.
+    const double sharp = speedWith(0.5f);
+    const double blunt = speedWith(6.0f);
+    char buf[200];
+    snprintf(buf, sizeof(buf), "소프트닝 0.5셀 최대속력=%.6f  6.0셀=%.6f  비율=%.2f",
+             sharp, blunt, blunt > 0 ? sharp / blunt : 0.0);
+    check(sharp > blunt * 1.15, "소프트닝을 키우면 근거리 힘이 약해진다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -382,6 +462,8 @@ int main() {
     testVramClamp();
     testMouseTools();
     testTimeScale();
+    testStarBookkeeping();
+    testPeriodicSoftening();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

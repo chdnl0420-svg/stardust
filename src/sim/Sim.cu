@@ -156,7 +156,8 @@ __global__ void kScatter(const float2* pos, float* grid, int n, int G, int strid
 // 주기 경계용 주파수공간 커널.
 //   law=0 : 1/k  -> 3D 형 1/r^2 힘 (기본)
 //   law=1 : 1/k^2-> 수학적으로 올바른 2D 중력, 힘 1/r
-__global__ void kPoissonPeriodic(cufftComplex* F, int G, float scale, int law) {
+__global__ void kPoissonPeriodic(cufftComplex* F, int G, float scale, int law,
+                                 float softCells) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int W = G / 2 + 1;
@@ -168,6 +169,17 @@ __global__ void kPoissonPeriodic(cufftComplex* F, int G, float scale, int law) {
     float k2 = kx * kx + ky * ky;
     float denom = (law == 0) ? sqrtf(k2) : k2;
     float f = -scale / denom;
+
+    // 소프트닝 — 가까운 거리에서 힘이 발산하지 않게 뭉툭하게 만드는 것.
+    // 고립 경계는 실공간 그린함수에 직접 넣지만(kGreen 의 eps), 주기 경계는 주파수공간에서
+    // 처리해야 한다. 잔물결(고주파)을 가우시안으로 눌러 같은 효과를 낸다 —
+    // 소프트닝 길이보다 작은 구조가 힘에 기여하지 못하게 하는 것이 소프트닝의 뜻이다.
+    // 전에는 이 인자가 없어 주기 경계에서 소프트닝 슬라이더가 아무 일도 하지 않았다
+    // (round-06 리뷰 P2 #19).
+    if (softCells > 0.f) {
+        const float s = 6.2831853f * softCells / (float)G;   // 2π·(소프트닝 길이 / 판 크기)
+        f *= __expf(-0.5f * k2 * s * s);
+    }
     F[i].x *= f; F[i].y *= f;
 }
 
@@ -315,12 +327,18 @@ __global__ void kCellKey(const float2* pos, unsigned* key, unsigned* val, int n,
     key[i] = (unsigned)(cy * G + cx);
     val[i] = (unsigned)i;
 }
+// 파티클을 새 순서로 옮긴다.
+// 한 파티클이 가진 값은 전부 함께 옮겨야 한다 — 하나라도 빠지면 그 값만 다른 파티클에 붙는다.
+// 별 표식(isStar)이 빠져 있어서, 정렬할 때마다 별이 엉뚱한 파티클로 옮겨 다녔다
+// (round-06 리뷰 P1 #5).
 __global__ void kReorder(const float2* sp, const float2* sv, const float* st,
-                         float2* dp, float2* dv, float* dt_, const unsigned* val, int n) {
+                         const unsigned char* ss,
+                         float2* dp, float2* dv, float* dt_, unsigned char* ds,
+                         const unsigned* val, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     unsigned s = val[i];
-    dp[i] = sp[s]; dv[i] = sv[s]; dt_[i] = st[s];
+    dp[i] = sp[s]; dv[i] = sv[s]; dt_[i] = st[s]; ds[i] = ss[s];
 }
 
 // 파티클이 가진 값(온도·속력)을 격자에 밀도 가중으로 뿌린다.
@@ -481,13 +499,18 @@ __global__ void kMarkAlive(const float2* pos, unsigned char* alive, int n,
 }
 
 // 남은 파티클을 배열 앞쪽으로 모은다(선택된 인덱스 순서대로 gather).
+// 살아남은 파티클을 배열 앞쪽으로 모은다.
+// kReorder 와 같은 규칙 — 파티클이 가진 값은 전부 함께 옮긴다. 별 표식이 빠져 있어서
+// 지운 별이 계속 집계되고, 그 자리에 새로 넣은 형태가 남의 별 표식을 물려받았다
+// (round-06 리뷰 P1 #6).
 __global__ void kCompact(const float2* sp, const float2* sv, const float* st,
-                         float2* dp, float2* dv, float* dt_,
+                         const unsigned char* ss,
+                         float2* dp, float2* dv, float* dt_, unsigned char* ds,
                          const int* idx, int count) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
     int s = idx[i];
-    dp[i] = sp[s]; dv[i] = sv[s]; dt_[i] = st[s];
+    dp[i] = sp[s]; dv[i] = sv[s]; dt_[i] = st[s]; ds[i] = ss[s];
 }
 
 // 빈 슬롯을 화면 밖으로 확실히 밀어 둔다(산란·렌더가 건너뛰도록).
@@ -568,7 +591,8 @@ struct Sim::Impl {
     // 마우스 도구용 — 살아 있는 파티클은 항상 [0, activeN) 에 모여 있다.
     int   activeN = 0;
     int   starN = 0;                  // 별이 된 파티클 수
-    unsigned char *isStar = nullptr;
+    // 별 표식과 그 재배치용 두 번째 버퍼. 정렬·압축이 파티클을 옮길 때 이 값도 함께 옮긴다.
+    unsigned char *isStar = nullptr, *isStar2 = nullptr;
     int   *starCnt = nullptr;
     unsigned char *alive = nullptr;
     int   *selIdx = nullptr;   // 살아남은 인덱스 목록
@@ -618,8 +642,8 @@ void Sim::Impl::releaseParticles() {
     cudaFree(key); cudaFree(keyOut); cudaFree(val); cudaFree(valOut);
     cudaFree(sortTmp); cudaFree(spdTmp); cudaFree(spdOut);
     cudaFree(alive); cudaFree(selIdx); cudaFree(selNum); cudaFree(selTmp);
-    cudaFree(isStar); cudaFree(starCnt);
-    isStar = nullptr; starCnt = nullptr; starN = 0;
+    cudaFree(isStar); cudaFree(isStar2); cudaFree(starCnt);
+    isStar = nullptr; isStar2 = nullptr; starCnt = nullptr; starN = 0;
     pos = vel = pos2 = vel2 = nullptr; temp = temp2 = nullptr;
     key = keyOut = val = valOut = nullptr; sortTmp = nullptr; sortTmpBytes = 0;
     spdTmp = nullptr; spdOut = nullptr; spdTmpBytes = 0;
@@ -711,6 +735,8 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&selTmp, selTmpBytes));
     CK(cudaMalloc(&isStar, sizeof(unsigned char) * n));
     CK(cudaMemset(isStar, 0, sizeof(unsigned char) * n));
+    CK(cudaMalloc(&isStar2, sizeof(unsigned char) * n));
+    CK(cudaMemset(isStar2, 0, sizeof(unsigned char) * n));
     CK(cudaMalloc(&starCnt, sizeof(int)));
     activeN = n;
     starN = 0;
@@ -739,7 +765,8 @@ void Sim::Impl::solveGravity() {
         cufftExecR2C(planF, rho, rhoSpec);
         dim3 gs((W + 15) / 16, (S + 15) / 16);
         kPoissonPeriodic<<<gs, b>>>(rhoSpec, S, 1.0f,
-                                    cfg.law == GravityLaw::InverseSquare ? 0 : 1);
+                                    cfg.law == GravityLaw::InverseSquare ? 0 : 1,
+                                    cfg.softeningCells);
         cufftExecC2R(planB, rhoSpec, pot);
     } else {
         // 고립 경계: 패딩 격자에서 밀도와 그린함수를 합성곱한다.
@@ -922,9 +949,10 @@ void Sim::step() {
         size_t bytes = d->sortTmpBytes;
         cub::DeviceRadixSort::SortPairs(d->sortTmp, bytes, d->key, d->keyOut,
                                         d->val, d->valOut, n, 0, 24);
-        kReorder<<<grid1(n), BS>>>(d->pos, d->vel, d->temp,
-                                   d->pos2, d->vel2, d->temp2, d->valOut, n);
+        kReorder<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, d->isStar,
+                                   d->pos2, d->vel2, d->temp2, d->isStar2, d->valOut, n);
         std::swap(d->pos, d->pos2); std::swap(d->vel, d->vel2); std::swap(d->temp, d->temp2);
+        std::swap(d->isStar, d->isStar2);
     }
 
     // (2) 산란
@@ -1145,11 +1173,16 @@ int Sim::eraseAt(float cx, float cy, float radius) {
     CK(cudaMemcpy(&kept, d->selNum, sizeof(int), cudaMemcpyDeviceToHost));
 
     if (kept > 0)
-        kCompact<<<grid1(kept), BS>>>(d->pos, d->vel, d->temp,
-                                      d->pos2, d->vel2, d->temp2, d->selIdx, kept);
+        kCompact<<<grid1(kept), BS>>>(d->pos, d->vel, d->temp, d->isStar,
+                                      d->pos2, d->vel2, d->temp2, d->isStar2, d->selIdx, kept);
     std::swap(d->pos, d->pos2); std::swap(d->vel, d->vel2); std::swap(d->temp, d->temp2);
-    if (kept < d->allocN)
+    std::swap(d->isStar, d->isStar2);
+    if (kept < d->allocN) {
         kHideRange<<<grid1(d->allocN - kept), BS>>>(d->pos, kept, d->allocN - kept);
+        // 꼬리(빈 슬롯)의 별 표식도 지운다. 안 지우면 나중에 그 자리에 넣은 형태가
+        // 남아 있던 표식을 물려받아 만들지도 않은 별로 세어진다.
+        CK(cudaMemset(d->isStar + kept, 0, sizeof(unsigned char) * (d->allocN - kept)));
+    }
 
     d->activeN = kept;
     CK(cudaDeviceSynchronize());

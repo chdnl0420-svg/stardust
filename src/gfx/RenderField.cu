@@ -78,7 +78,7 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
 // uchar4 에는 atomicAdd 가 없어 float3 누적 버퍼에 모았다가 뒤에서 색으로 바꾼다.
 __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* temp,
                              int n, float3* accum, int W, int H,
-                             int colorBy, float zoom, float panX, float panY) {
+                             int colorBy, int cmapKind, float zoom, float panX, float panY) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float2 p = pos[i];
@@ -95,13 +95,26 @@ __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* 
     int y = (int)((1.f - v) * H);                // GL 텍스처는 아래에서 위로 쌓인다
     if (x < 0 || x >= W || y < 0 || y >= H) return;
 
-    // 색 기준: 0 밀도(흰색으로 쌓아 겹침이 밝기를 만든다) / 1 온도 / 2 속력
+    // 색 기준: 0 밀도 / 1 온도 / 2 속력.
+    // 어느 쪽이든 색은 사용자가 고른 컬러맵(cmapKind: 0 천체 · 1 흑백 · 2 열화상)에서 뽑는다.
+    // 전에는 컬러맵을 아예 안 받아서, 보드에서 흑백으로 바꿔도 점 렌더는 그대로였다
+    // (round-06 리뷰 P2 #26).
     float t = 0.5f;
     if (colorBy == 1)      t = fminf(temp[i] * 0.5f, 1.f);
     else if (colorBy == 2) t = fminf(sqrtf(vel[i].x * vel[i].x + vel[i].y * vel[i].y) * 0.25f, 1.f);
-    float3 c = (colorBy == 0) ? make_float3(0.55f, 0.42f, 0.85f)
-             : (colorBy == 1) ? cmapThermal(t)
-                              : cmapAstro(t);
+
+    float3 c;
+    if (colorBy == 0) {
+        // 밀도 모드는 점마다 같은 색을 쌓아 겹친 수가 밝기가 되게 한다.
+        // 그 한 가지 색을 컬러맵의 대표색으로 잡아 색조가 보드 설정과 어긋나지 않게 한다.
+        c = (cmapKind == 1) ? make_float3(1.f, 1.f, 1.f)
+          : (cmapKind == 2) ? cmapThermal(0.62f)
+                            : make_float3(0.55f, 0.42f, 0.85f);
+    } else {
+        c = (cmapKind == 1) ? make_float3(t, t, t)
+          : (cmapKind == 2) ? cmapThermal(t)
+                            : cmapAstro(t);
+    }
 
     float3* px = &accum[y * W + x];
     atomicAdd(&px->x, c.x);
@@ -178,7 +191,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 (const float2*)app.sim.particlePosDevicePtr(),
                 (const float2*)app.sim.particleVelDevicePtr(),
                 app.sim.particleTempDevicePtr(), n,
-                (float3*)devAccum_, viewW, viewH, (int)view.colorBy,
+                (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
                 app.zoom, app.panX, app.panY);
         }
         kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
