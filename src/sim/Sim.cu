@@ -469,11 +469,32 @@ __global__ void kFillShape(float2* pos, float2* vel, float* temp, int base, int 
     float u1 = rnd01((unsigned)i * 3u + seed);
     float u2 = rnd01((unsigned)i * 3u + 1u + seed);
     float th = u2 * 6.2831853f;
-    // 원반·덩어리는 sqrt 분포라야 면밀도가 고르다. 고리는 바깥 테두리에만 둔다.
-    float r = (kind == 2) ? radius * (0.78f + 0.22f * u1) : radius * sqrtf(u1);
+
+    // 중심에서의 거리를 모양마다 다르게 뽑는다.
+    // sqrt 를 쓰면 면적당 개수가 고르게 퍼지고(원반), 지수를 올리면 가운데로 몰리고,
+    // 내리면 바깥까지 넓게 흩어진다.
+    //   0 은하  : 고른 원반
+    //   1 태양  : 가운데가 빽빽한 구
+    //   2 고리  : 바깥 테두리만
+    //   3 구름  : 바깥까지 성기게 퍼진 성운
+    //   4 덩어리: 고른 원반(속도만 안 준다)
+    // r = R · u^p 로 뽑으면 면적당 개수는 r^(1/p - 2) 에 비례한다.
+    //   p = 0.5  → 고르게 (은하·덩어리)
+    //   p > 0.5  → 가운데가 빽빽하게 (태양 p=2, 구름 p=0.75)
+    //   p < 0.5  → 바깥이 빽빽하게 — 도넛이 되므로 성운에는 쓰면 안 된다
+    // (실측 2026-08-13: 구름을 p=0.32 로 뒀더니 가운데가 비어 최대 밀도가 은하보다 높았다.)
+    float r;
+    float t0 = 0.02f;
+    if (kind == 1)      { r = radius * u1 * u1;              t0 = 0.45f; }  // 태양 — 뜨겁고 빽빽
+    else if (kind == 2) { r = radius * (0.78f + 0.22f * u1);             }  // 고리 — 테두리만
+    // 구름은 지수를 건드리지 않고 반지름만 키운다 — 고른 분포 그대로 넓게 퍼뜨려야 성기다.
+    // 지수를 올리면(0.75) 오히려 가운데로 몰리고, 내리면(0.32) 도넛이 된다. 둘 다 실측으로 확인했다.
+    else if (kind == 3) { r = radius * 1.7f * sqrtf(u1);     t0 = 0.005f; }  // 구름 — 넓고 성기고 차갑게
+    else                { r = radius * sqrtf(u1);                        }  // 은하·덩어리 — 고르게
+
     pos[i] = make_float2(cx + r * cosf(th), cy + r * sinf(th));
     vel[i] = make_float2(0.f, 0.f);
-    temp[i] = 0.02f;
+    temp[i] = t0;
 }
 
 // 방금 넣은 형태에 그 자리 중력에 맞는 원 궤도 속도를 준다.
@@ -617,6 +638,10 @@ struct Sim::Impl {
     // (2026-08-13 실측: 파티클 3000만으로 올린 뒤 시스템이 재부팅됨 — BugCheck 0xD1 / nvlddmkm.sys).
     int requestedN = -1, requestedG = -1;
     Boundary requestedBoundary = Boundary::Isolated;
+
+    // 형태를 넣을 자리를 가리키는 커서. 끝에 닿으면 앞으로 돌아와 먼저 넣은 것을 덮어쓴다 —
+    // 이렇게 해야 계속 클릭해도 총 개수가 상한을 넘지 않으면서 새로 놓은 것이 항상 보인다.
+    int ringCursor = 0;
 
     cudaEvent_t evA = nullptr, evB = nullptr;
 
@@ -1025,6 +1050,8 @@ void Sim::reset() {
     kPlace<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, n, (int)d->cfg.preset);
     // 빈 판은 살아 있는 파티클이 0 이고 전 슬롯이 비어 있다 — 마우스로 채워 나간다.
     d->activeN = (d->cfg.preset == Preset::Empty) ? 0 : n;
+    // 새 장면이므로 형태를 넣을 자리도 처음으로 되돌린다.
+    d->ringCursor = d->activeN % (n > 0 ? n : 1);
     // 리셋하면 별도 사라진다
     CK(cudaMemset(d->isStar, 0, sizeof(unsigned char) * n));
     d->starN = 0;
@@ -1259,24 +1286,46 @@ int Sim::starCount() const   { return impl_->starN; }
 
 int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, bool autoOrbit) {
     Impl* d = impl_;
-    if (count <= 0) return 0;
-    const int room = d->allocN - d->activeN;
-    if (room <= 0) return 0;
-    const int put = (count < room) ? count : room;   // 빈 슬롯이 모자라면 그만큼만
-    const int base = d->activeN;
+    if (count <= 0 || d->allocN <= 0) return 0;
+
+    // 자리가 모자라면 **가장 먼저 넣은 것부터 밀어낸다.**
+    // 전에는 남은 자리만큼만 넣고 나머지를 버렸는데, 그러면 계속 클릭하다 보면 어느 순간
+    // 아무것도 안 들어가고 이유도 안 보인다. 이제 슬롯을 고리처럼 돌며 덮어써서
+    // 총 개수는 상한을 넘지 않고, 새로 놓은 것은 항상 화면에 나타난다.
+    const int cap = d->allocN;
+    const int put = (count < cap) ? count : cap;    // 상한보다 큰 요청은 상한까지만
+    const int base = d->ringCursor;
 
     // 난수 씨앗을 스텝 수로 흔든다 — 같은 자리에 두 번 넣어도 같은 배치가 겹치지 않게.
     const unsigned seed = (unsigned)(d->steps * 2654435761u + (unsigned)base * 40503u + 7u);
-    kFillShape<<<grid1(put), BS>>>(d->pos, d->vel, d->temp, base, put,
-                                   cx, cy, radius, (int)kind, seed);
-    d->activeN += put;
 
-    // 회전 형태는 그 자리 중력을 재서 원 궤도가 되는 속도를 넣는다.
-    // 중력을 모른 채 속도를 정하면 원반이 흩어지거나 붕괴한다(design.md §9-2).
-    if (autoOrbit && kind != ShapeKind::StaticBlob) {
+    // 고리 끝을 넘어가면 두 토막으로 나눠 쓴다.
+    const int firstRun = (put < cap - base) ? put : (cap - base);
+    kFillShape<<<grid1(firstRun), BS>>>(d->pos, d->vel, d->temp, base, firstRun,
+                                        cx, cy, radius, (int)kind, seed);
+    const int wrapRun = put - firstRun;
+    if (wrapRun > 0)
+        kFillShape<<<grid1(wrapRun), BS>>>(d->pos, d->vel, d->temp, 0, wrapRun,
+                                           cx, cy, radius, (int)kind, seed + 977u);
+
+    // 덮어쓴 자리에 별 표식이 남아 있으면 새 파티클이 그것을 물려받는다.
+    CK(cudaMemset(d->isStar + base, 0, sizeof(unsigned char) * firstRun));
+    if (wrapRun > 0) CK(cudaMemset(d->isStar, 0, sizeof(unsigned char) * wrapRun));
+
+    d->ringCursor = (base + put) % cap;
+    d->activeN = (d->activeN + put < cap) ? (d->activeN + put) : cap;
+
+    // 도는 형태는 그 자리 중력을 재서 원 궤도가 되는 속도를 넣는다.
+    // 중력을 모른 채 속도를 정하면 원반이 흩어지거나 무너진다(design.md §9-2).
+    // 덩어리와 구름은 일부러 속도를 주지 않는다 — 그대로 무너지는 것을 보는 모양이다.
+    if (autoOrbit && kind != ShapeKind::Blob && kind != ShapeKind::Cloud) {
         d->refreshAccel();
-        kSetOrbitAt<<<grid1(put), BS>>>(d->accG, d->pos, d->vel, base, put,
-                                        d->allocG, d->periodic() ? 1 : 0, cx, cy, 0.95f);
+        const int per = d->periodic() ? 1 : 0;
+        kSetOrbitAt<<<grid1(firstRun), BS>>>(d->accG, d->pos, d->vel, base, firstRun,
+                                             d->allocG, per, cx, cy, 0.95f);
+        if (wrapRun > 0)
+            kSetOrbitAt<<<grid1(wrapRun), BS>>>(d->accG, d->pos, d->vel, 0, wrapRun,
+                                                d->allocG, per, cx, cy, 0.95f);
     }
     CK(cudaDeviceSynchronize());
     return put;
@@ -1324,6 +1373,8 @@ int Sim::eraseAt(float cx, float cy, float radius) {
     }
 
     d->activeN = kept;
+    // 지운 뒤에는 살아남은 것 바로 뒤가 다음에 채울 자리다.
+    d->ringCursor = (d->allocN > 0) ? (kept % d->allocN) : 0;
     CK(cudaDeviceSynchronize());
     return before - kept;
 }

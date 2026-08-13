@@ -278,9 +278,9 @@ static void testMouseTools() {
 
     // 세 번 추가하고 매번 정확한 개수가 들어가는지 본다
     const int want = 120000;
-    int got1 = sim.addShape(0.35f, 0.45f, ShapeKind::RotatingDisk, 0.10f, want, true);
-    int got2 = sim.addShape(0.65f, 0.55f, ShapeKind::StaticBlob,   0.08f, want, false);
-    int got3 = sim.addShape(0.50f, 0.75f, ShapeKind::GasRing,      0.09f, want, true);
+    int got1 = sim.addShape(0.35f, 0.45f, ShapeKind::Galaxy, 0.10f, want, true);
+    int got2 = sim.addShape(0.65f, 0.55f, ShapeKind::Blob,   0.08f, want, false);
+    int got3 = sim.addShape(0.50f, 0.75f, ShapeKind::Ring,      0.09f, want, true);
     int total = sim.activeCount();
     double mass = sim.measureTotalGridMass();
     snprintf(buf, sizeof(buf), "요청 %d×3  들어감 %d/%d/%d  합계=%d  격자질량=%.0f",
@@ -292,10 +292,10 @@ static void testMouseTools() {
     // 형태 3종이 서로 다른 배치를 만든다 (고리는 가운데가 비어 점유셀이 적다)
     {
         Sim s2; SimConfig c2 = cfg; s2.init(c2);
-        s2.addShape(0.5f, 0.5f, ShapeKind::RotatingDisk, 0.12f, 200000, true);
+        s2.addShape(0.5f, 0.5f, ShapeKind::Galaxy, 0.12f, 200000, true);
         int diskCells = s2.measureOccupiedCells();
         Sim s3; s3.init(c2);
-        s3.addShape(0.5f, 0.5f, ShapeKind::GasRing, 0.12f, 200000, true);
+        s3.addShape(0.5f, 0.5f, ShapeKind::Ring, 0.12f, 200000, true);
         int ringCells = s3.measureOccupiedCells();
         snprintf(buf, sizeof(buf), "원반 점유셀=%d  고리 점유셀=%d", diskCells, ringCells);
         check(diskCells > 0 && ringCells > 0 && ringCells < diskCells,
@@ -305,7 +305,7 @@ static void testMouseTools() {
     // 지우개 — 지운 만큼 줄고, 남은 것은 앞쪽에 모여 있어야 다음 추가가 정확하다
     int erased = sim.eraseAt(0.35f, 0.45f, 0.12f);
     int afterErase = sim.activeCount();
-    int got4 = sim.addShape(0.20f, 0.20f, ShapeKind::StaticBlob, 0.05f, 50000, false);
+    int got4 = sim.addShape(0.20f, 0.20f, ShapeKind::Blob, 0.05f, 50000, false);
     int afterAdd = sim.activeCount();
     snprintf(buf, sizeof(buf), "지움=%d  지운뒤=%d  다시추가=%d  최종=%d",
              erased, afterErase, got4, afterAdd);
@@ -316,7 +316,7 @@ static void testMouseTools() {
     // 뿌리기·우물 — 속도가 실제로 바뀌는지 (최대속력으로 본다)
     {
         Sim s4; SimConfig c4 = cfg; c4.gravity = 0.0f; s4.init(c4);
-        s4.addShape(0.5f, 0.5f, ShapeKind::StaticBlob, 0.10f, 200000, false);
+        s4.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.10f, 200000, false);
         s4.step();
         float v0 = s4.timings().maxSpeed;
         s4.sprayAt(0.5f, 0.5f, 0.12f, 0.5f);
@@ -428,7 +428,7 @@ static void testPeriodicSoftening() {
         cfg.gravity = 0.9f;
         cfg.pressureEnabled = false;
         sim.init(cfg);
-        sim.addShape(0.5f, 0.5f, ShapeKind::StaticBlob, 0.18f, 200000, false);
+        sim.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.18f, 200000, false);
         // 속력이 부동소수 잡음과 구분될 만큼 자라되 붕괴가 끝나기 전인 구간을 쓴다.
         // 30스텝에서는 0.0001 대라 자리수 아래에 묻혀 비율을 믿을 수 없었다.
         for (int i = 0; i < 150; ++i) sim.step();
@@ -463,7 +463,7 @@ static void testTimeScaleNoDoubleApply() {
         cfg.timeScale = ts;
         cfg.preset = Preset::Empty;
         sim.init(cfg);
-        sim.addShape(0.5f, 0.5f, ShapeKind::StaticBlob, 0.10f, 100000, false);
+        sim.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.10f, 100000, false);
         sim.step();
         return sim.timings().dtUsed;
     };
@@ -524,6 +524,73 @@ static void testNoReallocOnSameRequest() {
           "같은 요청은 그대로 두고 바뀐 요청만 다시 잡는다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 16. 계속 놓아도 최대 개수를 넘지 않는다 — 자리가 모자라면 먼저 놓은 것부터 밀려난다.
+//     전에는 남은 자리만큼만 넣고 나머지를 버려서, 어느 순간부터 클릭해도 아무것도 안 들어갔다.
+// ---------------------------------------------------------------------------
+static void testRingBufferCap() {
+    printf("\n[16] 계속 놓아도 최대 개수를 넘지 않는다\n");
+    Sim sim;
+    SimConfig cfg;
+    cfg.particleCount = 300000;          // 상한
+    cfg.gridSize = 256;
+    cfg.gravity = 0.0f;
+    cfg.pressureEnabled = false;
+    cfg.preset = Preset::Empty;
+    sim.init(cfg);
+
+    // 상한의 절반씩 열 번 놓는다 — 다섯 번째부터는 밀어내야 한다.
+    int lastPut = 0;
+    for (int i = 0; i < 10; ++i)
+        lastPut = sim.addShape(0.3f + 0.04f * i, 0.5f, ShapeKind::Galaxy, 0.08f, 150000, false);
+    const int aliveAfter = sim.activeCount();
+
+    // 상한보다 큰 요청은 상한까지만 들어간다.
+    const int huge = sim.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.2f, 5000000, false);
+
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "15만 x 10회 후 살아있는 수=%d (상한 %d, 마지막 회차 %d개 들어감) / "
+             "500만 요청 -> %d개",
+             aliveAfter, 300000, lastPut, huge);
+    check(aliveAfter == 300000 && lastPut == 150000 && huge == 300000,
+          "상한을 넘지 않고 매번 요청한 만큼 들어간다", buf);
+}
+
+// ---------------------------------------------------------------------------
+// 17. 모양 다섯 가지가 서로 다른 배치를 만든다.
+//     태양은 가운데로 몰리고 구름은 넓게 퍼지고 고리는 가운데가 빈다.
+// ---------------------------------------------------------------------------
+static void testShapeVariety() {
+    printf("\n[17] 모양 다섯 가지가 서로 다르게 놓인다\n");
+    // 지표는 최대 밀도다. 점유 칸 수로는 못 가른다 — 같은 반지름 안에 같은 개수를 넣으면
+    // 분포가 달라도 그 영역의 칸은 대부분 채워져(실측 4793 / 4846 / 4853, 1% 차) 판정이 흔들린다.
+    // 가운데로 몰릴수록 한 칸에 겹치는 수가 늘어나므로 최대 밀도가 곧 「얼마나 몰렸나」다.
+    auto peakOf = [](ShapeKind k) {
+        Sim sim;
+        SimConfig cfg;
+        cfg.particleCount = 200000;
+        cfg.gridSize = 256;
+        cfg.gravity = 0.0f;
+        cfg.pressureEnabled = false;
+        cfg.preset = Preset::Empty;
+        sim.init(cfg);
+        sim.addShape(0.5f, 0.5f, k, 0.15f, 200000, false);
+        sim.measureTotalGridMass();        // 격자를 현재 배치로 채운다
+        return sim.measureMaxDensity();
+    };
+    const double sun    = peakOf(ShapeKind::Sun);
+    const double galaxy = peakOf(ShapeKind::Galaxy);
+    const double cloud  = peakOf(ShapeKind::Cloud);
+
+    char buf[220];
+    snprintf(buf, sizeof(buf), "최대 밀도 — 태양=%.1f  은하=%.1f  구름=%.1f (태양/은하=%.2f배)",
+             sun, galaxy, cloud, galaxy > 0 ? sun / galaxy : 0.0);
+    // 태양은 가운데로 몰려 한 칸에 겹치는 수가 많고, 구름은 넓게 흩어져 가장 성기다.
+    check(sun > galaxy * 1.5 && galaxy > cloud,
+          "모양마다 몰린 정도가 다르다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -547,6 +614,8 @@ int main() {
     testPeriodicSoftening();
     testTimeScaleNoDoubleApply();
     testNoReallocOnSameRequest();
+    testRingBufferCap();
+    testShapeVariety();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

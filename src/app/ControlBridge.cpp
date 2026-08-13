@@ -397,10 +397,13 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         const float r = clampF(getFloat(kv, "radius", app.brush.radius), 0.001f, 4.0f, app.brush.radius);
         int result = 0;
         if (what == "shape") {
-            ShapeKind k = ShapeKind::RotatingDisk;
-            const std::string ks = kv.count("shape") ? kv["shape"] : "disk";
-            if (ks == "blob") k = ShapeKind::StaticBlob;
-            else if (ks == "ring") k = ShapeKind::GasRing;
+            // 모양 이름. 예전 이름(disk)도 계속 받는다 — 기존 검증 스크립트가 그것을 쓴다.
+            ShapeKind k = ShapeKind::Galaxy;
+            const std::string ks = kv.count("shape") ? kv["shape"] : "galaxy";
+            if      (ks == "sun")   k = ShapeKind::Sun;
+            else if (ks == "ring")  k = ShapeKind::Ring;
+            else if (ks == "cloud") k = ShapeKind::Cloud;
+            else if (ks == "blob")  k = ShapeKind::Blob;
             const int cnt = clampI(getInt(kv, "count", app.brush.shapeCount), 1, 300000000);
             const bool orb = getInt(kv, "autoOrbit", app.brush.autoOrbit ? 1 : 0) != 0;
             const float sr = clampF(getFloat(kv, "radius", app.brush.shapeRadius),

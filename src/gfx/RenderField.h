@@ -19,6 +19,9 @@ struct RenderField {
 private:
     unsigned texId_ = 0;
     int      texW_ = 0, texH_ = 0;
+    // 텍스처 저장소를 실제로 잡아 둔 크기. 이 크기가 그대로면 저장소를 다시 만들지 않고
+    // 내용만 덮어쓴다(glTexSubImage2D) — 매 프레임 다시 만들면 드라이버가 무너진다.
+    int      texAllocW_ = 0, texAllocH_ = 0;
     unsigned char* hostPixels_ = nullptr;   // 호스트 경유 버퍼
     void*    devPixels_ = nullptr;          // 디바이스 RGBA 버퍼
     void*    devAccum_  = nullptr;          // 점 렌더 누적 버퍼(float3)

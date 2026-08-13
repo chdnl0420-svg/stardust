@@ -1,11 +1,21 @@
 #include "app/App.h"
 
 void App::init() {
-    // 기본값은 설계 F1 — 격자 2048², 고립 경계(은하 시나리오), 나선팔 프리셋.
     cfg.particleCount = 1000000;
-    cfg.gridSize      = 2048;
-    cfg.preset        = Preset::SpiralDisk;
-    cfg.boundary      = Boundary::Isolated;
+
+    // 격자는 1024 로 시작한다.
+    // 소프트닝은 「셀 몇 개」 단위라 격자를 올리면 셀이 작아져 가까운 거리의 힘이 그만큼 세진다 —
+    // 2048 로 시작하면 처음 켜자마자 파티클이 초속 80까지 튀어 원반이 부풀고, 안전장치가
+    // 시간 간격을 100% 가까이 잘라 화면이 거의 멈춘 것처럼 보인다(2026-08-13 실측).
+    // 1024 는 그 문제가 없고 더 빠르다. 세밀하게 보고 싶으면 「고급 설정」에서 올린다.
+    cfg.gridSize = 1024;
+
+    // 첫 장면도 **장면 버튼을 누른 것과 똑같이** 맞춘다.
+    // 전에는 preset 만 정하고 나머지는 SimConfig 기본값에 맡겼는데, 그 기본값은 압력이 켜져 있다.
+    // 나선 은하는 압력이 없어야 팔이 생기는 장면이라, 처음 켠 사람은 스스로 부풀어 터지는
+    // 은하를 보게 됐다 — 프리셋 버튼을 한 번 눌러야만 정상이 되는 상태였다(2026-08-13 실측).
+    ApplyPresetDefaults(cfg, Preset::SpiralDisk);
+
     sim.init(cfg);
 }
 
@@ -80,6 +90,20 @@ void App::applyToolAt(float u, float v, bool firstClick) {
         case Tool::Camera:
         default:
             break;
+    }
+}
+
+void ApplyLook(App& app) {
+    // 사용자가 고르는 것은 「밀도로 볼까 온도로 볼까」 하나뿐이다.
+    // 색 기준·컬러맵·온도 추적은 그 선택에 딸려 오는 것이라 여기서 함께 맞춘다 —
+    // 따로 두면 온도로 바꿔 놓고 온도 추적이 꺼져 있어 화면이 새까맣게 보이는 일이 생긴다.
+    if (app.look == App::Look::Temperature) {
+        app.view.colorBy = ColorBy::Temperature;
+        app.view.cmap    = ColorMap::Thermal;
+        app.cfg.temperatureEnabled = true;   // 온도를 안 재면 보여줄 값이 없다
+    } else {
+        app.view.colorBy = ColorBy::Density;
+        app.view.cmap    = ColorMap::Astro;
     }
 }
 

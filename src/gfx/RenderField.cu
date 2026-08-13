@@ -154,6 +154,7 @@ void RenderField::init() {
 
 void RenderField::shutdown() {
     if (texId_) { glDeleteTextures(1, &texId_); texId_ = 0; }
+    texAllocW_ = texAllocH_ = 0;      // 텍스처를 지웠으니 저장소도 없다
     if (hostPixels_) { free(hostPixels_); hostPixels_ = nullptr; }
     if (devPixels_)  { cudaFree(devPixels_); devPixels_ = nullptr; devBytes_ = 0; }
     if (devAccum_)   { cudaFree(devAccum_);  devAccum_  = nullptr; }
@@ -234,7 +235,27 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, texId_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, viewW, viewH, 0, GL_RGBA, GL_UNSIGNED_BYTE, hostPixels_);
+
+    // 텍스처 저장소는 **창 크기가 바뀔 때만** 다시 만들고, 평소에는 내용만 덮어쓴다.
+    //
+    // glTexImage2D 는 부를 때마다 텍스처 메모리를 새로 잡는 함수다. 이걸 매 프레임 부르면
+    // 1600×900 기준 한 장에 5.76 MB 씩, 초당 400 장이면 **초당 2.3 GB 를 잡았다 버리는** 셈이 된다.
+    // 그 상태로 몇십 분을 돌리면 그래픽 드라이버의 메모리 관리가 무너진다.
+    // 2026-08-13 실측: 시스템이 두 번 재부팅됐고 둘 다 BugCheck 0xD1 / nvlddmkm.sys 였다.
+    // 참조 주소가 두 번 모두 정확히 0x80(널 포인터 + 오프셋)으로 같았다 — 같은 자리에서 죽었다는 뜻이고,
+    // 두 번째는 앱이 아무 조작 없이 돌기만 하는 동안 죽어서 이 경로가 남았다.
+    //
+    // glTexSubImage2D 는 이미 잡아 둔 저장소에 픽셀만 써 넣으므로 할당이 일어나지 않는다.
+    if (hostPixels_) {
+        if (texAllocW_ != viewW || texAllocH_ != viewH) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, viewW, viewH, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, hostPixels_);
+            texAllocW_ = viewW; texAllocH_ = viewH;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, viewW, viewH,
+                            GL_RGBA, GL_UNSIGNED_BYTE, hostPixels_);
+        }
+    }
 
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity();

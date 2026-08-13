@@ -231,18 +231,35 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        DrawHud(app);
-        DrawToolbar(app, g_w, g_h);
-        if (!g_boardOpen) {
-            ImGui::SetNextWindowPos(ImVec2((float)g_w - 150.0f, 12.0f), ImGuiCond_Always);
-            ImGui::Begin("##fab", nullptr,
+        // Tab 으로 화면을 가리는 것을 전부 감췄다 켰다 한다(녹화·감상용).
+        // ImGui 위젯에 글자를 치는 중에는 Tab 이 그쪽 것이므로 건드리지 않는다.
+        if (ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !ImGui::GetIO().WantTextInput)
+            app.uiHidden = !app.uiHidden;
+
+        if (app.uiHidden) {
+            // 완전히 감추면 돌아오는 길을 모른다 — 한 줄짜리 힌트만 남긴다.
+            ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.35f);
+            ImGui::Begin("##hint", nullptr,
                          ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
-                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-            if (ImGui::Button("설정 보드 열기 ▸")) g_boardOpen = true;
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
+            ImGui::TextDisabled("Tab: 설정 보이기");
             ImGui::End();
+        } else {
+            DrawHud(app);
+            DrawToolbar(app, g_w, g_h);
+            if (!g_boardOpen) {
+                ImGui::SetNextWindowPos(ImVec2((float)g_w - 130.0f, 12.0f), ImGuiCond_Always);
+                ImGui::Begin("##fab", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+                if (ImGui::Button("설정 열기 ▸")) g_boardOpen = true;
+                ImGui::End();
+            }
+            // 보드는 app.cfg 값만 만진다. 코어 반영은 App::tick 이 매 프레임 한다.
+            DrawBoard(app, g_boardOpen);
         }
-        // 보드는 app.cfg 값만 만진다. 코어 반영은 App::tick 이 매 프레임 한다.
-        DrawBoard(app, g_boardOpen);
 
         ImGui::Render();
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());

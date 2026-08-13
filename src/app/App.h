@@ -17,7 +17,7 @@ struct ViewSettings {
     RenderMode mode    = RenderMode::DensityField;
     ColorBy    colorBy = ColorBy::Density;
     ColorMap   cmap    = ColorMap::Astro;
-    float      brightness = 1.0f;
+    float      brightness = 2.0f;   // 1.0 은 바깥쪽 구조가 안 보일 만큼 어둡다(실측)
     float      gamma      = 1.8f;
     bool       showHud    = true;
 };
@@ -26,7 +26,7 @@ struct ViewSettings {
 struct BrushSettings {
     float     radius       = 0.028f;  // 뿌리기·우물·지우개 브러시 반지름(시뮬 좌표)
     float     strength     = 0.35f;   // 뿌리기·우물 세기
-    ShapeKind shapeKind    = ShapeKind::RotatingDisk;
+    ShapeKind shapeKind    = ShapeKind::Galaxy;
     float     shapeRadius  = 0.12f;
     int       shapeCount   = 150000;
     bool      autoOrbit    = true;    // 형태를 넣을 때 그 자리 중력을 재서 궤도속도를 준다
@@ -63,10 +63,24 @@ struct App {
     // 마지막 저장이 실패했다(디스크 부족·권한 등). 조용히 넘어가면 사용자는 파일이 생긴 줄 안다.
     bool  lastSaveFailed = false;
 
-    // 파티클 수 슬라이더가 끌리는 동안 들고 있는 값(10만 단위).
+    // 최대 파티클 수 슬라이더가 끌리는 동안 들고 있는 값(만 단위).
     // 슬라이더는 끄는 내내 매 프레임 값이 바뀌는데, 그걸 그대로 적용하면 지나치는 값마다
     // 수 GB 버퍼를 해제하고 다시 잡는다 — 손을 뗐을 때 한 번만 적용하려고 따로 둔다.
     int   particleSlider = -1;
+
+    // 화면을 가리는 것을 전부 감춘다(설정 보드·HUD·도구 막대). Tab 키로 켜고 끈다.
+    // 녹화하거나 그림만 보고 싶을 때 쓴다.
+    bool  uiHidden = false;
+
+    // 「보기」가 고르는 표현 방식. 나머지 색 설정(컬러맵·온도 추적)은 여기에 맞춰 자동으로 정한다.
+    enum class Look { Density, Temperature };
+    Look  look = Look::Density;
+
+    // 「점으로 그리기」 체크박스. view.mode 와 짝인데, 체크박스가 bool 을 직접 받아야 해서 따로 둔다.
+    bool  pointsMode = false;
+
+    // 「한 번에 놓을 개수」 슬라이더가 끌리는 동안 들고 있는 값(만 단위).
+    int   shapeCountSlider = -1;
 
     void init();
     // 설정 보드에서 바뀐 값을 코어에 반영한다. 파티클 수·격자·경계가 바뀌면 코어가 재할당한다.
@@ -84,3 +98,7 @@ struct App {
 // 설정 보드와 MCP 제어 채널이 같은 규칙을 써야 하므로 한 곳에 둔다.
 // 고른 뒤 개별 토글로 덮어쓸 수 있다.
 void ApplyPresetDefaults(SimConfig& cfg, Preset preset);
+
+// 「보기」에서 고른 표현 방식에 맞춰 색과 온도 설정을 함께 맞춘다.
+// 사용자가 만지는 것은 밀도/온도 둘 중 하나뿐이고, 컬러맵·색 기준·온도 추적은 여기서 정한다.
+void ApplyLook(App& app);
