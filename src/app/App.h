@@ -44,3 +44,8 @@ struct App {
     void applyConfig();
     void tick();
 };
+
+// 프리셋이 시나리오에 맞는 경계·압력·팽창을 함께 정한다.
+// 설정 보드와 MCP 제어 채널이 같은 규칙을 써야 하므로 한 곳에 둔다.
+// 고른 뒤 개별 토글로 덮어쓸 수 있다.
+void ApplyPresetDefaults(SimConfig& cfg, Preset preset);

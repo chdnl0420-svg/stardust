@@ -60,6 +60,17 @@ bool DrawBoard(App& app, bool& boardOpen) {
             app.cfg.particleCount = n * 100000;
             needApply = true;
         }
+        // 코어가 VRAM 에 안 들어가는 요청을 최대 가능 수로 잘랐으면 그 사실을 알린다.
+        // 조용히 줄이면 사용자는 슬라이더 값이 반영된 줄 안다.
+        if (app.sim.particleCount() < app.cfg.particleCount) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
+            ImGui::TextWrapped("VRAM 이 모자라 %d 개로 줄였습니다 (요청 %d)",
+                               app.sim.particleCount(), app.cfg.particleCount);
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("최대치로 맞추기")) {
+                app.cfg.particleCount = app.sim.particleCount();
+            }
+        }
 
         const char* gridItems[] = { "1024²", "2048²", "4096²" };
         int gridIdx = (app.cfg.gridSize == 1024) ? 0 : (app.cfg.gridSize == 2048) ? 1 : 2;
@@ -173,10 +184,8 @@ bool DrawBoard(App& app, bool& boardOpen) {
             const bool sel = (app.cfg.preset == order[i]);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.17f, 0.44f, 0.62f, 1.0f));
             if (ImGui::Button(PresetName(order[i]), ImVec2(138, 0))) {
-                app.cfg.preset = order[i];
-                // 프리셋이 경계 조건을 함께 바꾼다 — 구조 형성만 주기, 나머지는 고립
-                app.cfg.boundary = (order[i] == Preset::CosmicWeb) ? Boundary::Periodic
-                                                                   : Boundary::Isolated;
+                // 경계·압력·팽창을 시나리오에 맞게 함께 바꾼다(App.cpp 의 공통 규칙)
+                ApplyPresetDefaults(app.cfg, order[i]);
                 needApply = true;
                 app.sim.reset();
                 app.running = true;

@@ -90,6 +90,27 @@ function check(ok, label, detail) {
         '나선팔 프리셋이 고립 경계로 돌아온다',
         `preset=${spiral.preset} boundary=${spiral.boundary} 점유셀=${spiral.occupiedCells}`);
 
+  console.log('\n[3-b] 프리셋이 경계·압력·팽창을 함께 바꾼다');
+  await call('nbody_set', { pressure: 1, gravity: 0.6 });
+  const pSpiral = await call('nbody_preset', { preset: 'spiral' });
+  const pShock  = await call('nbody_preset', { preset: 'shock' });
+  const pWeb    = await call('nbody_preset', { preset: 'web' });
+  check(pSpiral.pressure === 0 && pShock.pressure === 1,
+        '충격파만 압력이 켜진다',
+        `나선팔 pressure=${pSpiral.pressure}, 충격파 pressure=${pShock.pressure}`);
+  check(pWeb.boundary === 'periodic' && pWeb.expansion === 0 && pShock.boundary === 'isolated',
+        '경계와 팽창도 시나리오에 맞게 바뀐다',
+        `구조형성 boundary=${pWeb.boundary} expansion=${pWeb.expansion}, 충격파 boundary=${pShock.boundary}`);
+
+  console.log('\n[3-c] CFL 클램프가 강한 중력에서 작동한다');
+  await call('nbody_set', { gravity: 2.0, pressure: 0, particleCount: 500000, gridSize: 1024 });
+  await call('nbody_preset', { preset: 'spiral' });
+  await call('nbody_run', { running: false });
+  const cfl = await call('nbody_step', { count: 300 });
+  check(cfl.dtUsed > 0 && cfl.maxSpeed < 1000,
+        '시간 간격이 잘리고 속도가 폭주하지 않는다',
+        `dtUsed=${cfl.dtUsed} 최대속력=${cfl.maxSpeed} 서브스텝=${cfl.substeps} 총질량=${cfl.totalMass}`);
+
   console.log('\n[4] 스텝 제어 — 멈춘 상태에서 진행');
   await call('nbody_run', { running: false });
   const s1 = await call('nbody_status');

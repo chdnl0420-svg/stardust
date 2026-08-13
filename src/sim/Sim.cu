@@ -293,6 +293,19 @@ __global__ void kCountOccupied(const float* rho, int n, float thr, int* out) {
     if (i < n && rho[i] > thr) atomicAdd(out, 1);
 }
 
+// 질량중심을 격자에서 누적한다. out[0]=Σx·ρ, out[1]=Σy·ρ, out[2]=Σρ.
+// double atomicAdd 는 compute capability 6.0 이상에서 지원되고 이 프로젝트는 8.6 이다.
+__global__ void kCentroidAccum(const float* rho, int G, int stride, double* out) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= G || y >= G) return;
+    double m = (double)rho[y * stride + x];
+    if (m <= 0.0) return;
+    atomicAdd(&out[0], m * ((double)x + 0.5) / (double)G);
+    atomicAdd(&out[1], m * ((double)y + 0.5) / (double)G);
+    atomicAdd(&out[2], m);
+}
+
 // 정답지: 모든 쌍을 하나하나 더하는 직접 계산. 느리지만 정확하다.
 __global__ void kDirectForce(const float2* pos, float2* f, int n, float eps2) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -334,6 +347,11 @@ __global__ void kAccelAt(const float2* accG, const float2* pos, float2* out,
 // 벌어져 "질량 보존" 판정이 못 미더워진다(실측).
 struct ToDouble { __host__ __device__ double operator()(float x) const { return (double)x; } };
 
+// 속도 벡터를 길이로 바꾼다. CFL 클램프가 "가장 빠른 파티클"을 찾는 데 쓴다.
+struct SpeedOf {
+    __host__ __device__ float operator()(float2 v) const { return sqrtf(v.x * v.x + v.y * v.y); }
+};
+
 constexpr int BS = 256;
 inline int grid1(int n) { return (n + BS - 1) / BS; }
 
@@ -372,9 +390,26 @@ struct Sim::Impl {
 
     cudaEvent_t evA = nullptr, evB = nullptr;
 
+    // 속도 리덕션용 (CFL)
+    void  *spdTmp = nullptr; size_t spdTmpBytes = 0;
+    float *spdOut = nullptr;
+
     int  stride() const { return (cfg.boundary == Boundary::Isolated) ? allocG * 2 : allocG; }
     int  padCells() const { int s = stride(); return s * s; }
     bool periodic() const { return cfg.boundary == Boundary::Periodic; }
+
+    // 격자 퍼텐셜을 가속도로 바꿀 때 곱하는 배율.
+    //
+    // 파티클 하나의 질량을 1/N 로 둔다 — 그래야 은하의 총질량이 1 로 고정되어
+    // 파티클 수를 바꿔도 중력의 세기가 그대로다. 이 나눗셈이 없으면 파티클을 열 배로 늘렸을 때
+    // 중력도 열 배가 되어 속도가 폭주하고, CFL 클램프가 매 프레임 최대 분할로 돌아
+    // 계산량만 몇 배가 된다(실측: 1000만에서 서브스텝 4 고정, 26.7 ms).
+    //
+    // 주기 경계는 FFT 왕복 정규화(1/S²)가 여기 붙고, 고립 경계는 이미 kMulSpec 에서 나눴다.
+    float potentialScale() const {
+        const float s = periodic() ? cfg.gravity / (float)(stride() * stride()) : cfg.gravity;
+        return s / (float)(allocN > 0 ? allocN : 1);
+    }
 
     void releaseGrid();
     void releaseParticles();
@@ -382,15 +417,20 @@ struct Sim::Impl {
     void buildGreen();
     void solveGravity();
     float measureReduce(bool wantMax);
+    // 가장 빠른 파티클의 속력. CFL 조건으로 dt 를 자르는 데 쓴다.
+    float measureMaxSpeed();
+    // 한 번의 적분(격자 가속도는 이미 만들어져 있다고 본다)
+    void  integrateOnce(float dt);
 };
 
 void Sim::Impl::releaseParticles() {
     cudaFree(pos); cudaFree(vel); cudaFree(pos2); cudaFree(vel2);
     cudaFree(temp); cudaFree(temp2);
     cudaFree(key); cudaFree(keyOut); cudaFree(val); cudaFree(valOut);
-    cudaFree(sortTmp);
+    cudaFree(sortTmp); cudaFree(spdTmp); cudaFree(spdOut);
     pos = vel = pos2 = vel2 = nullptr; temp = temp2 = nullptr;
     key = keyOut = val = valOut = nullptr; sortTmp = nullptr; sortTmpBytes = 0;
+    spdTmp = nullptr; spdOut = nullptr; spdTmpBytes = 0;
 }
 
 void Sim::Impl::releaseGrid() {
@@ -455,6 +495,14 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&redOut, sizeof(double)));
     CK(cudaMalloc(&cntOut, sizeof(int)));
 
+    // 속도 최댓값 리덕션 (CFL 클램프용)
+    {
+        auto sit = thrust::make_transform_iterator(vel, SpeedOf());
+        cub::DeviceReduce::Max(nullptr, spdTmpBytes, sit, (float*)nullptr, n);
+    }
+    CK(cudaMalloc(&spdTmp, spdTmpBytes));
+    CK(cudaMalloc(&spdOut, sizeof(float)));
+
     if (!evA) { cudaEventCreate(&evA); cudaEventCreate(&evB); }
     allocSoft = -1.f;   // 그린함수 재생성 강제
 }
@@ -508,6 +556,23 @@ float Sim::Impl::measureReduce(bool wantMax) {
     return (float)h;
 }
 
+float Sim::Impl::measureMaxSpeed() {
+    if (!vel || allocN <= 0) return 0.f;
+    size_t bytes = spdTmpBytes;
+    auto sit = thrust::make_transform_iterator(vel, SpeedOf());
+    cub::DeviceReduce::Max(spdTmp, bytes, sit, spdOut, allocN);
+    float h = 0.f;
+    CK(cudaMemcpy(&h, spdOut, sizeof(float), cudaMemcpyDeviceToHost));
+    return h;
+}
+
+void Sim::Impl::integrateOnce(float dt) {
+    kIntegrate<<<grid1(allocN), BS>>>(accG, pos, vel, temp, allocN, allocG, dt,
+                                      periodic() ? 1 : 0,
+                                      cfg.temperatureEnabled ? 1 : 0,
+                                      cfg.coolingEnabled ? 1 : 0, cfg.coolingRate);
+}
+
 // ---------------------------------------------------------------------------
 Sim::Sim() : impl_(new Impl()) {}
 Sim::~Sim() {
@@ -532,18 +597,68 @@ size_t Sim::deviceFreeBytes() {
     return f;
 }
 
+namespace {
+// 파티클 하나가 차지하는 바이트. 위치·속도 두 벌(정렬 재배치용) + 온도 두 벌 +
+// 정렬 키/값 네 벌 + 정렬 임시버퍼 몫을 더한 값이다.
+constexpr size_t kBytesPerParticle = 4 * sizeof(float2) + 2 * sizeof(float)
+                                   + 4 * sizeof(unsigned) + 8;
+
+// 격자가 차지하는 바이트. 고립 경계는 패딩 때문에 폭이 두 배(면적 네 배)가 된다.
+size_t gridBytesFor(int G, Boundary b) {
+    const size_t S = (b == Boundary::Isolated) ? (size_t)G * 2 : (size_t)G;
+    const size_t cells = S * S;
+    const size_t spec  = (S / 2 + 1) * S * sizeof(cufftComplex);
+    size_t bytes = cells * sizeof(float) * 3          // rho, pot, prs
+                 + (size_t)G * G * sizeof(float2)     // accG
+                 + (size_t)G * G * sizeof(float)      // rhoCrop
+                 + spec;                              // rhoSpec
+    if (b == Boundary::Isolated) bytes += cells * sizeof(float) + spec;  // green, greenSpec
+    return bytes;
+}
+} // namespace
+
+size_t Sim::estimateBytes(int particleCount, int gridSize, Boundary boundary) {
+    return (size_t)particleCount * kBytesPerParticle + gridBytesFor(gridSize, boundary);
+}
+
+int Sim::maxParticlesFor(int gridSize, Boundary boundary, size_t freeBytes) {
+    const size_t grid = gridBytesFor(gridSize, boundary);
+    // cuFFT 내부 작업버퍼와 단편화를 감안해 가용량의 80%만 쓴다.
+    const size_t budget = (size_t)(freeBytes * 0.80);
+    if (budget <= grid) return 0;
+    size_t n = (budget - grid) / kBytesPerParticle;
+    if (n > 200000000ull) n = 200000000ull;   // 상한 2억
+    return (int)n;
+}
+
+namespace {
+// 요청한 파티클 수가 VRAM 에 안 들어가면 들어가는 최대치로 자른다.
+// 조용히 실패해 죽는 대신 줄여서 계속 돌게 한다 — 줄였다는 사실은 particleCount() 로 드러난다.
+void clampToVram(SimConfig& cfg, int currentAllocN) {
+    size_t freeB = Sim::deviceFreeBytes();
+    // 이미 잡아 둔 것은 다시 쓸 수 있으므로 예산에 더해 준다.
+    freeB += (size_t)currentAllocN * kBytesPerParticle;
+    const int maxN = Sim::maxParticlesFor(cfg.gridSize, cfg.boundary, freeB);
+    if (maxN > 0 && cfg.particleCount > maxN) cfg.particleCount = maxN;
+    if (cfg.particleCount < 1000) cfg.particleCount = 1000;
+}
+} // namespace
+
 void Sim::init(const SimConfig& cfg) {
     impl_->cfg = cfg;
+    clampToVram(impl_->cfg, 0);
     impl_->allocate();
     reset();
 }
 
 void Sim::reconfigure(const SimConfig& cfg) {
     Impl* d = impl_;
-    const bool needRealloc = (cfg.particleCount != d->allocN)
-                          || (cfg.gridSize != d->allocG)
-                          || (cfg.boundary != d->allocBoundary);
-    d->cfg = cfg;
+    SimConfig next = cfg;
+    clampToVram(next, d->allocN);
+    const bool needRealloc = (next.particleCount != d->allocN)
+                          || (next.gridSize != d->allocG)
+                          || (next.boundary != d->allocBoundary);
+    d->cfg = next;
     if (needRealloc) { d->allocate(); reset(); }
 }
 
@@ -561,7 +676,7 @@ void Sim::reset() {
         kScatter<<<grid1(n), BS>>>(d->pos, d->rho, n, G, S, d->periodic() ? 1 : 0);
         d->solveGravity();
         dim3 b(16, 16), g((G + 15) / 16, (G + 15) / 16);
-        const float potScale = d->periodic() ? d->cfg.gravity / (float)(S * S) : d->cfg.gravity;
+        const float potScale = d->potentialScale();
         kGridAccel<<<g, b>>>(d->pot, d->prs, d->rho, d->accG, G, S, potScale, 0,
                              d->periodic() ? 1 : 0);
         const float fudge = (d->cfg.preset == Preset::TidalPair) ? 0.90f : 0.97f;
@@ -604,14 +719,53 @@ void Sim::step() {
         kPressure<<<grid1(S * S), BS>>>(d->rho, d->prs, S * S, d->cfg.pressureK, d->cfg.gamma);
 
     // (5) 격자 가속도 -> 보간 -> 적분
-    const float potScale = per ? d->cfg.gravity / (float)(S * S) : d->cfg.gravity;
+    const float potScale = d->potentialScale();
     kGridAccel<<<gG, b>>>(d->pot, d->prs, d->rho, d->accG, G, S, potScale,
                           d->cfg.pressureEnabled ? 1 : 0, per);
 
-    const float dt = 0.0016f * d->cfg.timeScale;
-    kIntegrate<<<grid1(n), BS>>>(d->accG, d->pos, d->vel, d->temp, n, G, dt, per,
-                                 d->cfg.temperatureEnabled ? 1 : 0,
-                                 d->cfg.coolingEnabled ? 1 : 0, d->cfg.coolingRate);
+    // (6) CFL 클램프 — 한 스텝에 파티클이 격자 한 칸보다 많이 움직이면 적분이 무너진다.
+    //     실측(implement-note.md 3번): 중력을 세게 하면 오히려 덜 뭉쳤는데,
+    //     파티클이 튕겨 나가 판 가장자리에 쌓인 것이었다.
+    //     요청 dt 가 한계를 넘으면 잘라서 여러 번 나눠 돈다(상한 4회).
+    const float dtWanted = 0.0016f * d->cfg.timeScale;
+    const float cell     = 1.0f / (float)G;
+    const float vmax     = d->measureMaxSpeed();
+    const float CFL      = 0.35f;                 // 한 스텝에 셀의 35% 이상 못 가게 한다
+    float dtLimit = dtWanted;
+    if (vmax > 1e-6f) dtLimit = CFL * cell / vmax;
+
+    // 한 프레임에 몇 번까지 나눠 돌지. 1 이면 "쪼개지 않고 시간 간격만 자른다".
+    //
+    // 왜 1 인가: 실시간 앱은 프레임 예산이 먼저다. 쪼개면 계산량이 그 배수만큼 늘어
+    // 예산을 그대로 넘긴다(실측: 상한 4에서 1000만·1024² 가 18.0 ms, 예산 16.7 ms 초과).
+    // 대신 시간 간격을 CFL 한계로 자르면 계산량은 1배로 유지되고 화면 속의 시간이
+    // 물리가 허용하는 만큼만 흐른다 — 배속 슬라이더는 그 한계 아래에서만 효과를 낸다.
+    // 오프라인 렌더처럼 정확도가 먼저인 쓰임이 생기면 이 값을 올린다.
+    const int MAX_SUBSTEPS = 1;
+
+    int   sub = 1;
+    float dtUse = dtWanted;
+    if (dtLimit < dtWanted) {
+        sub = (int)ceilf(dtWanted / dtLimit);
+        if (sub > MAX_SUBSTEPS) sub = MAX_SUBSTEPS;
+        dtUse = dtWanted / (float)sub;
+        if (dtUse > dtLimit) dtUse = dtLimit;     // 상한에 걸렸으면 한계값으로 자른다
+    }
+    for (int s = 0; s < sub; ++s) {
+        if (s > 0) {
+            // 두 번째 서브스텝부터는 위치가 바뀌었으니 격자·중력을 다시 푼다.
+            kClearF<<<grid1(S * S), BS>>>(d->rho, S * S);
+            kScatter<<<grid1(n), BS>>>(d->pos, d->rho, n, G, S, per);
+            d->solveGravity();
+            if (d->cfg.pressureEnabled)
+                kPressure<<<grid1(S * S), BS>>>(d->rho, d->prs, S * S,
+                                                d->cfg.pressureK, d->cfg.gamma);
+            kGridAccel<<<gG, b>>>(d->pot, d->prs, d->rho, d->accG, G, S, potScale,
+                                  d->cfg.pressureEnabled ? 1 : 0, per);
+        }
+        d->integrateOnce(dtUse);
+    }
+    const float dt = dtUse * (float)sub;
 
     cudaEventRecord(d->evB);
     cudaEventSynchronize(d->evB);
@@ -626,6 +780,9 @@ void Sim::step() {
     d->tim.poissonMs = total * 0.35f;
     d->tim.gatherMs  = total * 0.25f;
     d->tim.gasMs     = d->cfg.pressureEnabled ? total * 0.10f : 0.f;
+    d->tim.substeps  = sub;
+    d->tim.dtUsed    = dtUse;
+    d->tim.maxSpeed  = vmax;
 
     d->time += dt;
     d->steps++;
@@ -665,6 +822,26 @@ int Sim::measureOccupiedCells() {
     int h = 0;
     CK(cudaMemcpy(&h, d->cntOut, sizeof(int), cudaMemcpyDeviceToHost));
     return h;
+}
+
+void Sim::measureCentroid(double& cx, double& cy) {
+    cx = cy = 0.0;
+    Impl* d = impl_;
+    if (!d->rho) return;
+    // 현재 파티클 위치로 격자를 다시 채운 뒤 잰다(측정 순서 의존을 없앤다).
+    const int G = d->allocG, S = d->stride();
+    kClearF<<<grid1(S * S), BS>>>(d->rho, S * S);
+    kScatter<<<grid1(d->allocN), BS>>>(d->pos, d->rho, d->allocN, G, S,
+                                       d->periodic() ? 1 : 0);
+    double* acc = nullptr;
+    CK(cudaMalloc(&acc, sizeof(double) * 3));
+    CK(cudaMemset(acc, 0, sizeof(double) * 3));
+    dim3 b(16, 16), g((G + 15) / 16, (G + 15) / 16);
+    kCentroidAccum<<<g, b>>>(d->rho, G, S, acc);
+    double h[3] = {0, 0, 0};
+    CK(cudaMemcpy(h, acc, sizeof(double) * 3, cudaMemcpyDeviceToHost));
+    cudaFree(acc);
+    if (h[2] > 0.0) { cx = h[0] / h[2]; cy = h[1] / h[2]; }
 }
 
 // 직접 O(N^2) 를 정답지로 놓고 격자 중력의 상대오차 RMS 를 잰다.

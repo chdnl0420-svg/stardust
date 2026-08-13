@@ -30,6 +30,15 @@ void DrawHud(const App& app) {
     ImGui::TextDisabled("시각");   ImGui::SameLine();
     ImGui::Text("t = %.3f", app.sim.simTime());
 
+    // 시간 간격이 잘려 여러 번 나눠 돌고 있으면 알린다.
+    // 이게 뜨는 동안은 화면의 시간이 설정한 배속보다 천천히 흐른다.
+    SimTimings t = app.sim.timings();
+    if (t.substeps > 1) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
+        ImGui::Text("CFL 분할 %d회 (최대속력 %.0f)", t.substeps, t.maxSpeed);
+        ImGui::PopStyleColor();
+    }
+
     if (!app.running) {
         ImGui::Separator();
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));

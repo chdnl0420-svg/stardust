@@ -172,6 +172,90 @@ static void testTimings() {
           "단계별 시간이 채워진다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 7. CFL 클램프 — 중력을 최대로 올려도 파티클이 튕겨 나가지 않아야 한다.
+//    클램프가 없을 때는 파티클이 판 밖으로 날아가 경계에 쌓였고, 질량중심이 그 쪽으로 끌려갔다.
+// ---------------------------------------------------------------------------
+static void testCflClamp() {
+    printf("\n[7] CFL 클램프 — 강한 중력에서 튕겨 나가지 않는다\n");
+    Sim sim;
+    SimConfig cfg;
+    cfg.particleCount = 300000;
+    cfg.gridSize = 512;
+    cfg.gravity = 2.0f;          // 슬라이더 최대치
+    cfg.pressureEnabled = false;
+    cfg.preset = Preset::SpiralDisk;
+    sim.init(cfg);
+
+    double m0 = sim.measureTotalGridMass();
+    double cx0, cy0; sim.measureCentroid(cx0, cy0);
+    for (int i = 0; i < 400; ++i) sim.step();
+    double m1 = sim.measureTotalGridMass();
+    double cx1, cy1; sim.measureCentroid(cx1, cy1);
+    SimTimings t = sim.timings();
+
+    double dm = std::fabs(m1 - m0) / (m0 > 0 ? m0 : 1.0);
+    double dc = std::sqrt((cx1 - cx0) * (cx1 - cx0) + (cy1 - cy0) * (cy1 - cy0));
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "질량변화=%.2e  중심이동=%.4f  서브스텝=%d  dt=%.2e  최대속력=%.2f",
+             dm, dc, t.substeps, t.dtUsed, t.maxSpeed);
+    // 중심이 0.05 이상 밀리면 한쪽으로 쏠린 것이다(회전 원반은 중심이 제자리에 있어야 한다).
+    check(dm < 1e-2 && dc < 0.05, "강한 중력에서 질량·질량중심이 유지된다", buf);
+}
+
+// ---------------------------------------------------------------------------
+// 8. 장시간 적분 — 1만 스텝을 돌려도 총 질량이 보존되어야 한다.
+// ---------------------------------------------------------------------------
+static void testLongRun() {
+    printf("\n[8] 장시간(1만 스텝) 질량 보존\n");
+    Sim sim;
+    SimConfig cfg;
+    cfg.particleCount = 200000;
+    cfg.gridSize = 256;
+    cfg.gravity = 0.6f;
+    cfg.pressureEnabled = false;
+    cfg.preset = Preset::SpiralDisk;
+    sim.init(cfg);
+
+    double m0 = sim.measureTotalGridMass();
+    for (int i = 0; i < 10000; ++i) sim.step();
+    double m1 = sim.measureTotalGridMass();
+    double rel = std::fabs(m1 - m0) / (m0 > 0 ? m0 : 1.0);
+    char buf[180];
+    snprintf(buf, sizeof(buf), "시작=%.0f  1만스텝후=%.0f  상대변화=%.2e", m0, m1, rel);
+    check(m0 > 1.0 && rel < 1e-2, "1만 스텝 뒤에도 총 질량이 보존된다", buf);
+}
+
+// ---------------------------------------------------------------------------
+// 9. VRAM 클램프 — 감당 못 할 요청은 최대 가능 수로 잘려야 한다(죽지 않고).
+// ---------------------------------------------------------------------------
+static void testVramClamp() {
+    printf("\n[9] VRAM 초과 요청 클램프\n");
+    size_t freeB = Sim::deviceFreeBytes();
+    int maxN = Sim::maxParticlesFor(2048, Boundary::Isolated, freeB);
+
+    Sim sim;
+    SimConfig cfg;
+    cfg.particleCount = 500000000;   // 5억 — 8GB 로는 불가능
+    cfg.gridSize = 2048;
+    cfg.boundary = Boundary::Isolated;
+    cfg.preset = Preset::SpiralDisk;
+    sim.init(cfg);
+
+    int got = sim.particleCount();
+    char buf[220];
+    snprintf(buf, sizeof(buf), "요청=5억  실제=%d  이론상한=%d  가용VRAM=%.0fMB",
+             got, maxN, freeB / 1048576.0);
+    check(got > 1000 && got <= maxN, "과도한 요청이 최대 가능 수로 잘린다", buf);
+
+    // 잘린 뒤에도 정상 동작해야 한다
+    sim.step();
+    double mass = sim.measureTotalGridMass();
+    snprintf(buf, sizeof(buf), "잘린 뒤 격자질량=%.0f (요청 %d)", mass, got);
+    check(std::fabs(mass - got) / got < 1e-2, "잘린 상태로도 정상 동작한다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -186,6 +270,9 @@ int main() {
     testReconfigure();
     testPresets();
     testTimings();
+    testCflClamp();
+    testLongRun();
+    testVramClamp();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

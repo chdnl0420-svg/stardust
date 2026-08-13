@@ -127,6 +127,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
         "running=%d\nsimTime=%.5f\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
+        "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "vramFreeMB=%.0f\n",
         app.fps, app.frameMs,
@@ -140,6 +141,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
         app.running ? 1 : 0, app.sim.simTime(),
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
+        t.substeps, t.dtUsed, t.maxSpeed,
         totalMass, maxDensity, occupiedCells,
         Sim::deviceFreeBytes() / 1048576.0);
     return buf;
@@ -239,9 +241,8 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
             writeResponse("ok=0\nerror=모르는 프리셋입니다\n");
             return false;
         }
-        app.cfg.preset = p;
-        // 설정 보드와 같은 규칙 — 구조 형성만 주기 경계, 나머지는 고립
-        app.cfg.boundary = (p == Preset::CosmicWeb) ? Boundary::Periodic : Boundary::Isolated;
+        // 설정 보드와 같은 규칙을 쓴다 — 경계·압력·팽창을 함께 바꾼다
+        ApplyPresetDefaults(app.cfg, p);
         app.applyConfig();
         app.sim.reset();
         app.running = true;

@@ -58,6 +58,10 @@ struct SimTimings {
     float sortMs    = 0.0f;
     float gasMs     = 0.0f;
     float totalMs   = 0.0f;
+    // CFL 클램프가 실제로 쓴 값. 요청 dt 가 너무 크면 잘리고 여러 번 나눠 돈다.
+    int   substeps  = 1;
+    float dtUsed    = 0.0f;
+    float maxSpeed  = 0.0f;
 };
 
 class Sim {
@@ -70,6 +74,11 @@ public:
     static bool        deviceAvailable();
     static std::string deviceName();
     static size_t      deviceFreeBytes();
+
+    // 이 설정으로 잡아야 할 VRAM 바이트 수. 할당하기 전에 가용량과 비교하는 데 쓴다.
+    static size_t      estimateBytes(int particleCount, int gridSize, Boundary boundary);
+    // 가용 VRAM 안에 들어가는 최대 파티클 수. 요청이 넘치면 이 값으로 잘라 쓴다.
+    static int         maxParticlesFor(int gridSize, Boundary boundary, size_t freeBytes);
 
     void init(const SimConfig& cfg);
     // 파티클 수·격자 해상도가 바뀌면 버퍼를 다시 잡고 초기조건을 새로 만든다.
@@ -87,6 +96,8 @@ public:
     double measureTotalGridMass();
     double measureMaxDensity();
     int    measureOccupiedCells();
+    // 질량중심(0~1 정규화 좌표). 파티클이 경계로 쏠리면 총질량은 그대로여도 이 값이 움직인다.
+    void   measureCentroid(double& cx, double& cy);
     // 직접 O(N²) 계산을 정답지로 놓고 격자 중력의 상대오차 RMS 를 잰다.
     // 이 호출은 독립적으로 자기 버퍼를 잡고 끝나면 반납한다(현재 상태를 건드리지 않는다).
     double measureForceErrorVsDirect(int n, int gridSize, float softeningCells);
