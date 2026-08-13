@@ -200,7 +200,12 @@ void RenderField::draw(App& app, int viewW, int viewH) {
         kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
                                                   (uchar4*)devPixels_, npix,
                                                   view.brightness, 1.0f / view.gamma);
-        cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost);
+        // 복사가 실패하면 hostPixels_ 는 이전 프레임 그대로다 — 그걸 새 화면인 양 올리면
+        // 사용자는 시뮬레이션이 도는 줄 안다. 실패하면 검은 화면으로 두어 이상을 드러낸다
+        // (round-08 리뷰 A11).
+        if (cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost) != cudaSuccess) {
+            if (hostPixels_) memset(hostPixels_, 0, devBytes_);
+        }
     } else {
         // 밀도 필드 — 색 기준에 맞는 격자를 받아 화면으로 샘플링한다.
         const Sim::Field f = (view.colorBy == ColorBy::Temperature) ? Sim::Field::Temperature
@@ -215,7 +220,9 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             kShade<<<g, b>>>(grid, app.sim.gridSize(), (uchar4*)devPixels_, viewW, viewH,
                              bright, 1.0f / view.gamma, cmapKind,
                              app.zoom, app.panX, app.panY);
-            cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost);
+            if (cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost) != cudaSuccess) {
+                if (hostPixels_) memset(hostPixels_, 0, devBytes_);
+            }
         } else if (hostPixels_) {
             memset(hostPixels_, 0, devBytes_);
         }

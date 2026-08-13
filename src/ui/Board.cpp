@@ -80,8 +80,13 @@ void DrawBoard(App& app, bool& boardOpen) {
             app.cfg.gridSize = (gridIdx == 0) ? 1024 : (gridIdx == 1) ? 2048 : 4096;
 
         ImGui::SliderFloat("시간 배속", &app.cfg.timeScale, 0.1f, 4.0f, "%.1fx");
-        if (app.cfg.timeScale > 1.0f)
-            SectionNote("배속을 1보다 올리면 한 프레임에 스텝을 여러 번 돈다 — 계산량도 그만큼 늘어난다.");
+        // 1배를 넘는 배속은 프레임당 스텝 횟수로 내므로 정수만 뜻이 있다.
+        // 스냅하지 않으면 3.4배속이 조용히 3회로 반올림돼, 슬라이더 값과 실제 진행이 어긋난다.
+        if (app.cfg.timeScale > 1.0f) {
+            app.cfg.timeScale = (float)(int)(app.cfg.timeScale + 0.5f);
+            SectionNote("배속을 1보다 올리면 한 프레임에 스텝을 여러 번 돈다 — 계산량도 그만큼 늘어난다. "
+                        "시간 간격은 안정성 한계에 묶여 있으므로 이 구간은 정수 배속만 쓴다.");
+        }
         ImGui::SliderInt("정렬 주기", &app.cfg.sortInterval, 1, 120, "%d 스텝");
         SectionNote("정렬 주기는 성능에만 영향을 준다. 실측상 40스텝까지는 유지되고 80부터 나빠진다.");
     }

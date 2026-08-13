@@ -107,6 +107,26 @@ function check(ok, label, detail) {
         `프레임당 스텝  1.0x=${spf1}  3.0x=${spf3}`);
   await call('nbody_set', { timeScale: 1.0 });
 
+  // ---- 3-b. 배속이 시간 간격과 반복 횟수에 이중으로 곱해지지 않는다 ----
+  //   CFL 이 걸리는 조건에서는 dt 가 늘 한계값이라 이중 적용이 상쇄돼 안 보인다.
+  //   중력을 끄고 정지한 덩어리로 재야 드러난다(round-08 리뷰 R1).
+  console.log('\n[3-b] 배속을 올려도 시간 간격은 그대로다');
+  const dtStill = async (ts) => {
+    await call('nbody_set', { gravity: 0, pressure: 0, timeScale: ts });
+    await call('nbody_preset', { preset: 'empty' });
+    await call('nbody_set', { gravity: 0, pressure: 0, timeScale: ts });
+    await call('nbody_tool', { tool: 'shape', shape: 'blob', x: 0.5, y: 0.5,
+                               radius: 0.1, count: 200000, autoOrbit: false });
+    await call('nbody_run', { running: false });
+    const st = await call('nbody_step', { count: 3 });
+    return st.dtUsed;
+  };
+  const dt1 = await dtStill(1.0), dt3 = await dtStill(3.0);
+  check(dt1 > 0 && Math.abs(dt3 - dt1) < 1e-9,
+        '배속 3.0 이 시간 간격을 키우지 않는다(반복 횟수로만 낸다)',
+        `dtUsed 1.0x=${dt1}  3.0x=${dt3} (같아야 한다 — 다르면 프레임 반복과 곱해져 9배가 된다)`);
+  await call('nbody_set', { timeScale: 1.0, gravity: 0.8 });
+
   // ---- 4. 표시 설정을 상태로 되읽을 수 있다 ----
   console.log('\n[4] 표시 설정이 상태에 나온다');
   const st = await call('nbody_set', {

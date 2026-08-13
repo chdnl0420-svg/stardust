@@ -53,6 +53,14 @@ void markFailure(const char* what, const char* file, int line) {
                     markFailure(cudaGetErrorString(e_), __FILE__, __LINE__); }          \
                } while (0)
 
+// cuFFT 호출용. 반환형이 cudaError_t 가 아니라 cufftResult 라 CK 로 못 감싼다.
+// 계획 생성뿐 아니라 **실행**도 실패할 수 있고, 실패한 변환의 출력은 미초기화라
+// 그대로 퍼텐셜로 쓰면 파티클이 통째로 망가진다(round-08 리뷰 R2).
+#define FK(x)  do { cufftResult r_ = (x); if (r_ != CUFFT_SUCCESS) {                    \
+                    char m_[64]; snprintf(m_, sizeof(m_), "cuFFT error %d", (int)r_);   \
+                    markFailure(m_, __FILE__, __LINE__); }                              \
+               } while (0)
+
 namespace {
 
 __device__ __forceinline__ unsigned pcgHash(unsigned v) {
@@ -705,6 +713,11 @@ void Sim::Impl::allocate() {
     CK(cub::DeviceRadixSort::SortPairs(nullptr, sortTmpBytes, key, keyOut, val, valOut, n, 0, 24));
     CK(cudaMalloc(&sortTmp, sortTmpBytes));
 
+    // 파티클 버퍼 중 하나라도 실패했으면 여기서 멈춘다.
+    // CK 는 실패를 표시만 하고 흐름을 안 끊으므로, 계속 가면 null 포인터에 memset 하고
+    // CUB 임시버퍼 크기를 0 으로 잡는 등 실패가 겹쳐 원인을 못 찾게 된다(round-08 리뷰 A8).
+    if (g_failed) return;
+
     CK(cudaMalloc(&rho, sizeof(float) * cells));
     CK(cudaMalloc(&pot, sizeof(float) * cells));
     CK(cudaMalloc(&prs, sizeof(float) * cells));
@@ -712,6 +725,8 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&rhoCrop, sizeof(float) * G * G));
     CK(cudaMalloc(&fieldNum, sizeof(float) * cells));
     CK(cudaMalloc(&fieldOut, sizeof(float) * G * G));
+
+    if (g_failed) return;                 // 격자 버퍼 실패 — FFT 계획을 만들 이유가 없다
 
     const int W = S / 2 + 1;
     CK(cudaMalloc(&rhoSpec, sizeof(cufftComplex) * W * S));
@@ -781,7 +796,7 @@ void Sim::Impl::buildGreen() {
     if (allocSoft == eps && allocLaw == cfg.law) return;   // 같은 조건이면 다시 만들 필요 없다
     dim3 b(16, 16), g((S + 15) / 16, (S + 15) / 16);
     kGreen<<<g, b>>>(green, S, cell, eps, cfg.law == GravityLaw::InverseSquare ? 0 : 1);
-    cufftExecR2C(planF, green, greenSpec);
+    FK(cufftExecR2C(planF, green, greenSpec));
     allocSoft = eps; allocLaw = cfg.law;
 }
 
@@ -792,19 +807,19 @@ void Sim::Impl::solveGravity() {
     const int G = allocG, S = stride(), cells = S * S, W = S / 2 + 1;
     dim3 b(16, 16);
     if (periodic()) {
-        cufftExecR2C(planF, rho, rhoSpec);
+        FK(cufftExecR2C(planF, rho, rhoSpec));
         dim3 gs((W + 15) / 16, (S + 15) / 16);
         kPoissonPeriodic<<<gs, b>>>(rhoSpec, S, 1.0f,
                                     cfg.law == GravityLaw::InverseSquare ? 0 : 1,
                                     cfg.softeningCells);
-        cufftExecC2R(planB, rhoSpec, pot);
+        FK(cufftExecC2R(planB, rhoSpec, pot));
     } else {
         // 고립 경계: 패딩 격자에서 밀도와 그린함수를 합성곱한다.
         // 이러면 순환 합성곱이 선형 합성곱이 되어 "바깥이 비어 있는" 우주가 된다.
         buildGreen();
-        cufftExecR2C(planF, rho, rhoSpec);
+        FK(cufftExecR2C(planF, rho, rhoSpec));
         kMulSpec<<<grid1(W * S), BS>>>(rhoSpec, greenSpec, W * S, 1.0f / (float)cells);
-        cufftExecC2R(planB, rhoSpec, pot);
+        FK(cufftExecC2R(planB, rhoSpec, pot));
     }
     (void)G;
 }
@@ -826,10 +841,14 @@ float Sim::Impl::measureReduce(bool wantMax) {
 }
 
 float Sim::Impl::measureMaxSpeed() {
-    if (!vel || allocN <= 0) return 0.f;
+    // **살아 있는 구간만 본다.** 지우개와 리셋은 꼬리 슬롯의 위치만 숨기고 속도는 그대로 두므로,
+    // 전체를 보면 이미 사라진 파티클의 옛 속도가 최댓값으로 잡힌다. 그 값이 CFL 을 조여
+    // 빈 판에서도 시간 간격이 계속 잘린다(round-08 리뷰 P2 — 브릿지 [3-b] 에서 실제로 물렸다:
+    // 정지한 덩어리인데 dtUsed 가 0.000088 로 잘렸다).
+    if (!vel || activeN <= 0) return 0.f;
     size_t bytes = spdTmpBytes;
     auto sit = thrust::make_transform_iterator(vel, SpeedOf());
-    cub::DeviceReduce::Max(spdTmp, bytes, sit, spdOut, allocN);
+    CK(cub::DeviceReduce::Max(spdTmp, bytes, sit, spdOut, activeN));
     float h = 0.f;
     CK(cudaMemcpy(&h, spdOut, sizeof(float), cudaMemcpyDeviceToHost));
     return h;
@@ -998,20 +1017,30 @@ void Sim::step() {
     cudaEventRecord(d->evA);
 
     // (1) 정렬 — 정확성이 아니라 캐시 지역성을 위한 것이라 매 스텝 하지 않는다.
+    //
+    // **살아 있는 구간만 정렬한다.** 전체를 정렬하면 빈 슬롯(위치 -1)이 셀 키 0 으로 계산돼
+    // 맨 앞으로 몰리고, "살아 있는 것은 항상 [0, activeN)" 이라는 불변식이 깨진다.
+    // 그러면 렌더가 빈 슬롯을 그리고 다음 형태 추가가 살아 있는 파티클을 덮어쓴다
+    // (round-08 리뷰 A6).
     float tSort = 0.f;
-    if (d->cfg.sortInterval > 0 && (d->steps % d->cfg.sortInterval) == 0) {
-        cudaEvent_t s0 = d->evA;  (void)s0;
-        kCellKey<<<grid1(n), BS>>>(d->pos, d->key, d->val, n, G);
+    const int na = d->activeN;
+    if (na > 0 && d->cfg.sortInterval > 0 && (d->steps % d->cfg.sortInterval) == 0) {
+        kCellKey<<<grid1(na), BS>>>(d->pos, d->key, d->val, na, G);
         size_t bytes = d->sortTmpBytes;
         // 정렬이 실패하면 valOut 이 미정의 상태다. 그걸로 파티클 배열을 인덱싱하면
         // 범위 밖 디바이스 메모리를 읽는다(round-06 리뷰 P1 #9).
         CK(cub::DeviceRadixSort::SortPairs(d->sortTmp, bytes, d->key, d->keyOut,
-                                           d->val, d->valOut, n, 0, 24));
+                                           d->val, d->valOut, na, 0, 24));
         if (g_failed) return;
-        kReorder<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, d->isStar,
-                                   d->pos2, d->vel2, d->temp2, d->isStar2, d->valOut, n);
+        kReorder<<<grid1(na), BS>>>(d->pos, d->vel, d->temp, d->isStar,
+                                    d->pos2, d->vel2, d->temp2, d->isStar2, d->valOut, na);
         std::swap(d->pos, d->pos2); std::swap(d->vel, d->vel2); std::swap(d->temp, d->temp2);
         std::swap(d->isStar, d->isStar2);
+        // 뒤바꾼 버퍼의 꼬리는 이전 프레임 값이 남아 있다 — 다시 숨겨 빈 슬롯으로 되돌린다.
+        if (na < n) {
+            kHideRange<<<grid1(n - na), BS>>>(d->pos, na, n - na);
+            CK(cudaMemset(d->isStar + na, 0, sizeof(unsigned char) * (n - na)));
+        }
     }
 
     // (2) 산란
@@ -1058,7 +1087,13 @@ void Sim::step() {
     //     실측(implement-note.md 3번): 중력을 세게 하면 오히려 덜 뭉쳤는데,
     //     파티클이 튕겨 나가 판 가장자리에 쌓인 것이었다.
     //     요청 dt 가 한계를 넘으면 잘라서 여러 번 나눠 돈다(상한 4회).
-    const float dtWanted = 0.0016f * d->cfg.timeScale;
+    // 배속은 **내리는 쪽만** 여기서 처리한다.
+    // 올리는 쪽(1배 초과)은 App::tick 이 한 프레임에 스텝을 여러 번 돌려서 낸다 —
+    // 여기서 dt 까지 같이 키우면 두 곳에서 곱해져 3배속이 9배로 진행된다.
+    // CFL 이 dt 를 덮어쓰는 동안은 그 이중 적용이 상쇄돼 안 보이지만,
+    // 파티클이 느려 CFL 이 안 걸리는 구간에서 그대로 드러난다(round-08 리뷰 R1).
+    const float slow     = (d->cfg.timeScale < 1.0f) ? d->cfg.timeScale : 1.0f;
+    const float dtWanted = 0.0016f * slow;
     const float cell     = 1.0f / (float)G;
     const float vmax     = d->measureMaxSpeed();
     const float CFL      = 0.35f;                 // 한 스텝에 셀의 35% 이상 못 가게 한다
@@ -1067,15 +1102,10 @@ void Sim::step() {
     //
     // 왜 필요한가 (round-06 QA-1 실측): 전에는 `dtUse` 가 늘 `dtLimit` 으로 잘려
     // 배속 0.25 와 3.0 의 dtUsed 가 0.000101 로 똑같았다 — 배속 슬라이더가 통째로 무효였다.
-    // 요청 dt(=0.0016×배속)의 최솟값이 1.6e-4 인데 CFL 한계가 1.0e-4 라, 슬라이더를 어디에 두든
-    // 항상 한계가 이겼기 때문이다.
+    // 요청 dt 의 최솟값이 1.6e-4 인데 CFL 한계가 1.0e-4 라, 슬라이더를 어디에 두든 항상 한계가 이겼다.
     // 느리게 하는 쪽은 안정성과 충돌하지 않으므로(dt 를 줄이는 것은 언제나 안전하다) 한계 자체를 낮춘다.
-    // 빠르게 하는 쪽은 여기서 못 한다 — CFL 은 넘으면 적분이 무너지는 안정성 한계라
-    // dt 를 늘릴 수 없다. 그쪽은 App::tick 이 한 프레임에 스텝을 여러 번 돌려 처리한다.
-    const float slowFactor = (d->cfg.timeScale < 1.0f) ? d->cfg.timeScale : 1.0f;
-
     float dtLimit = dtWanted;
-    if (vmax > 1e-6f) dtLimit = CFL * cell / vmax * slowFactor;
+    if (vmax > 1e-6f) dtLimit = CFL * cell / vmax * slow;
 
     // 한 프레임에 몇 번까지 나눠 돌지. 1 이면 "쪼개지 않고 시간 간격만 자른다".
     //
@@ -1130,6 +1160,11 @@ void Sim::step() {
 
     d->time += dt;
     d->steps++;
+
+    // 커널은 비동기로 돌아가므로 오류가 여기까지 와야 드러난다.
+    // 확인하지 않으면 잘못된 메모리 접근으로 컨텍스트가 망가진 뒤에도 다음 프레임을 계속 돌린다
+    // (round-08 리뷰 A9). cudaGetLastError 는 확인하면서 상태를 비우므로 다음 스텝에 안 번진다.
+    CK(cudaGetLastError());
 }
 
 const SimConfig& Sim::config() const { return impl_->cfg; }
@@ -1227,9 +1262,13 @@ int Sim::eraseAt(float cx, float cy, float radius) {
     // "빈 슬롯은 항상 뒤쪽" 이라는 불변식이 유지되고, 다음 형태 추가가 정확한 개수를 넣는다.
     thrust::counting_iterator<int> ids(0);
     size_t bytes = d->selTmpBytes;
-    cub::DeviceSelect::Flagged(d->selTmp, bytes, ids, d->alive, d->selIdx, d->selNum, d->allocN);
+    // 선택이 실패하면 selNum·selIdx 가 미초기화다. 그 값을 개수와 인덱스로 믿고 압축하면
+    // 범위 밖 GPU 메모리를 읽고 쓴다(round-08 리뷰 A10).
+    CK(cub::DeviceSelect::Flagged(d->selTmp, bytes, ids, d->alive, d->selIdx, d->selNum, d->allocN));
+    if (g_failed) return 0;
     int kept = 0;
     CK(cudaMemcpy(&kept, d->selNum, sizeof(int), cudaMemcpyDeviceToHost));
+    if (g_failed || kept < 0 || kept > d->allocN) return 0;
 
     if (kept > 0)
         kCompact<<<grid1(kept), BS>>>(d->pos, d->vel, d->temp, d->isStar,
@@ -1311,12 +1350,12 @@ double Sim::measureForceErrorVsDirect(int n, int G, float softeningCells) {
 
     dim3 b(16, 16), gp((S + 15) / 16, (S + 15) / 16), gg((G + 15) / 16, (G + 15) / 16);
     kGreen<<<gp, b>>>(grn, S, cell, eps, 0);
-    cufftExecR2C(pf, grn, gs);
+    FK(cufftExecR2C(pf, grn, gs));
     kClearF<<<grid1(cells), BS>>>(rho_, cells);
     kScatter<<<grid1(n), BS>>>(p, rho_, n, G, S, 0);
-    cufftExecR2C(pf, rho_, rs);
+    FK(cufftExecR2C(pf, rho_, rs));
     kMulSpec<<<grid1(W * S), BS>>>(rs, gs, W * S, 1.0f / (float)cells);
-    cufftExecC2R(pb, rs, pot_);
+    FK(cufftExecC2R(pb, rs, pot_));
     kGridAccel<<<gg, b>>>(pot_, nullptr, rho_, acc_, G, S, 1.0f, 0, 0);
     kAccelAt<<<grid1(n), BS>>>(acc_, p, fp, n, G, 0);
     CK(cudaDeviceSynchronize());

@@ -54,11 +54,21 @@ function encodeValue(v) {
   return s;
 }
 
+let ridSeq = 0;
+
 async function sendNow(kv, timeoutMs) {
   ensureDir();
   try { fs.unlinkSync(RESP_FILE); } catch (_) {}
-  const body = Object.entries(kv).map(([k, v]) => `${k}=${encodeValue(v)}`).join('\n') + '\n';
-  fs.writeFileSync(CMD_FILE, body, 'utf8');
+  // 요청마다 번호를 붙이고 앱이 그대로 돌려준다.
+  // 번호가 없으면 타임아웃된 명령의 늦은 응답을 다음 명령이 자기 것으로 읽는다
+  // (round-08 리뷰 B3) — 그때 값이 뒤바뀐 채로 검증이 통과해 버린다.
+  const rid = String(++ridSeq);
+  const body = Object.entries({ rid, ...kv })
+                 .map(([k, v]) => `${k}=${encodeValue(v)}`).join('\n') + '\n';
+  // 임시 파일에 다 쓴 뒤 옮긴다 — 앱이 반쯤 쓰인 명령을 읽는 것을 막는다.
+  const tmp = CMD_FILE + '.tmp';
+  fs.writeFileSync(tmp, body, 'utf8');
+  fs.renameSync(tmp, CMD_FILE);
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -70,6 +80,8 @@ async function sendNow(kv, timeoutMs) {
         const i = line.indexOf('=');
         if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).replace(/\r$/, '');
       }
+      // 내 요청에 대한 답인지 확인한다. 앞선 명령의 늦은 응답이면 버리고 계속 기다린다.
+      if (out.rid !== undefined && out.rid !== rid) continue;
       return out;
     }
     await sleep(40);
@@ -143,11 +155,21 @@ function safeShotPath(p) {
   const abs = path.resolve(p);
   if (path.extname(abs).toLowerCase() !== '.png')
     throw new Error(`스크린샷 경로는 .png 여야 합니다: ${abs}`);
-  const roots = [PROJECT_ROOT, path.resolve(CONTROL_DIR)];
-  const inside = roots.some(r => abs === r || abs.startsWith(r + path.sep));
+
+  // 문자열 접두사만 보면 허용 폴더 안에 걸어 둔 junction·심볼릭 링크로 밖을 가리킬 수 있다
+  // (round-08 리뷰 B4). 실제 경로로 펴서 비교한다 — 아직 없는 파일이면 그 부모 폴더를 편다.
+  const realOf = (t) => { try { return fs.realpathSync(t); } catch { return null; } };
+  const resolved = realOf(abs) || (() => {
+    const parent = realOf(path.dirname(abs));
+    return parent ? path.join(parent, path.basename(abs)) : abs;
+  })();
+
+  const roots = [PROJECT_ROOT, path.resolve(CONTROL_DIR)]
+                  .map(r => realOf(r) || r);
+  const inside = roots.some(r => resolved === r || resolved.startsWith(r + path.sep));
   if (!inside)
-    throw new Error(`허용된 폴더 밖입니다(프로젝트 폴더 또는 제어 폴더 안이어야 합니다): ${abs}`);
-  return abs;
+    throw new Error(`허용된 폴더 밖입니다(프로젝트 폴더 또는 제어 폴더 안이어야 합니다): ${resolved}`);
+  return resolved;
 }
 
 // 문자열 응답을 숫자로 바꿔 읽기 좋게 만든다.
@@ -239,11 +261,13 @@ const tools = {
   },
 
   async nbody_screenshot({ path: outPath }) {
+    // 경로 검사를 캡처보다 **먼저** 한다. 뒤에 두면 거부되는 요청마다 앱이 만든 raw 파일이
+    // 지워지지 않고 쌓인다(round-08 리뷰 B5 — 1600×900 한 장이 약 5.8 MB).
+    const png = outPath ? safeShotPath(outPath)
+                        : path.join(CONTROL_DIR, `shot-${Date.now()}.png`);
     const raw = path.join(CONTROL_DIR, `shot-${Date.now()}.raw`);
     const resp = typed(await send({ cmd: 'screenshot', path: raw }));
     if (!resp.ok) throw new Error('앱이 화면을 저장하지 못했습니다');
-    const png = outPath ? safeShotPath(outPath)
-                        : path.join(CONTROL_DIR, `shot-${Date.now()}.png`);
     const info = rawToPng(raw, png);
     try { fs.unlinkSync(raw); } catch (_) {}
     return { ok: 1, path: png, ...info };

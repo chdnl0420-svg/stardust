@@ -43,7 +43,9 @@ void App::tick() {
         if (reps > 8) reps = 8;
     }
     for (int i = 0; i < reps; ++i) sim.step();
-    stepsLastFrame = reps;
+    // 코어가 실패 상태면 step 은 아무것도 안 하고 돌아온다 — 그때까지 돈 것으로 세면
+    // 제어 채널이 멈춘 시뮬레이션을 정상 진행으로 보고한다(round-08 리뷰 A12).
+    stepsLastFrame = Sim::failed() ? 0 : reps;
 }
 
 void App::screenToSim(int px, int py, int viewW, int viewH, float& u, float& v) const {

@@ -443,6 +443,43 @@ static void testPeriodicSoftening() {
     check(sharp > blunt * 1.15, "소프트닝을 키우면 근거리 힘이 약해진다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 14. 배속이 두 곳에서 곱해지지 않는다.
+//     1배를 넘는 배속은 App::tick 이 한 프레임에 스텝을 여러 번 돌려서 낸다.
+//     코어가 dt 까지 같이 키우면 두 곳에서 곱해져 3배속이 9배로 진행된다(round-08 리뷰 R1).
+//
+//     **CFL 이 걸리지 않는 조건이라야 드러난다** — 안전장치가 dt 를 덮어쓰는 동안은
+//     이중 적용이 상쇄돼 안 보인다. 그래서 중력을 끄고 정지한 덩어리로 잰다(속도 0 → CFL 무효).
+// ---------------------------------------------------------------------------
+static void testTimeScaleNoDoubleApply() {
+    printf("\n[14] 배속이 시간 간격과 반복 횟수에 이중 적용되지 않는다\n");
+    auto dtAt = [](float ts) {
+        Sim sim;
+        SimConfig cfg;
+        cfg.particleCount = 100000;
+        cfg.gridSize = 256;
+        cfg.gravity = 0.0f;              // 힘이 없으니 속도가 안 붙는다 = CFL 이 안 걸린다
+        cfg.pressureEnabled = false;
+        cfg.timeScale = ts;
+        cfg.preset = Preset::Empty;
+        sim.init(cfg);
+        sim.addShape(0.5f, 0.5f, ShapeKind::StaticBlob, 0.10f, 100000, false);
+        sim.step();
+        return sim.timings().dtUsed;
+    };
+    const float d1 = dtAt(1.0f);
+    const float d3 = dtAt(3.0f);
+    const float dq = dtAt(0.25f);
+
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "dtUsed  1.0x=%.7f  3.0x=%.7f  0.25x=%.7f  (3배속/1배속=%.2f, 1 이어야 한다)",
+             d1, d3, dq, d1 > 0 ? d3 / d1 : 0.0f);
+    // 올리는 쪽은 dt 가 그대로여야 하고(반복 횟수로 낸다), 내리는 쪽은 dt 가 줄어야 한다.
+    check(d1 > 0.f && fabsf(d3 - d1) < 1e-9f && dq < d1 * 0.5f,
+          "배속을 올려도 시간 간격은 그대로다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -464,6 +501,7 @@ int main() {
     testTimeScale();
     testStarBookkeeping();
     testPeriodicSoftening();
+    testTimeScaleNoDoubleApply();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

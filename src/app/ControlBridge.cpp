@@ -111,11 +111,13 @@ void ControlBridge::init(const std::string& dirOverride) {
 }
 
 void ControlBridge::writeResponse(const std::string& body) const {
+    // 요청 번호를 맨 앞에 붙인다 — 어느 명령에 대한 답인지 서버가 확인할 수 있어야 한다.
+    const std::string full = curRid_.empty() ? body : ("rid=" + curRid_ + "\n" + body);
     // 임시 이름으로 다 쓴 뒤 옮긴다 — 서버가 반쯤 쓰인 파일을 읽는 것을 막는다.
     std::string tmp = respPath_ + ".tmp";
     FILE* f = nullptr;
     if (fopen_s(&f, tmp.c_str(), "wb") != 0 || !f) return;
-    fwrite(body.data(), 1, body.size(), f);
+    fwrite(full.data(), 1, full.size(), f);
     fclose(f);
     MoveFileExA(tmp.c_str(), respPath_.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
@@ -137,7 +139,9 @@ std::string ControlBridge::statusBody(const App& app) const {
 
     char buf[1700];
     snprintf(buf, sizeof(buf),
-        "ok=1\n"
+        // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
+        // 늘 1 을 돌려주면 자동 검증이 멈춘 시뮬레이션을 성공으로 읽는다(round-08 리뷰 A13).
+        "ok=%d\nsimFailed=%d\n"
         "fps=%.2f\nframeMs=%.3f\n"
         "particleCount=%d\ngridSize=%d\n"
         "boundary=%s\nlaw=%s\npreset=%s\n"
@@ -158,6 +162,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
         "vramFreeMB=%.0f\n",
+        Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
         app.cfg.boundary == Boundary::Isolated ? "isolated" : "periodic",
@@ -186,6 +191,22 @@ std::string ControlBridge::statusBody(const App& app) const {
 
 // 화면을 RGBA raw 로 저장한다. PNG 인코더를 앱에 넣지 않으려고 변환은 MCP 서버에 맡긴다
 // (Node 는 zlib 이 내장이라 PNG 를 만들기 쉽다). 헤더는 "NBRAW1 <w> <h>\n" 한 줄.
+// 경로를 실제 절대 경로로 펴서 제어 폴더 안인지 본다.
+// 문자열만 비교하면 "..\..\Windows\..." 같은 상대 경로가 그대로 통과하므로
+// GetFullPathNameA 로 먼저 펴고, Windows 파일 시스템이 대소문자를 안 가리니 낮춰서 비교한다.
+bool ControlBridge::isInsideControlDir(const std::string& path) const {
+    if (dir_.empty() || path.empty()) return false;
+    char full[1024] = { 0 }, root[1024] = { 0 };
+    if (!GetFullPathNameA(path.c_str(), (DWORD)sizeof(full), full, nullptr)) return false;
+    if (!GetFullPathNameA(dir_.c_str(), (DWORD)sizeof(root), root, nullptr)) return false;
+
+    std::string f(full), r(root);
+    for (char& c : f) c = (char)tolower((unsigned char)c);
+    for (char& c : r) c = (char)tolower((unsigned char)c);
+    if (!r.empty() && r.back() != '\\') r += '\\';
+    return f.size() > r.size() && f.compare(0, r.size(), r) == 0;
+}
+
 bool ControlBridge::saveScreenshot(const std::string& path, int w, int h) const {
     if (w <= 0 || h <= 0) return false;
     std::vector<unsigned char> px((size_t)w * h * 4);
@@ -212,9 +233,18 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     if (!ready_) return false;
 
     // 멈춘 상태에서 요청받은 스텝을 프레임마다 하나씩 소비한다.
-    if (pendingSteps_ > 0) {
+    //
+    // 차감은 **예약 시점이 아니라 실행이 끝난 뒤**에 한다. poll 은 App::tick 다음에 불리므로,
+    // 여기서 세운 stepOnce 는 다음 프레임에야 실행된다 — 예약하면서 바로 빼면
+    // 마지막 스텝이 아직 안 돌았는데 pendingSteps=0 으로 응답해, 호출자가 한 스텝 일찍
+    // "다 됐다"고 판단한다(round-08 리뷰 A7). App::tick 이 실행하면 stepOnce 가 내려간다.
+    if (issuedStep_ && !app.stepOnce) {     // 앞서 예약한 것이 실제로 돌았다
+        if (pendingSteps_ > 0) --pendingSteps_;
+        issuedStep_ = false;
+    }
+    if (pendingSteps_ > 0 && !issuedStep_) {
         app.stepOnce = true;
-        --pendingSteps_;
+        issuedStep_ = true;
     }
 
     std::string text;
@@ -222,6 +252,9 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     DeleteFileA(cmdPath_.c_str());          // 같은 명령을 두 번 실행하지 않도록 즉시 지운다
 
     auto kv = parseKV(text);
+    // 요청 번호를 응답에 그대로 돌려준다. 이게 없으면 타임아웃된 명령의 늦은 응답을
+    // 다음 명령이 자기 것으로 읽는다(round-08 리뷰 B3).
+    curRid_ = kv.count("rid") ? kv["rid"] : std::string();
     auto it = kv.find("cmd");
     if (it == kv.end()) { writeResponse("ok=0\nerror=cmd 키가 없습니다\n"); return false; }
     const std::string cmd = it->second;
@@ -336,6 +369,14 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
 
     if (cmd == "screenshot") {
         std::string path = kv.count("path") ? kv["path"] : (dir_ + "\\shot.raw");
+        // 저장 위치를 제어 폴더 안으로만 묶는다.
+        // MCP 서버가 자기 쪽에서 경로를 검사하지만 그건 **그 통로를 쓸 때만** 걸린다 —
+        // cmd.txt 에 직접 절대경로를 써 넣으면 앱 권한으로 아무 파일이나 화면 데이터로
+        // 덮어쓸 수 있었다(round-08 리뷰 A4). 앱 스스로도 막아야 실제 방어가 된다.
+        if (!isInsideControlDir(path)) {
+            writeResponse("ok=0\nerror=제어 폴더 밖에는 저장할 수 없습니다\n");
+            return false;
+        }
         bool ok = saveScreenshot(path, viewW, viewH);
         char buf[1024];
         snprintf(buf, sizeof(buf), "ok=%d\npath=%s\nwidth=%d\nheight=%d\n",
@@ -347,22 +388,30 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     // 마우스 도구를 좌표로 직접 부른다 — QA 가 창을 클릭하지 않고도 검증할 수 있게.
     if (cmd == "tool") {
         const std::string what = kv.count("tool") ? kv["tool"] : "";
-        const float x = getFloat(kv, "x", 0.5f), y = getFloat(kv, "y", 0.5f);
-        const float r = getFloat(kv, "radius", app.brush.radius);
+        // 도구 인자도 set 과 같은 규칙으로 자른다.
+        // 여기만 검증이 빠져 있었는데, 1e300 같은 값이 float 무한대가 되면 그 자리에 놓인
+        // 파티클의 위치·속도가 NaN 이 되고 다음 산란에서 격자 전체로 번진다(round-08 리뷰 A5).
+        // 좌표는 판 밖도 허용해야 하지만(화면 밖에서 끌어오는 우물) 한계는 둔다.
+        const float x = clampF(getFloat(kv, "x", 0.5f), -4.0f, 5.0f, 0.5f);
+        const float y = clampF(getFloat(kv, "y", 0.5f), -4.0f, 5.0f, 0.5f);
+        const float r = clampF(getFloat(kv, "radius", app.brush.radius), 0.001f, 4.0f, app.brush.radius);
         int result = 0;
         if (what == "shape") {
             ShapeKind k = ShapeKind::RotatingDisk;
             const std::string ks = kv.count("shape") ? kv["shape"] : "disk";
             if (ks == "blob") k = ShapeKind::StaticBlob;
             else if (ks == "ring") k = ShapeKind::GasRing;
-            const int cnt = getInt(kv, "count", app.brush.shapeCount);
+            const int cnt = clampI(getInt(kv, "count", app.brush.shapeCount), 1, 300000000);
             const bool orb = getInt(kv, "autoOrbit", app.brush.autoOrbit ? 1 : 0) != 0;
-            result = app.sim.addShape(x, y, k, getFloat(kv, "radius", app.brush.shapeRadius),
-                                      cnt, orb);
+            const float sr = clampF(getFloat(kv, "radius", app.brush.shapeRadius),
+                                    0.001f, 4.0f, app.brush.shapeRadius);
+            result = app.sim.addShape(x, y, k, sr, cnt, orb);
         } else if (what == "spray") {
-            app.sim.sprayAt(x, y, r, getFloat(kv, "strength", app.brush.strength));
+            app.sim.sprayAt(x, y, r, clampF(getFloat(kv, "strength", app.brush.strength),
+                                            -8.0f, 8.0f, app.brush.strength));
         } else if (what == "well") {
-            app.sim.wellAt(x, y, r, getFloat(kv, "strength", app.brush.strength));
+            app.sim.wellAt(x, y, r, clampF(getFloat(kv, "strength", app.brush.strength),
+                                           -8.0f, 8.0f, app.brush.strength));
         } else if (what == "erase") {
             result = app.sim.eraseAt(x, y, r);
         } else {

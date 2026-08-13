@@ -39,8 +39,15 @@ private:
 
     // 멈춘 상태에서 N 스텝을 진행하라는 요청. 프레임마다 하나씩 소비한다.
     int  pendingSteps_ = 0;
+    // 이번에 한 스텝을 예약해 두었고 아직 실행을 확인하지 못했다.
+    bool issuedStep_ = false;
+    // 처리 중인 명령의 요청 번호. 응답에 그대로 실어 보내 짝을 맞춘다.
+    mutable std::string curRid_;
 
     void writeResponse(const std::string& body) const;
     std::string statusBody(const App& app) const;
     bool saveScreenshot(const std::string& path, int w, int h) const;
+    // 저장 요청 경로가 제어 폴더 안인지 본다. 앱이 자기 권한으로 파일을 쓰므로
+    // 이 확인이 없으면 아무 파일이나 화면 데이터로 덮어쓸 수 있다.
+    bool isInsideControlDir(const std::string& path) const;
 };
