@@ -2,6 +2,50 @@
 
 #include "imgui.h"
 
+// 블랙홀 장면에서 중요한 세 반지름을 화면에 겹쳐 그린다.
+// 숫자로만 알려주면 어디서 무슨 일이 벌어지는지 볼 수 없다 — 파티클이 어느 원을 넘을 때
+// 나선으로 꺾이는지가 이 장면의 핵심이다.
+void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
+    if (!app.cfg.blackHoleEnabled || app.uiHidden) return;
+    if (viewW <= 0 || viewH <= 0) return;
+
+    // 시뮬 좌표 -> 화면 픽셀. 렌더 셰이더(kShade·kSplatPoints)와 같은 변환이라야 자리가 맞는다.
+    const float aspect = (float)viewW / (float)viewH;
+    auto toScreen = [&](float sx, float sy) -> ImVec2 {
+        float u = (sx - 0.5f + app.panX) * app.zoom + 0.5f;
+        float v = (sy - 0.5f + app.panY) * app.zoom + 0.5f;
+        if (aspect > 1.0f) u = (u - 0.5f) / aspect + 0.5f;
+        else               v = (v - 0.5f) * aspect + 0.5f;
+        return ImVec2(u * viewW, (1.0f - v) * viewH);
+    };
+
+    const ImVec2 c = toScreen(0.5f, 0.5f);
+    // 반지름은 중심에서 한 칸 옆으로 옮긴 점까지의 화면 거리로 잰다(줌·화면비가 저절로 반영된다).
+    auto radiusPx = [&](float r) {
+        const ImVec2 e = toScreen(0.5f + r, 0.5f);
+        return e.x - c.x;
+    };
+
+    const float rs = app.cfg.blackHoleRs;
+    struct Ring { float r; unsigned col; const char* label; };
+    const Ring rings[3] = {
+        { rs,        IM_COL32(230,  80,  60, 210), "지평선" },
+        { 1.5f * rs, IM_COL32(250, 190,  70, 160), "광자 구면" },
+        { 3.0f * rs, IM_COL32(120, 200, 255, 140), "최소 안정 궤도" },
+    };
+
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    for (const Ring& g : rings) {
+        const float px = radiusPx(g.r);
+        if (px < 2.0f || px > (float)viewW * 4.0f) continue;   // 너무 작거나 화면을 벗어나면 생략
+        dl->AddCircle(c, px, g.col, 96, 1.6f);
+        dl->AddText(ImVec2(c.x + px * 0.70f, c.y - px * 0.70f - 14.0f), g.col, g.label);
+    }
+    // 지평선 안쪽은 빛도 못 나오는 곳이라 까맣게 덮는다.
+    const float rsPx = radiusPx(rs);
+    if (rsPx > 2.0f) dl->AddCircleFilled(c, rsPx, IM_COL32(0, 0, 0, 255), 96);
+}
+
 void DrawHud(const App& app) {
     // CUDA 가 실패하면 시뮬레이션이 멈춘다. 화면은 마지막 그림 그대로라 앱이 살아 있는 것처럼
     // 보이므로, HUD 를 꺼 둔 상태에서도 이것만은 반드시 띄운다.

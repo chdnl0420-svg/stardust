@@ -70,6 +70,7 @@ const char* presetSlug(Preset p) {
         case Preset::TidalPair:   return "tidal";
         case Preset::HeadOnShock: return "shock";
         case Preset::CosmicWeb:   return "web";
+        case Preset::BlackHole:   return "blackhole";
         default:                  return "empty";
     }
 }
@@ -79,6 +80,7 @@ bool parsePreset(const std::string& s, Preset& out) {
     if (s == "tidal")  { out = Preset::TidalPair;   return true; }
     if (s == "shock")  { out = Preset::HeadOnShock; return true; }
     if (s == "web")    { out = Preset::CosmicWeb;   return true; }
+    if (s == "blackhole") { out = Preset::BlackHole; return true; }
     if (s == "empty")  { out = Preset::Empty;       return true; }
     return false;
 }

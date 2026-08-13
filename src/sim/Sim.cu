@@ -84,7 +84,8 @@ __device__ __forceinline__ int gidx(int x, int y, int G, int periodic) {
 // 초기 배치 — 속도는 여기서 정하지 않는다. 중력을 한 번 푼 뒤 kSetOrbit 이 채운다.
 // (프로토타입에서 속도를 임의로 정했다가 원반이 흩어진 적이 있다 — design.md §9-2)
 // ---------------------------------------------------------------------------
-__global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset) {
+__global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
+                       float bhGM, float bhRs) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float u1 = rnd01(i * 4u + 1u), u2 = rnd01(i * 4u + 2u);
@@ -110,6 +111,24 @@ __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset)
         case 3: {                                   // CosmicWeb
             p = make_float2(u1, u2);
             v = make_float2((u3 - 0.5f) * 0.02f, (u4 - 0.5f) * 0.02f);
+        } break;
+        case 4: {                                   // BlackHole — 중심 블랙홀 둘레의 원반
+            // 최소 안정 궤도(3rs)를 **가로질러** 깐다.
+            // 바깥쪽만 깔면 전부 안정해서 그냥 도는 원반이 되고, 이 장면의 핵심인
+            // 「어느 선을 넘으면 나선으로 빨려 든다」가 보이지 않는다.
+            // 2rs 부터 깔면 3rs 안쪽 물질이 차례로 떨어지며 안쪽 가장자리가 깎여 나간다.
+            const float rIn  = 2.0f * bhRs;
+            const float rOut = 0.36f;
+            const float r    = sqrtf(u1 * (rOut*rOut - rIn*rIn) + rIn*rIn);
+            const float th   = u2 * 6.2831853f;
+            p = make_float2(0.5f + r * cosf(th), 0.5f + r * sinf(th));
+
+            // 그 자리에서 원궤도가 되는 속도. 뉴턴이면 √(GM/r) 이지만 휘어진 시공간에서는
+            //     v² = (GM/r) / (1 − 1.5·rs/r)
+            // 이고, r 이 1.5rs(광자 구면)에 가까워질수록 발산한다.
+            const float denom = fmaxf(1.0f - 1.5f * bhRs / r, 0.05f);
+            const float vc = sqrtf(fmaxf(bhGM / r / denom, 0.f));
+            v = make_float2(-sinf(th) * vc, cosf(th) * vc);
         } break;
         default:                                    // Empty — 화면 밖에 숨겨 둔다
             p = make_float2(-1.f, -1.f);
@@ -305,13 +324,43 @@ __device__ __forceinline__ float2 sampleAcc(const float2* accG, float2 p, int G,
 // 속도·위치 갱신. dt 는 호출 전에 CFL 조건으로 잘라 둔다(design.md §7).
 __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* temp,
                            int n, int G, float dt, int periodic, int trackTemp,
-                           int cooling, float coolRate, float hubble) {
+                           int cooling, float coolRate, float hubble,
+                           int blackHole, float bhGM, float bhRs) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float2 p = pos[i];
     if (p.x < 0.f) return;
     float2 v = vel[i];
     float2 a = sampleAcc(accG, p, G, periodic);
+
+    // 블랙홀 — 뉴턴 중력이 아니라 휘어진 시공간의 최단경로(측지선)를 따라간다.
+    //
+    // 슈바르츠실트 해의 적도면 운동방정식을 그대로 쓴다:
+    //     a = -GM/r³ · (1 + 3L²/(c²r²)) · r⃗       L = x·vy − y·vx (단위질량당 각운동량)
+    //
+    // 괄호 안의 둘째 항이 곡률이 만드는 차이다. 뉴턴 중력에는 이 항이 없고, 이 항 하나에서
+    //   · 타원 궤도가 조금씩 돌아간다(근일점 이동)
+    //   · r = 3rs 안쪽에는 안정된 원궤도가 아예 없어 나선을 그리며 떨어진다(최소 안정 궤도)
+    //   · r = 1.5rs 에서 원궤도 속도가 광속으로 발산한다(광자 구면)
+    // 셋 다 저절로 나온다 — 따로 넣은 규칙이 아니다.
+    //
+    // c² 는 지평선 정의 rs = 2GM/c² 에서 되찾는다. 화면 가운데가 블랙홀 자리다.
+    if (blackHole) {
+        const float dx = p.x - 0.5f, dy = p.y - 0.5f;
+        const float r2 = dx * dx + dy * dy;
+        const float r  = sqrtf(fmaxf(r2, 1e-12f));
+        if (r < bhRs) {                       // 지평선 안으로 들어갔다 — 다시 나오지 못한다
+            pos[i] = make_float2(-1.f, -1.f);
+            vel[i] = make_float2(0.f, 0.f);
+            return;
+        }
+        const float L    = dx * v.y - dy * v.x;
+        const float c2   = 2.0f * bhGM / fmaxf(bhRs, 1e-6f);
+        const float corr = 1.0f + 3.0f * L * L / fmaxf(c2 * r2, 1e-12f);
+        const float k    = -bhGM / (r2 * r) * corr;
+        a.x += k * dx;  a.y += k * dy;
+    }
+
     v.x += a.x * dt; v.y += a.y * dt;
 
     // 우주 팽창 — 공간이 늘어나면 물질은 그 흐름에 끌려 속도를 잃는다(허블 감쇠).
@@ -896,7 +945,9 @@ void Sim::Impl::integrateOnce(float dt) {
     kIntegrate<<<grid1(allocN), BS>>>(accG, pos, vel, temp, allocN, allocG, dt,
                                       periodic() ? 1 : 0,
                                       cfg.temperatureEnabled ? 1 : 0,
-                                      cfg.coolingEnabled ? 1 : 0, cfg.coolingRate, hub);
+                                      cfg.coolingEnabled ? 1 : 0, cfg.coolingRate, hub,
+                                      cfg.blackHoleEnabled ? 1 : 0,
+                                      cfg.blackHoleGM, cfg.blackHoleRs);
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,7 +1098,8 @@ void Sim::reset() {
     const int n = d->allocN, G = d->allocG, S = d->stride();
     d->time = 0.0; d->steps = 0;
 
-    kPlace<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, n, (int)d->cfg.preset);
+    kPlace<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, n, (int)d->cfg.preset,
+                             d->cfg.blackHoleGM, d->cfg.blackHoleRs);
     // 빈 판은 살아 있는 파티클이 0 이고 전 슬롯이 비어 있다 — 마우스로 채워 나간다.
     d->activeN = (d->cfg.preset == Preset::Empty) ? 0 : n;
     // 새 장면이므로 형태를 넣을 자리도 처음으로 되돌린다.

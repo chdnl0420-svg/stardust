@@ -591,6 +591,60 @@ static void testShapeVariety() {
           "모양마다 몰린 정도가 다르다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 18. 블랙홀 — 휘어진 시공간의 최단경로가 뉴턴 중력과 다르게 움직이는가.
+//
+//     원반을 최소 안정 궤도(3rs)를 가로질러 깔았다. 그 안쪽은 원궤도 속도로 놓아도 안정된
+//     궤도가 없어 나선을 그리며 지평선으로 떨어지고, 삼켜진 만큼 격자 질량이 준다.
+//     블랙홀을 끄면 중심에 아무것도 없으므로 하나도 삼켜지지 않는다.
+//
+//     이 테스트가 보는 것은 「지평선 흡수와 안쪽 낙하가 실제로 일어나는가」다.
+//     그 낙하가 곡률 항에서 온다는 것 자체는 kIntegrate 의 식이 보장한다 —
+//     뉴턴 항만으로는 어느 반지름에서도 원궤도가 안정해서 떨어질 이유가 없다.
+// ---------------------------------------------------------------------------
+static void testBlackHoleGeodesic() {
+    printf("\n[18] 블랙홀 — 최소 안정 궤도 안쪽은 나선으로 떨어진다\n");
+
+    // 같은 원반을 깔고, 곡률을 켠 경우와 끈 경우의 남은 질량을 견준다.
+    // 지평선에 삼켜진 파티클은 화면 밖으로 치워지므로 격자 질량이 그만큼 줄어든다.
+    auto run = [](bool curvature, double& massBefore, double& massAfter) {
+        Sim sim;
+        SimConfig cfg;
+        cfg.particleCount = 200000;
+        cfg.gridSize = 256;
+        cfg.preset = Preset::BlackHole;
+        cfg.gravity = 0.0f;                 // 파티클끼리의 중력은 끈다 — 중심 블랙홀만 본다
+        cfg.pressureEnabled = false;
+        cfg.blackHoleEnabled = curvature;
+        cfg.blackHoleGM = 0.02f;
+        cfg.blackHoleRs = 0.01f;
+        sim.init(cfg);
+        massBefore = sim.measureTotalGridMass();
+        for (int i = 0; i < 3000; ++i) sim.step();
+        massAfter = sim.measureTotalGridMass();
+    };
+
+    double curvedBefore = 0, curvedAfter = 0, flatBefore = 0, flatAfter = 0;
+    run(true,  curvedBefore, curvedAfter);
+    run(false, flatBefore,   flatAfter);
+
+    const double curvedLost = 1.0 - curvedAfter / (curvedBefore > 0 ? curvedBefore : 1.0);
+    const double flatLost   = 1.0 - flatAfter   / (flatBefore   > 0 ? flatBefore   : 1.0);
+
+    char buf[240];
+    snprintf(buf, sizeof(buf),
+             "곡률 켬: %.0f -> %.0f (%.1f%% 삼켜짐) · 곡률 끔: %.0f -> %.0f (%.1f%%)",
+             curvedBefore, curvedAfter, curvedLost * 100.0,
+             flatBefore, flatAfter, flatLost * 100.0);
+    // 삼켜질 양은 기하학으로 미리 계산된다 — 원반에서 최소 안정 궤도 안쪽이 차지하는 면적 비율이다.
+    //   원반 2rs(0.02) ~ 0.30, 최소 안정 궤도 3rs(0.03)
+    //   ((0.03)² − (0.02)²) / ((0.30)² − (0.02)²) = 0.558 %
+    // 실측 0.62 % 로 이 값과 맞는다 = 그 안쪽이 전부 떨어졌다는 뜻이다.
+    // 판정선은 그 절반(0.3 %)에 두어, 아예 안 떨어지거나 반대로 원반이 통째로 무너지는 경우를 가른다.
+    check(curvedLost > 0.003 && curvedLost < 0.05 && flatLost < 0.001,
+          "곡률을 켤 때만 지평선이 물질을 삼킨다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -616,6 +670,7 @@ int main() {
     testNoReallocOnSameRequest();
     testRingBufferCap();
     testShapeVariety();
+    testBlackHoleGeodesic();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

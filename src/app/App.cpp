@@ -109,6 +109,18 @@ void ApplyLook(App& app) {
 
 void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     cfg.preset = preset;
+
+    // 블랙홀 장면은 중심의 휘어진 시공간이 주인공이라, 파티클끼리 끌어당기는 힘은 꺼 둔다.
+    // 켜 두면 원반이 스스로 뭉쳐 덩어리가 되면서 궤도 이야기가 묻힌다.
+    cfg.blackHoleEnabled = (preset == Preset::BlackHole);
+    if (preset == Preset::BlackHole) {
+        cfg.gravity = 0.0f;          // 자기중력 끔 — 중심 블랙홀만 남긴다
+        cfg.boundary = Boundary::Isolated;
+        cfg.pressureEnabled = false;
+        cfg.expansionEnabled = false;
+        cfg.temperatureEnabled = true;   // 안쪽으로 갈수록 빨라지는 것을 온도로도 볼 수 있게
+        return;
+    }
     // 경계 — 은하 장면은 텅 빈 우주에 홀로 떠 있어야 하고(고립),
     //        우주 구조 형성은 반대편으로 이어지는 우주가 표준이다(주기).
     cfg.boundary = (preset == Preset::CosmicWeb) ? Boundary::Periodic : Boundary::Isolated;

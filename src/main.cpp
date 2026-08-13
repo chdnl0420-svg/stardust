@@ -248,6 +248,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             ImGui::End();
         } else {
             DrawHud(app);
+            DrawBlackHoleRings(app, g_w, g_h);
             DrawToolbar(app, g_w, g_h);
             if (!g_boardOpen) {
                 ImGui::SetNextWindowPos(ImVec2((float)g_w - 130.0f, 12.0f), ImGuiCond_Always);

@@ -73,17 +73,22 @@ void DrawBoard(App& app, bool& boardOpen) {
     // ---------------- 장면 ----------------
     Title("장면");
     struct Scene { Preset p; const char* name; const char* help; };
-    const Scene scenes[5] = {
+    const Scene scenes[6] = {
         { Preset::SpiralDisk,  "나선 은하",   "은하 하나가 돌면서 나선 팔을 만듭니다." },
         { Preset::TidalPair,   "은하 충돌",   "은하 둘이 스치며 긴 꼬리를 남깁니다." },
         { Preset::HeadOnShock, "정면 충돌",   "가스 덩어리 둘이 부딪혀 달아오릅니다. 온도로 보면 잘 보입니다." },
         { Preset::CosmicWeb,   "우주 거미줄", "우주에 고루 뿌려 두면 거미줄 구조가 자랍니다. 빠르기를 올려 보세요." },
+        { Preset::BlackHole,   "블랙홀",
+          "여기만 중력 공식을 쓰지 않습니다. 물질이 휘어진 시공간의 최단경로를 그대로 따라갑니다.\n\n"
+          "화면의 세 원은 왼쪽부터 지평선(들어가면 못 나옴) · 광자 구면(원궤도 속도가 광속이 되는 곳) · "
+          "최소 안정 궤도입니다. 마지막 원 안쪽에는 안정된 궤도가 아예 없어서 나선을 그리며 빨려 듭니다.\n\n"
+          "이 셋은 따로 넣은 규칙이 아니라 곡률 항 하나에서 저절로 나옵니다." },
         { Preset::Empty,       "빈 우주",     "아무것도 없습니다. 아래 모양을 골라 화면을 클릭해 채우세요." },
     };
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         const bool sel = (app.cfg.preset == scenes[i].p);
         if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.17f, 0.44f, 0.62f, 1.0f));
-        if (ImGui::Button(scenes[i].name, ImVec2(i == 4 ? full : half, 0))) {
+        if (ImGui::Button(scenes[i].name, ImVec2(half, 0))) {
             ApplyPresetDefaults(app.cfg, scenes[i].p);
             app.applyConfig();      // 코어에 넘긴 뒤에 배치를 다시 만든다(순서가 중요)
             app.sim.reset();
@@ -91,7 +96,7 @@ void DrawBoard(App& app, bool& boardOpen) {
         }
         Help(scenes[i].help);
         if (sel) ImGui::PopStyleColor();
-        if (i % 2 == 0 && i < 4) ImGui::SameLine();
+        if (i % 2 == 0) ImGui::SameLine();
     }
 
     // ---------------- 놓기 ----------------
