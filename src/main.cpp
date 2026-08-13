@@ -7,6 +7,7 @@
 #include <cstdio>
 
 #include "app/App.h"
+#include "app/ControlBridge.h"
 #include "gfx/GLContext.h"
 #include "gfx/RenderField.h"
 #include "ui/Board.h"
@@ -105,7 +106,7 @@ void ApplyDarkStyle() {
 
 } // namespace
 
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
     if (!Sim::deviceAvailable()) {
         MessageBoxW(nullptr,
                     L"CUDA 장치를 찾지 못했습니다.\nNVIDIA 그래픽카드와 드라이버가 필요합니다.",
@@ -151,6 +152,27 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     app.init();
     g_app = &app;
     g_field.init();
+
+    // 제어 채널 — MCP 서버가 여기로 명령을 넣는다.
+    // 인자 형식: --control-dir=<경로>. 없으면 %TEMP%\nbody-mcp 를 쓴다.
+    ControlBridge bridge;
+    {
+        std::string args = lpCmdLine ? lpCmdLine : "";
+        const std::string key = "--control-dir=";
+        size_t at = args.find(key);
+        std::string dir;
+        if (at != std::string::npos) {
+            dir = args.substr(at + key.size());
+            if (!dir.empty() && dir.front() == '"') {
+                size_t end = dir.find('"', 1);
+                dir = (end == std::string::npos) ? dir.substr(1) : dir.substr(1, end - 1);
+            } else {
+                size_t sp = dir.find(' ');
+                if (sp != std::string::npos) dir = dir.substr(0, sp);
+            }
+        }
+        bridge.init(dir);
+    }
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -203,6 +225,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
         ImGui::Render();
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+
+        // 제어 명령은 화면을 다 그린 뒤, 버퍼를 교체하기 전에 처리한다.
+        // 그래야 screenshot 이 지금 프레임을 집는다(교체 후엔 백버퍼 내용이 바뀐다).
+        if (bridge.poll(app, g_w, g_h)) quit = true;
+
         g_gl.present();
     }
 

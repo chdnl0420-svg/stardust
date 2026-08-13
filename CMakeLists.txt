@@ -56,6 +56,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 add_executable(nbody WIN32
   src/main.cpp
   src/app/App.cpp
+  src/app/ControlBridge.cpp
   src/gfx/GLContext.cpp
   src/gfx/RenderField.cu
   src/ui/Board.cpp
