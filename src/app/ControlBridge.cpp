@@ -320,6 +320,10 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "brightness"))     app.view.brightness    = clampF(getFloat(kv, "brightness", app.view.brightness), 0.05f, 8.0f, app.view.brightness);
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
+        if (has(kv, "spin"))           app.cfg.spin = clampF(getFloat(kv, "spin", app.cfg.spin), -3.0f, 3.0f, app.cfg.spin);
+        if (has(kv, "blackHoleMassScale"))
+            app.cfg.blackHoleMassScale = clampF(getFloat(kv, "blackHoleMassScale", app.cfg.blackHoleMassScale),
+                                                0.002f, 1.0f, app.cfg.blackHoleMassScale);
         if (has(kv, "contact"))        app.cfg.contactEnabled = getInt(kv, "contact", 0) != 0;
         if (has(kv, "drawer"))         app.drawerOpen         = getInt(kv, "drawer", 0) != 0;
         if (has(kv, "horizon"))        app.showHorizon        = getInt(kv, "horizon", 0) != 0;

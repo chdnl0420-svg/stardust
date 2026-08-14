@@ -811,6 +811,45 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
                             v.w);
 }
 
+// 살아 있는 알갱이를 센다.
+//
+// 블랙홀이 삼킨 것은 자리에 구멍(pos.x < 0)으로 남는다. active 는 「앞쪽 이만큼이
+// 유효한 자리」라는 뜻을 겸해서(addShape 가 그 자리부터 뿌린다) 삼킨 만큼 줄일 수가
+// 없다 — 줄이면 살아 있는 알갱이를 덮어쓴다. 그래서 보여 줄 수는 따로 센다.
+//
+// 블록 안에서 먼저 모으고 블록마다 한 번만 전역에 더한다. 알갱이마다 전역 원자 연산을
+// 하면 399만 개가 같은 주소에 줄을 서서 그 커널 하나가 프레임을 먹는다.
+__global__ void kCountAlive(const float4* pos, int n, int* out) {
+    __shared__ int s;
+    if (threadIdx.x == 0) s = 0;
+    __syncthreads();
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n && pos[i].x >= 0.f) atomicAdd(&s, 1);
+    __syncthreads();
+    if (threadIdx.x == 0 && s > 0) atomicAdd(out, s);
+}
+
+// 판 전체에 회전을 얹는다 — 세로축(z) 을 중심으로 통째로 돈다.
+//
+// **회전이 없으면 뭉친 것이 공이나 실이 된다.** 중력으로 모일 때 각운동량이 없으면
+// 사방에서 곧장 한 점으로 떨어지기 때문이다. 회전이 있으면 그 각운동량이 보존되어
+// 한 점으로 못 모이고 축과 나란한 방향으로만 납작해진다 — 그것이 원반이고, 실제
+// 은하가 납작한 이유다. 나선팔도 그 원반 위에서 자란다.
+//
+// 더하는 속도는 ω × r 이다(축에서 멀수록 빠르다). 원궤도 속도를 대신하는 것이 아니라
+// 그 위에 얹는 것이라, 장면이 이미 가진 궤도는 그대로 남는다.
+__global__ void kAddSpin(const float4* pos, float4* vel, int n, float omega) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+    const float dx = p.x - 0.5f, dy = p.y - 0.5f;
+    float4 v = vel[i];
+    v.x += -omega * dy;
+    v.y +=  omega * dx;
+    vel[i] = v;
+}
+
 // 셀 키(정렬용). 빈 슬롯은 -1 로 두어 뒤로 밀린다.
 __global__ void kCellKey(const float4* pos, int n, int G, int* keys, int* idx) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1180,6 +1219,9 @@ struct Sim::Impl {
     Boundary requestedBoundary = Boundary::Isolated;
 
     int active = 0;
+    // 보여 줄 「살아 있는 수」. active 는 자리 관리용이라 삼킨 만큼 줄일 수 없어서
+    // 따로 센다(kCountAlive). -1 이면 아직 세지 않았다는 뜻이고 그때는 active 를 쓴다.
+    int aliveShown = -1;
     int stepCount = 0;
     // 형태를 놓을 자리를 가리키는 커서. 빈 자리가 다 차면 앞으로 돌아와 먼저 넣은 것을
     // 덮어쓴다 — 그래야 계속 놓아도 총수가 상한을 넘지 않으면서 새로 놓은 것이 항상 보인다.
@@ -1257,6 +1299,8 @@ struct Sim::Impl {
     void placeInitial();
     void giveOrbits();
     void sortParticles();
+    // 살아 있는 알갱이를 세어 aliveShown 에 담는다. 삼킨 뒤에만 부른다.
+    void countAlive();
     void doContact();
     // 이웃과의 무작위 운동을 걷어낸다(냉각). dt 를 받아야 배속과 무관하게 식는다.
     void doCooling(float dt);
@@ -1552,6 +1596,7 @@ void Sim::Impl::placeInitial() {
                                           cfg.diskThickness, 12345u);
     CK(cudaGetLastError());
     active = (preset == 4) ? 0 : allocN;
+    aliveShown = -1;                       // 판을 새로 열었으니 세어 둔 값은 버린다
 }
 
 void Sim::Impl::giveOrbits() {
@@ -1603,6 +1648,15 @@ void Sim::Impl::doContact() {
                                             cfg.contactStiffness, cfg.contactDamping,
                                             accContact);
     CK(cudaGetLastError());
+}
+
+void Sim::Impl::countAlive() {
+    if (g_failed || allocN <= 0 || !redI) return;
+    CK(cudaMemset(redI, 0, sizeof(int)));
+    kCountAlive<<<(allocN + 255) / 256, 256>>>(pos, allocN, redI);
+    int n = 0;
+    CK(cudaMemcpy(&n, redI, sizeof(int), cudaMemcpyDeviceToHost));
+    if (!g_failed) aliveShown = n;
 }
 
 void Sim::Impl::doCooling(float dt) {
@@ -1890,6 +1944,10 @@ void Sim::reset() {
     CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
     d.placeInitial();
     d.giveOrbits();
+    // 판 전체 회전은 궤도를 준 **뒤에** 얹는다. 먼저 얹으면 giveOrbits 가 속도를
+    // 통째로 덮어써 사라진다.
+    if (d.cfg.spin != 0.0f)
+        kAddSpin<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.cfg.spin);
     d.computeAccel();
 }
 
@@ -1991,6 +2049,11 @@ void Sim::step() {
         // 배열이 당겨져도 남은 수가 엉뚱한 블랙홀의 것으로 섞이지 않는다.
         if (any) CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
 
+        // 삼킨 것이 있으면 살아 있는 수를 다시 센다. 열다섯 스텝에 한 번만 하는데,
+        // 세려면 결과를 호스트로 가져와야 하고 그 복사가 GPU 를 세우기 때문이다.
+        // (화면에 뜨는 수라 0.25초 늦어도 눈에 띄지 않는다.)
+        if (any && (d.stepCount % 15) == 0) d.countAlive();
+
         // 블랙홀도 중력을 받아 움직이고, 겹치면 합쳐진다.
         d.advanceBlackHoles(dt);
     }
@@ -2013,7 +2076,13 @@ bool Sim::failed() { return g_failed; }
 std::string Sim::failMessage() { return g_failMsg; }
 int Sim::gridSize() const { return impl_->allocG; }
 int Sim::particleCount() const { return impl_->allocN; }
-int Sim::activeCount() const { return impl_->active; }
+int Sim::activeCount() const {
+    // 삼킨 뒤에는 센 값을 보여 준다. active 는 자리 관리용이라 삼킨 만큼 줄지 않아,
+    // 그대로 두면 블랙홀이 판을 다 먹어도 화면에는 「399만 / 399만」이 뜬다.
+    const Impl& d = *impl_;
+    if (d.aliveShown >= 0 && d.aliveShown <= d.active) return d.aliveShown;
+    return d.active;
+}
 int Sim::starCount() const { return 0; }
 BlackHoleState Sim::blackHole() const { return impl_->heaviest(); }
 int Sim::blackHoleCount() const { return impl_->bhCount; }
@@ -2220,6 +2289,7 @@ bool Sim::loadState(const std::string& path) {
         kHideRange<<<((d.allocN - n) + 255) / 256, 256>>>(d.pos, d.vel, n, d.allocN);
 
     d.active = n;
+    d.aliveShown = -1;                     // 불러온 판이니 세어 둔 값은 버린다
     d.simTime = h.simTime;
 
     // 담아 두었던 블랙홀을 되돌린다. 자라는 기준(bhMassAtBirth·bhRsAtBirth)은 파일에
@@ -2337,7 +2407,8 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
         // 함께 자라 삼킬수록 커지고 커질수록 삼키는 되먹임이 생긴다(2026-08-14 실측).
         // 지평선·자리 잡기는 addBlackHole 이 쥔다. 여덟 개까지 나란히 선다.
         const int bi = d.addBlackHole(cx, cy, 0.5f,
-                                      (float)(count > 0 ? count : 1) / 50.0f, false);
+                                      (float)(count > 0 ? count : 1) * d.cfg.blackHoleMassScale,
+                                      false);
 
         // **둘레에 궤도를 준다 — 이게 없으면 놓자마자 전부 빨려 든다.**
         //
@@ -2385,6 +2456,7 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
         if (d.ringCursor >= d.allocN) d.ringCursor = 0;
         d.active = d.allocN;
     }
+    d.aliveShown = -1;                     // 알갱이를 새로 넣었으니 세어 둔 값은 버린다
 
     kFillShape<<<(n + 255) / 256, 256>>>(d.pos, d.vel, d.temp, from, n, cx, cy,
                                          (int)kind, radius, d.cfg.diskThickness,
@@ -2466,6 +2538,7 @@ int Sim::eraseAt(float cx, float cy, float radius) {
     std::swap(d.pos, d.posTmp); std::swap(d.vel, d.velTmp); std::swap(d.temp, d.tempTmp);
     d.active -= erased;
     if (d.active < 0) d.active = 0;
+    d.aliveShown = -1;                     // 자리를 당겼으니 세어 둔 값은 버린다
     if (d.active < d.allocN)
         kHideRange<<<((d.allocN - d.active) + 255) / 256, 256>>>(d.pos, d.vel, d.active, d.allocN);
     CK(cudaGetLastError());

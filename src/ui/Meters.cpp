@@ -143,18 +143,26 @@ void DrawMeters(App& app, int viewW, int viewH) {
                  ImGuiWindowFlags_NoCollapse);
 
     // 머리 — 이름과 닫기
+    //
+    // **머리는 스크롤을 따라가지 않는다.** 그림은 창 좌표로 곧장 그리는데(AddText·AddLine)
+    // 누름 판정만 커서 좌표라 스크롤한 만큼 위로 올라가, 스크롤을 내리면 X 가 보이는데도
+    // 눌리지 않았다(2026-08-14 보고). 판정 자리에 스크롤량을 되더해 화면에 붙여 둔다.
+    // 내용이 머리 밑으로 지나가며 글자가 겹치던 것도 있어, 머리 뒤에 창 색을 깔아 가린다.
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 o = ImGui::GetWindowPos();
+        const float scrollY = ImGui::GetScrollY();
+        dl->AddRectFilled(o, ImVec2(o.x + w, o.y + 44.0f), IM_COL32(11, 11, 14, 245), 14.0f,
+                          ImDrawFlags_RoundCornersTop);
         dl->AddText(ImVec2(o.x + 18.0f, o.y + 16.0f), kInk, "재기");
-        ImGui::SetCursorPos(ImVec2(w - 40.0f, 12.0f));
+        ImGui::SetCursorPos(ImVec2(w - 40.0f, 12.0f + scrollY));
         if (ImGui::InvisibleButton("##mclose", ImVec2(26, 26))) app.metersOpen = false;
         const bool hov = ImGui::IsItemHovered();
         const ImVec2 c(o.x + w - 27.0f, o.y + 25.0f);
         const ImU32 xc = hov ? kInk : kInkGhost;
         dl->AddLine(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), xc, 1.5f);
         dl->AddLine(ImVec2(c.x + 5, c.y - 5), ImVec2(c.x - 5, c.y + 5), xc, 1.5f);
-        ImGui::SetCursorPos(ImVec2(18.0f, 46.0f));
+        ImGui::SetCursorPos(ImVec2(18.0f, 46.0f));   // 본문은 머리 밑에서 시작(스크롤 따라감)
     }
 
     // ── 회전곡선 ─────────────────────────────────────────────────────────

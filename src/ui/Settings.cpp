@@ -349,6 +349,14 @@ void TabGravity(App& app) {
                false, app.cfg.coolingEnabled);
     UnderNote("높이면 빨리 뭉치고, 0 이면 끈 것과 같다.");
 
+    // 판 전체 회전. 다시 시작해야 얹히므로 그 사실을 밑줄로 알린다.
+    SliderLine("spin", "판 전체 회전", &app.cfg.spin, -1.0f, 1.0f, "%.2f");
+    UnderNote("돌면 뭉칠 때 공이 아니라 원반이 된다. 크게 주면 바깥이 궤도를 넘어 흩어진다 \xE2\x80\x94 다시 시작해야 얹힌다.");
+
+    // 놓는 블랙홀이 얼마나 무거운가. 개수 × 이 값이 무게가 된다.
+    SliderLine("bhScale", "블랙홀 무게 배율", &app.cfg.blackHoleMassScale, 0.002f, 1.0f, "%.3f", true);
+    UnderNote("놓는 개수에 이 값을 곱한 만큼 무겁다. 1 이면 개수 그대로 \xE2\x80\x94 판을 통째로 삼킨다.");
+
     Toggle("halo", "보이지 않는 무게",
            "은하 질량의 80~90% 를 차지하는 암흑물질 \xE2\x80\x94 원반을 감싸 나선팔을 자라게 한다",
            &app.cfg.haloEnabled);
