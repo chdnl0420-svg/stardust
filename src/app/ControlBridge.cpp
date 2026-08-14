@@ -137,6 +137,7 @@ std::string ControlBridge::statusBody(const App& app) const {
     double centroidX = 0.0, centroidY = 0.0;
     sim.measureCentroid(centroidX, centroidY);
     const double meanTemp = sim.measureMeanTemperature();
+    const BlackHoleState bh = sim.blackHole();
 
     const UpdateInfo up = app.updater.status();
 
@@ -167,6 +168,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\npendingSteps=%d\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
+        // 블랙홀 — 삼키고 자라는지 밖에서 확인할 유일한 창이다. 화면의 점 하나로는
+        // 지평선이 커졌는지 알 수 없다.
+        "bhActive=%d\nbhX=%.5f\nbhY=%.5f\nbhRs=%.6f\nbhMass=%.1f\nbhBorn=%d\nbhCount=%d\n"
         "vramFreeMB=%.0f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
@@ -194,6 +198,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame, pendingSteps_,
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
+        bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
         Sim::deviceFreeBytes() / 1048576.0);
     return buf;
 }

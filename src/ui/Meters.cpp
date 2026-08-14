@@ -32,6 +32,15 @@ struct Cache {
     int    frameAt = 0;
     bool   primed = false;
 
+    // 살아 있는 알갱이 수. 블랙홀이 삼키거나 지우개로 지우면 줄어드는데, 숫자 하나로는
+    // 「지금 줄고 있다」가 안 보인다 — 그 기울기를 봐야 얼마나 빨리 사라지는지 안다.
+    float  alive[kFrameHist] = {0};
+    float  aliveMax = 1.0f;
+
+    // 초당 프레임 수. 위의 「한 프레임에 걸린 시간」과 같은 것을 뒤집은 값이지만,
+    // 읽는 결이 다르다 — 60 에서 얼마나 떨어졌는지는 이쪽이 한눈에 보인다.
+    float  fps[kFrameHist] = {0};
+
     // 견줄 기준으로 잡아 둔 곡선. 「지금을 기준으로」를 누르면 그 순간의 회전곡선이
     // 여기 복사되고, 그 뒤로는 지금 곡선 뒤에 흐리게 함께 그려진다.
     // 설정 하나를 바꾸고 무엇이 달라지는지 보려면 기억이 아니라 눈으로 견줘야 한다.
@@ -101,8 +110,10 @@ void Row(const char* k, const char* v, ImU32 col = kInk) {
 void DrawMeters(App& app, int viewW, int viewH) {
     if (!app.metersOpen) return;
 
-    // 프레임 시간은 매 프레임 쌓는다 — 이건 싸고, 튀는 순간을 놓치면 볼 이유가 없다.
+    // 프레임 시간과 알갱이 수는 매 프레임 쌓는다 — 둘 다 싸고, 튀는 순간을 놓치면 볼 이유가 없다.
     g.frames[g.frameAt] = app.frameMs;
+    g.alive[g.frameAt] = (float)app.sim.activeCount();
+    g.fps[g.frameAt] = app.fps;
     g.frameAt = (g.frameAt + 1) % kFrameHist;
 
     // 무거운 측정은 열두 프레임에 한 번.
@@ -121,7 +132,8 @@ void DrawMeters(App& app, int viewW, int viewH) {
     const float w = 380.0f;
     const float h = (float)viewH - 150.0f;
     ImGui::SetNextWindowPos(ImVec2((float)viewW - w - 22.0f, 60.0f));
-    ImGui::SetNextWindowSize(ImVec2(w, h > 360.0f ? 470.0f : h));
+    // 그래프가 셋(프레임 시간·초당 프레임·알갱이 수)이라 그만큼 자리가 든다.
+    ImGui::SetNextWindowSize(ImVec2(w, h > 360.0f ? 560.0f : h));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18, 16));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.043f, 0.043f, 0.055f, 0.96f));
@@ -230,12 +242,64 @@ void DrawMeters(App& app, int viewW, int viewH) {
         char v[80];
         snprintf(v, sizeof(v), "%.1f FPS \xC2\xB7 %.1f ms", app.fps, app.frameMs);
         Row("지금", v);
-        snprintf(v, sizeof(v), "%d \xC2\xB7 %d\xC2\xB3 격자", app.sim.activeCount(), app.cfg.gridSize);
-        Row("알갱이", v);
         if (app.guardCappedTo > 0) {
             snprintf(v, sizeof(v), "%d 개로 낮춤", app.guardCappedTo);
             Row("버거워서", v, kAccent);
         }
+        if (app.guardHaltedMs > 0.0f) {
+            // 타임아웃 직전에 스스로 멈춘 적이 있다. 왜 멈췄는지 모르면 사용자는 앱이
+            // 죽은 줄 안다 — 그 자리를 여기 남긴다.
+            snprintf(v, sizeof(v), "한 스텝 %.0f ms \xE2\x80\x94 멈춤", app.guardHaltedMs);
+            Row("위험해서", v, IM_COL32(255, 140, 120, 255));
+        }
+    }
+
+    ImGui::Dummy(ImVec2(1, 8));
+
+    // ── 초당 프레임 수 ──────────────────────────────────────────────────
+    {
+        float ordered[kFrameHist];
+        for (int i = 0; i < kFrameHist; ++i)
+            ordered[i] = g.fps[(g.frameAt + i) % kFrameHist];
+        // 세로 눈금을 60 에 고정한다. 지금 값에 맞춰 늘였다 줄였다 하면 60 이 어디인지
+        // 알 수 없어, 떨어진 것인지 원래 그런 것인지 구분되지 않는다.
+        float mx = 60.0f;
+        for (int i = 0; i < kFrameHist; ++i) if (ordered[i] > mx) mx = ordered[i];
+
+        char right[64];
+        snprintf(right, sizeof(right), "%.0f FPS", app.fps);
+        Plot("초당 프레임", ordered, kFrameHist, mx, right,
+             (app.fps >= 55.0f) ? kGood : (app.fps >= 30.0f) ? kAccent
+                                                             : IM_COL32(255, 140, 120, 255),
+             62.0f);
+    }
+
+    ImGui::Dummy(ImVec2(1, 8));
+
+    // ── 살아 있는 알갱이 수 ──────────────────────────────────────────────
+    {
+        float ordered[kFrameHist];
+        for (int i = 0; i < kFrameHist; ++i)
+            ordered[i] = g.alive[(g.frameAt + i) % kFrameHist];
+        // 세로 눈금은 설정한 최대 개수로 고정한다. 지금 값에 맞춰 늘였다 줄였다 하면
+        // 「줄어들고 있다」가 그래프에서 사라진다 — 그것을 보려고 그리는 그래프다.
+        const float cap = (float)(app.cfg.particleCount > 0 ? app.cfg.particleCount : 1);
+        g.aliveMax = cap;
+
+        char right[80];
+        const int now = app.sim.activeCount();
+        snprintf(right, sizeof(right), "%d / %d", now, app.cfg.particleCount);
+        Plot("살아 있는 알갱이", ordered, kFrameHist, g.aliveMax, right,
+             (now < app.cfg.particleCount) ? kAccent : kGood, 62.0f);
+
+        char v[80];
+        const int gone = app.cfg.particleCount - now;
+        if (gone > 0) {
+            snprintf(v, sizeof(v), "%d 개 (%.1f%%)", gone, 100.0 * gone / cap);
+            Row("사라진 것", v, kAccent);
+        }
+        snprintf(v, sizeof(v), "%d\xC2\xB3", app.cfg.gridSize);
+        Row("격자", v);
     }
 
     ImGui::Dummy(ImVec2(1, 10));

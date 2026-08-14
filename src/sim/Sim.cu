@@ -26,6 +26,7 @@
 //                        영향을 한 번에 처리할 수 있다.
 //   그린함수            : 점 하나가 주변에 만드는 장(場)의 모양. 밀도와 합성곱하면 전체 장이 나온다.
 #include "Sim.h"
+#include "app/Forensics.h"   // 사고 기록 — 코어가 쥔 값(재할당·실패)을 코어가 직접 적는다
 
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -54,6 +55,9 @@ void markFailure(const char* what, const char* file, int line) {
     if (!g_failed) {                    // 첫 실패만 남긴다 — 뒤따르는 연쇄 실패는 원인이 아니다
         g_failed = true;
         snprintf(g_failMsg, sizeof(g_failMsg), "%s (%s:%d)", what, file, line);
+        // 디스크까지 민다. CUDA 가 실패한 뒤 시스템이 죽는 일이 잦아, 이 줄이 남지 않으면
+        // 「드라이버가 먼저 무너졌는지」와 「우리가 먼저 잘못했는지」를 가릴 수 없다.
+        fx::mark("!! CUDA 실패: %s (%s:%d)", what, file, line);
     }
     printf("[sim] CUDA error %s:%d %s\n", file, line, what);
 }
@@ -424,10 +428,23 @@ __device__ __forceinline__ float4 sampleAcc(const float4* accG, float4 p, int G,
 // 격자 중력만 재서 속도를 정하면, 도는 동안 헤일로와 블랙홀 중력이 더 붙어 궤도가 모자란다.
 // 그러면 판을 열자마자 원반이 안으로 무너진다(2026-08-14 실측). 여기서 더하는 항은
 // kIntegrate 가 더하는 항과 하나하나 짝이 맞아야 한다.
+// 커널에 넘기는 블랙홀 묶음.
+//
+// 포인터가 아니라 **값으로** 넘긴다. 여덟 개라도 264 바이트라 커널 인자 한도에 넉넉히 들고,
+// device 메모리를 따로 잡아 매 스텝 올려 보내는 것보다 간단하다.
+//
+// **비용에 상한이 있다는 점이 중요하다.** 알갱이마다 이 묶음을 훑으므로 비용이 개수에
+// 정비례한다 — 그래서 kMaxBlackHoles 를 여덟로 묶어 두었다. 알갱이 400만이면 한 스텝에
+// 3200만 번이고, 이 카드에서 그 정도는 아직 가볍다.
+struct BHPack {
+    float4 p[kMaxBlackHoles];   // x, y, z, 삼킴 반경
+    float4 q[kMaxBlackHoles];   // GM, 지평선, 안 씀, 안 씀
+    int    n = 0;
+};
+
 __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
                           int n, int G, int periodic,
-                          float haloV2, float haloCore2,
-                          int blackHole, float bhGM, float bhX, float bhY, float bhZ) {
+                          float haloV2, float haloCore2, BHPack bh) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -441,13 +458,14 @@ __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
         a.y -= haloV2 * hy / denom;
         a.z -= haloV2 * hz / denom;
     }
-    if (blackHole) {
-        const float dx = p.x - bhX, dy = p.y - bhY, dz = p.z - bhZ;
+    // 처음 속도를 정할 때는 상대론 보정을 빼고 뉴턴만 본다 — 그 보정은 각운동량이
+    // 정해진 뒤에야 계산할 수 있는데, 지금 정하려는 것이 바로 그 각운동량이다.
+    for (int b = 0; b < bh.n; ++b) {
+        const float4 bp = bh.p[b];
+        const float dx = p.x - bp.x, dy = p.y - bp.y, dz = p.z - bp.z;
         const float r2 = dx * dx + dy * dy + dz * dz;
         const float r = sqrtf(fmaxf(r2, 1e-12f));
-        // 처음 속도를 정할 때는 상대론 보정을 빼고 뉴턴만 본다 — 그 보정은 각운동량이
-        // 정해진 뒤에야 계산할 수 있는데, 지금 정하려는 것이 바로 그 각운동량이다.
-        const float m = -bhGM / (r2 * r);
+        const float m = -bh.q[b].x / (r2 * r);
         a.x += m * dx; a.y += m * dy; a.z += m * dz;
     }
 
@@ -462,8 +480,7 @@ __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
 // 비용: N 스레드 × 8칸 보간. N=200만이면 1600만 번의 격자 읽기.
 __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
                            int n, int G, float dt, int periodic,
-                           int blackHole, float bhGM, float bhRs,
-                           float bhX, float bhY, float bhZ, float c2, int* eaten,
+                           BHPack bh, float c2, int* eaten,
                            float haloV2, float haloCore2,
                            const float4* accContact,
                            float waveA, float wavePattern, float wavePitch, float waveTime) {
@@ -520,12 +537,14 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
     // 블랙홀 — 휘어진 시공간의 최단경로. 슈바르츠실트 해의 운동을 그대로 적분한다.
     //   a = -GM/r³ · (1 + 3L²/(c²r²)) · r⃗
     // 뒤의 괄호가 상대론 보정이라, 이것 하나로 광자 구면과 최소 안정 궤도가 저절로 나온다.
-    if (blackHole) {
-        const float dx = p.x - bhX, dy = p.y - bhY, dz = p.z - bhZ;
+    // 비용: 알갱이마다 최대 kMaxBlackHoles(여덟) 번. 상한이 있다.
+    for (int b = 0; b < bh.n; ++b) {
+        const float4 bp = bh.p[b];
+        const float dx = p.x - bp.x, dy = p.y - bp.y, dz = p.z - bp.z;
         const float r2 = dx * dx + dy * dy + dz * dz;
         const float r = sqrtf(fmaxf(r2, 1e-12f));
-        if (r <= bhRs) {                       // 지평선 안으로 들어왔다 — 삼킨다
-            atomicAdd(eaten, 1);
+        if (r <= bp.w) {                       // 지평선 안으로 들어왔다 — 삼킨다
+            atomicAdd(&eaten[b], 1);
             pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
             vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
             return;
@@ -536,7 +555,7 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
         const float lz = dx * v.y - dy * v.x;
         const float L2 = lx * lx + ly * ly + lz * lz;
         const float corr = 1.0f + 3.0f * L2 / fmaxf(c2 * r2, 1e-12f);
-        const float m = -bhGM * corr / (r2 * r);
+        const float m = -bh.q[b].x * corr / (r2 * r);
         a.x += m * dx; a.y += m * dy; a.z += m * dz;
     }
 
@@ -583,6 +602,73 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
         if (p.z > 0.998f) { p.z = 0.998f; v.z = -fabsf(v.z) * 0.25f; }
     }
     pos[i] = p; vel[i] = v;
+}
+
+// 블랙홀을 놓을 때, 그 둘레의 알갱이에 **그 블랙홀을 도는 속도**를 준다.
+//
+// **왜 필요한가.** 마우스로 놓는 블랙홀은 알갱이보다 나중에 생긴다. 그 알갱이들의 속도는
+// 블랙홀이 없다는 전제로 정해진 것이라 새 중심에 대한 각운동량이 거의 없고, 각운동량이
+// 없는 것은 궤도를 그리지 못하고 곧장 중심으로 떨어진다 — 그래서 놓자마자 둘레가 통째로
+// 빨려 들어갔다. reset 이 블랙홀을 알갱이보다 **먼저** 세우는 것도 정확히 같은 이유다.
+//
+// 원궤도 속도는 v = √(GM/r). 도는 방향은 새로 정하지 않고 그 알갱이가 이미 돌던 쪽을
+// 따른다 — 원반의 회전이 한쪽만 뒤집히면 그것대로 어색하다.
+//
+// 최소 안정 궤도(3rs) 안쪽은 손대지 않는다. 거기서는 어떤 속도를 줘도 나선으로 떨어지는
+// 것이 옳고, 그 모습이 곧 강착원반의 안쪽 가장자리가 깎이는 장면이다.
+//
+// 비용: N 스레드 × O(1).
+__global__ void kOrbitAroundBH(float4* pos, float4* vel, int n,
+                               float bx, float by, float bz,
+                               float gm, float rIn, float rOut) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+
+    const float dx = p.x - bx, dy = p.y - by, dz = p.z - bz;
+    const float r2 = dx * dx + dy * dy + dz * dz;
+    const float r = sqrtf(fmaxf(r2, 1e-12f));
+    if (r < rIn || r > rOut) return;
+
+    float4 v = vel[i];
+
+    // z 축을 회전축으로 본 접선. 원반이 xy 평면에서 도는 판이라 그것이 자연스럽다.
+    float tx = -dy, ty = dx;
+    const float tl = sqrtf(tx * tx + ty * ty);
+    if (tl < 1e-9f) return;          // 회전축 바로 위 — 접선이 정해지지 않는다
+    tx /= tl; ty /= tl;
+
+    // 안쪽일수록 강하게, 바깥으로 갈수록 원래 속도를 존중한다. 블랙홀에서 멀면 원반
+    // 자신의 중력이 주인이라, 거기까지 손대면 오히려 판이 흐트러진다.
+    const float t = (rOut > rIn) ? (r - rIn) / (rOut - rIn) : 0.f;
+    const float w = 1.0f - t * t;
+
+    // 중심으로 떨어지는 성분(반지름 방향)을 덜어 낸다 — 그것이 곧 빨려 드는 성분이다.
+    const float ux = dx / r, uy = dy / r, uz = dz / r;
+    const float vr = v.x * ux + v.y * uy + v.z * uz;
+    v.x -= vr * ux * w;
+    v.y -= vr * uy * w;
+    v.z -= vr * uz * w;
+
+    // 접선 속도를 원궤도 값으로 끌어당긴다. 이미 돌던 쪽을 따른다.
+    const float sgn = (v.x * tx + v.y * ty) >= 0.f ? 1.f : -1.f;
+    const float vc  = sqrtf(fmaxf(gm / r, 0.f));
+    const float dvt = sgn * vc - (v.x * tx + v.y * ty);
+    v.x += dvt * tx * w;
+    v.y += dvt * ty * w;
+
+    vel[i] = v;
+}
+
+// 각 블랙홀이 놓인 자리의 격자 가속도 — 둘레 물질이 블랙홀을 끄는 힘이다.
+// 블랙홀 수만큼만 도는 아주 작은 커널이라 블록 하나로 충분하다.
+__global__ void kSampleAccAtBH(const float4* accG, int G, int periodic,
+                               BHPack bh, float4* out) {
+    const int i = threadIdx.x;
+    if (i >= bh.n) return;
+    const float4 bp = bh.p[i];
+    out[i] = sampleAcc(accG, make_float4(bp.x, bp.y, bp.z, 0.f), G, periodic);
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +746,65 @@ __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int
         }
     }
     accOut[i] = a;
+}
+
+// 냉각 — 이웃과의 무작위 운동만 걷어낸다.
+//
+// **이것이 없으면 아무것도 뭉치지 않는다.** 중력으로 모이면 위치에너지가 운동에너지로
+// 바뀌어 그 자리가 데워지고, 데워진 것은 다시 흩어진다 — 모였다 흩어졌다만 되풀이한다.
+// 실제 우주에서는 그 열이 빛으로 빠져나가기 때문에 수축이 멈추지 않고 별이 태어난다.
+//
+// 여기서 걷어내는 것은 **이웃과의 상대 속도**뿐이다. 이웃과 함께 흐르는 속도(회전·조류)는
+// 그대로 두므로 원반이 멈추거나 은하가 주저앉지 않는다. 온도를 따로 들고 다니지 않아도
+// 되는 것이 이 방식의 값어치다 — 속도 분산이 곧 온도다.
+//
+// 비용: N 스레드 × 27칸 × 최대 96 이웃. N=100만이면 9600만 번의 읽기로, 같은 상한을 쓰는
+// kContact 과 같다(실측 스텝 4 ms). 상한이 없으면 뭉친 칸 하나가 프레임을 통째로 먹는다.
+__global__ void kCool(const float4* pos, const float4* vel, int n, int G,
+                      int periodic, const int* cellStart, const int* cellEnd,
+                      float rate, float dt, float4* velOut) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    const float4 v = vel[i];
+    velOut[i] = v;                       // 손댈 일이 없으면 그대로 넘긴다
+    if (p.x < 0.f) return;
+
+    const int cx = min(max((int)(p.x * G), 0), G - 1);
+    const int cy = min(max((int)(p.y * G), 0), G - 1);
+    const int cz = min(max((int)(p.z * G), 0), G - 1);
+
+    const int kMaxPeers = 96;            // kContact 과 같은 상한
+    float sx = 0.f, sy = 0.f, sz = 0.f;
+    int seen = 0;
+
+    for (int dz = -1; dz <= 1 && seen < kMaxPeers; ++dz)
+    for (int dy = -1; dy <= 1 && seen < kMaxPeers; ++dy)
+    for (int dx = -1; dx <= 1 && seen < kMaxPeers; ++dx) {
+        const int c = gidx3(cx + dx, cy + dy, cz + dz, G, G, periodic);
+        const int s0 = cellStart[c], e0 = cellEnd[c];
+        if (s0 < 0 || e0 <= s0) continue;
+        for (int j = s0; j < e0 && seen < kMaxPeers; ++j) {
+            if (j == i) continue;
+            if (pos[j].x < 0.f) continue;
+            const float4 vj = vel[j];
+            sx += vj.x; sy += vj.y; sz += vj.z;
+            ++seen;
+        }
+    }
+    if (seen <= 0) return;               // 이웃이 없으면 잴 온도도 없다
+
+    const float inv = 1.f / (float)seen;
+    // 한 스텝에 걷어내는 몫. dt 를 곱해 배속을 바꿔도 식는 속도가 그대로이게 하고,
+    // 절반에서 끊는다 — 한 스텝에 이웃 속도로 통째로 갈아타면 알갱이들이 한 덩어리로
+    // 굳어 버려 흐름이 사라진다.
+    float k = rate * dt * 60.0f;
+    if (k > 0.5f) k = 0.5f;
+
+    velOut[i] = make_float4(v.x + k * (sx * inv - v.x),
+                            v.y + k * (sy * inv - v.y),
+                            v.z + k * (sz * inv - v.z),
+                            v.w);
 }
 
 // 셀 키(정렬용). 빈 슬롯은 -1 로 두어 뒤로 밀린다.
@@ -990,8 +1135,32 @@ struct Sim::Impl {
     // 형태를 놓을 자리를 가리키는 커서. 빈 자리가 다 차면 앞으로 돌아와 먼저 넣은 것을
     // 덮어쓴다 — 그래야 계속 놓아도 총수가 상한을 넘지 않으면서 새로 놓은 것이 항상 보인다.
     int ringCursor = 0;
-    BlackHoleState bh;
+
+    // ── 블랙홀 (여럿) ─────────────────────────────────────────────────────
+    //
+    // 오래 하나였다. 하나뿐이면 새로 놓을 때마다 앞의 것이 사라져, 둘이 서로를 끌어당기는
+    // 것도 합쳐지는 것도 볼 수 없었다 — 이 장면에서 가장 볼 만한 일이 그것인데도.
+    BlackHoleState bhs[kMaxBlackHoles];
+    // 블랙홀이 생길 때의 질량과 지평선. 삼켜서 자랄 때 이 둘을 기준으로 삼는다 —
+    // 기준 없이 매번 처음 크기(cfg.blackHoleRs)에서 다시 시작하면, 크게 놓은 블랙홀도
+    // 한 스텝 만에 작은 것과 같은 크기로 덮어써진다(2026-08-14 실측: 1만과 100만이
+    // 0.006005 와 0.006128 로 거의 같았다).
+    float bhMassAtBirth[kMaxBlackHoles] = {0};
+    float bhRsAtBirth[kMaxBlackHoles] = {0};
+    int   bhCount = 0;
+    // 이번 스텝에 삼킨 수 — 블랙홀마다 하나씩.
     int *eaten = nullptr;
+    // 각 블랙홀이 놓인 자리의 격자 가속도(둘레 물질이 블랙홀을 끄는 힘).
+    // 커널이 채우고 host 가 읽어 블랙홀을 움직인다.
+    float4 *bhAcc = nullptr;
+
+    // 가장 무거운 것. 오래 「판에 하나」였던 자리들이 이것을 본다.
+    BlackHoleState heaviest() const {
+        BlackHoleState best;
+        for (int i = 0; i < bhCount; ++i)
+            if (bhs[i].active && bhs[i].mass > best.mass) best = bhs[i];
+        return best;
+    }
 
     cudaEvent_t evA = nullptr, evB = nullptr;
 
@@ -1011,6 +1180,15 @@ struct Sim::Impl {
         return 2.0f * cfg.gravity * M / fmaxf(cfg.lightSpeedSq, 1e-6f);
     }
 
+    // 커널에 넘길 블랙홀 묶음을 만든다. 삼킴 반경의 바닥(격자 한 칸)도 여기서 건다.
+    BHPack packBH() const;
+    // i 번째 지평선을 그 질량에서 다시 낸다.
+    void   setRsFrom(int i);
+    // 블랙홀을 하나 더한다. 자리가 없으면 가장 가벼운 것을 밀어낸다. 그 번호를 돌려준다.
+    int    addBlackHole(float x, float y, float z, float mass, bool born);
+    // 블랙홀을 한 스텝 움직이고, 겹친 것끼리 합친다.
+    void   advanceBlackHoles(float dt);
+
     void freeAll();
     void allocate();
     void buildGreen();
@@ -1021,6 +1199,8 @@ struct Sim::Impl {
     void giveOrbits();
     void sortParticles();
     void doContact();
+    // 이웃과의 무작위 운동을 걷어낸다(냉각). dt 를 받아야 배속과 무관하게 식는다.
+    void doCooling(float dt);
     void checkCollapse();
 };
 
@@ -1029,6 +1209,169 @@ namespace {
 inline dim3 blk3() { return dim3(8, 8, 8); }
 inline dim3 grd3(int G) { return dim3((G + 7) / 8, (G + 7) / 8, (G + 7) / 8); }
 } // namespace
+
+// bhs[0, bhCount) 는 **모두 살아 있다**는 것이 이 배열의 불변식이다.
+// 가운데를 비워 두면 커널에 넘기는 묶음의 번호와 「삼킨 수」 배열의 번호가 어긋나,
+// 한 블랙홀이 삼킨 것이 다른 블랙홀의 질량으로 들어간다. 지울 때는 뒤를 당긴다.
+BHPack Sim::Impl::packBH() const {
+    BHPack pk;
+    // 삼키는 반경은 그리는 반경의 절반. 다만 **격자 한 칸보다 작아서는 안 된다** —
+    // 그보다 작으면 지평선 바로 밖 한 칸이 삼켜지지 않는 자리가 되어 알갱이가 끝없이
+    // 쌓이고, 그 칸에 질량을 더하는 원자 연산이 같은 주소에 겹쳐 커널이 드라이버
+    // 타임아웃(2초)을 넘긴다. 2026-08-14 에 그것으로 시스템이 여섯 번 재부팅됐다.
+    const float cell = 1.0f / (float)(allocG > 0 ? allocG : 1);
+    const float inv  = 1.0f / (float)(allocN > 0 ? allocN : 1);
+    for (int i = 0; i < bhCount && i < kMaxBlackHoles; ++i) {
+        pk.p[i] = make_float4(bhs[i].x, bhs[i].y, bhs[i].z,
+                              fmaxf(bhs[i].rs * 0.5f, cell));
+        pk.q[i] = make_float4(cfg.gravity * bhs[i].mass * inv, bhs[i].rs, 0.f, 0.f);
+    }
+    pk.n = (bhCount < kMaxBlackHoles) ? bhCount : kMaxBlackHoles;
+    return pk;
+}
+
+void Sim::Impl::setRsFrom(int i) {
+    if (i < 0 || i >= kMaxBlackHoles) return;
+    // 삼킬수록 지평선이 자란다 — 다만 **세제곱근으로** 자란다.
+    // 실제 지평선은 질량에 정비례하지만(rs = 2GM/c²), 이 우주에서는 그 값이 화면의 점보다
+    // 작아 아무것도 안 보인다. 그래서 처음 크기를 보이게 부풀려 놓았는데, 거기에 선형
+    // 성장을 곱하면 부풀림까지 함께 자라 삼킬수록 커지고 커질수록 삼키는 되먹임이 생긴다.
+    if (bhMassAtBirth[i] > 1e-6f && bhRsAtBirth[i] > 1e-9f) {
+        const float grow = cbrtf(fmaxf(bhs[i].mass / bhMassAtBirth[i], 1.0f));
+        bhs[i].rs = bhRsAtBirth[i] * grow;
+        if (bhs[i].rs > 0.25f) bhs[i].rs = 0.25f;   // 화면의 4분의 1을 넘지 않는다
+    }
+}
+
+int Sim::Impl::addBlackHole(float x, float y, float z, float mass, bool born) {
+    // 기준 질량(판 전체의 2%) — 이 무게일 때 지평선이 cfg.blackHoleRs 가 된다.
+    //
+    // 마우스로 놓는 질량을 50분의 1 로 낮췄으니 이 기준도 같이 낮춰야 지평선이 예전 값으로
+    // 돌아온다고 보고 0.0004 로 내려 봤는데, **더 나빠졌다.** 지평선이 0.0078(격자 한 칸
+    // 바닥)에서 0.0117 로 커지자 삼키는 범위도 함께 넓어져, 놓은 직후 삼킨 양이 32만에서
+    // 38만으로 늘었다(2026-08-14 실측). 밀집한 중심에 놓으면 지평선이 작을수록 덜 삼킨다.
+    const float ref = 0.02f * (float)allocN;
+    // 상한은 두지 않는다. 크게 놓으면 크게 되는 것이 맞고, 무게는 부르는 쪽에서 정한다
+    // (마우스로 놓는 것은 addShape 이 개수의 50분의 1 로 낮춰 넘긴다).
+    if (mass < 1.0f) mass = 1.0f;
+
+    int i;
+    if (bhCount < kMaxBlackHoles) {
+        i = bhCount++;
+    } else {
+        // 자리가 없으면 가장 가벼운 것을 밀어낸다. 눌렀는데 아무 일도 안 일어나는 것보다
+        // 낫다 — 새로 놓은 것은 언제나 보여야 한다.
+        i = 0;
+        for (int j = 1; j < bhCount; ++j) if (bhs[j].mass < bhs[i].mass) i = j;
+    }
+
+    bhs[i] = BlackHoleState{};
+    bhs[i].active = true;
+    bhs[i].born = born;
+    bhs[i].x = x; bhs[i].y = y; bhs[i].z = z;
+    bhs[i].mass = mass;
+    bhs[i].rs = cfg.blackHoleRs * cbrtf(fmaxf(mass / fmaxf(ref, 1.0f), 0.02f));
+    if (bhs[i].rs > 0.25f) bhs[i].rs = 0.25f;
+    bhMassAtBirth[i] = mass;
+    bhRsAtBirth[i]   = bhs[i].rs;
+    // 이 자리에 남아 있던 삼킨 수를 지운다 — 안 지우면 새 블랙홀의 질량에 얹힌다.
+    if (eaten) CK(cudaMemset(eaten + i, 0, sizeof(int)));
+    return i;
+}
+
+// 블랙홀을 한 스텝 움직이고, 겹친 것끼리 합친다.
+//
+// **블랙홀도 질량이 있으니 중력을 받는다.** 오래 고정된 점이었는데, 여럿을 놓을 수 있게
+// 되면서 그 고정이 눈에 걸린다 — 둘이 서로를 돌다 합쳐지는 것이 이 장면에서 가장 볼 만한
+// 일이고, 움직이지 않으면 그 일이 아예 일어나지 않는다.
+//
+// 받는 힘은 둘이다. 둘레 물질이 끄는 힘(격자에서 뽑아 온다)과 다른 블랙홀이 끄는 힘.
+// 뒤엣것은 여덟 개면 64번이라 host 에서 해도 티가 나지 않는다.
+void Sim::Impl::advanceBlackHoles(float dt) {
+    if (bhCount <= 0 || g_failed) return;
+
+    float4 ga[kMaxBlackHoles] = {};
+    CK(cudaMemcpy(ga, bhAcc, sizeof(float4) * bhCount, cudaMemcpyDeviceToHost));
+    if (g_failed) return;
+
+    const float inv = 1.0f / (float)(allocN > 0 ? allocN : 1);
+
+    for (int i = 0; i < bhCount; ++i) {
+        float ax = ga[i].x, ay = ga[i].y, az = ga[i].z;
+        for (int j = 0; j < bhCount; ++j) {
+            if (j == i) continue;
+            const float dx = bhs[i].x - bhs[j].x;
+            const float dy = bhs[i].y - bhs[j].y;
+            const float dz = bhs[i].z - bhs[j].z;
+            // 지평선 크기를 무름 길이로 쓴다. 없으면 가까워지는 순간 힘이 발산해 서로를
+            // 튕겨 내고, 합쳐지기는커녕 판 밖으로 날아간다.
+            const float soft = fmaxf(bhs[i].rs + bhs[j].rs, 1e-4f);
+            const float r2 = dx * dx + dy * dy + dz * dz + soft * soft;
+            const float r  = sqrtf(r2);
+            const float m  = -cfg.gravity * bhs[j].mass * inv / (r2 * r);
+            ax += m * dx; ay += m * dy; az += m * dz;
+        }
+        bhs[i].vx += ax * dt;
+        bhs[i].vy += ay * dt;
+        bhs[i].vz += az * dt;
+    }
+
+    for (int i = 0; i < bhCount; ++i) {
+        bhs[i].x += bhs[i].vx * dt;
+        bhs[i].y += bhs[i].vy * dt;
+        bhs[i].z += bhs[i].vz * dt;
+
+        if (periodic()) {
+            bhs[i].x -= floorf(bhs[i].x);
+            bhs[i].y -= floorf(bhs[i].y);
+            bhs[i].z -= floorf(bhs[i].z);
+        } else {
+            // 판 밖으로 나가면 붙잡고 되튄다. 알갱이에 쓰는 규칙과 같다.
+            if (bhs[i].x < 0.01f) { bhs[i].x = 0.01f; bhs[i].vx = fabsf(bhs[i].vx) * 0.25f; }
+            if (bhs[i].x > 0.99f) { bhs[i].x = 0.99f; bhs[i].vx = -fabsf(bhs[i].vx) * 0.25f; }
+            if (bhs[i].y < 0.01f) { bhs[i].y = 0.01f; bhs[i].vy = fabsf(bhs[i].vy) * 0.25f; }
+            if (bhs[i].y > 0.99f) { bhs[i].y = 0.99f; bhs[i].vy = -fabsf(bhs[i].vy) * 0.25f; }
+            if (bhs[i].z < 0.01f) { bhs[i].z = 0.01f; bhs[i].vz = fabsf(bhs[i].vz) * 0.25f; }
+            if (bhs[i].z > 0.99f) { bhs[i].z = 0.99f; bhs[i].vz = -fabsf(bhs[i].vz) * 0.25f; }
+        }
+    }
+
+    // 겹친 것끼리 합친다 — **질량과 운동량을 지킨다.**
+    // 이 자리가 실제 우주에서 중력파를 내는 사건이고, 화면에서도 가장 볼 만하다.
+    for (int i = 0; i < bhCount; ++i) {
+        for (int j = i + 1; j < bhCount; ++j) {
+            const float dx = bhs[i].x - bhs[j].x;
+            const float dy = bhs[i].y - bhs[j].y;
+            const float dz = bhs[i].z - bhs[j].z;
+            const float d  = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (d > bhs[i].rs + bhs[j].rs) continue;
+
+            const float mi = bhs[i].mass, mj = bhs[j].mass;
+            const float mt = fmaxf(mi + mj, 1e-6f);
+            bhs[i].x  = (bhs[i].x  * mi + bhs[j].x  * mj) / mt;
+            bhs[i].y  = (bhs[i].y  * mi + bhs[j].y  * mj) / mt;
+            bhs[i].z  = (bhs[i].z  * mi + bhs[j].z  * mj) / mt;
+            bhs[i].vx = (bhs[i].vx * mi + bhs[j].vx * mj) / mt;
+            bhs[i].vy = (bhs[i].vy * mi + bhs[j].vy * mj) / mt;
+            bhs[i].vz = (bhs[i].vz * mi + bhs[j].vz * mj) / mt;
+            bhs[i].mass = mt;
+            bhMassAtBirth[i] = fmaxf(bhMassAtBirth[i] + bhMassAtBirth[j], 1e-6f);
+            bhRsAtBirth[i]   = fmaxf(bhRsAtBirth[i], bhRsAtBirth[j]);
+            setRsFrom(i);
+
+            // j 를 빼고 뒤를 당긴다 — 가운데를 비워 두면 번호가 어긋난다(맨 위 불변식).
+            for (int k = j; k + 1 < bhCount; ++k) {
+                bhs[k]           = bhs[k + 1];
+                bhMassAtBirth[k] = bhMassAtBirth[k + 1];
+                bhRsAtBirth[k]   = bhRsAtBirth[k + 1];
+            }
+            --bhCount;
+            bhs[bhCount] = BlackHoleState{};
+            --j;
+            // 「삼킨 수」는 이 스텝에서 이미 다 읽어 0 으로 비워 둔 뒤라, 당겨도 섞이지 않는다.
+        }
+    }
+}
 
 void Sim::Impl::freeAll() {
     auto F = [](void*& p) { if (p) { cudaFree(p); p = nullptr; } };
@@ -1041,7 +1384,7 @@ void Sim::Impl::freeAll() {
     F((void*&)flag); F((void*&)scan);
     F(sortTmp); F(redTmp);
     F((void*&)redD); F((void*&)redI); F((void*&)redU); F((void*&)redF);
-    F((void*&)eaten);
+    F((void*&)eaten); F((void*&)bhAcc);
     sortTmpBytes = 0; redTmpBytes = 0;
     if (planReady) { cufftDestroy(planR2C); cufftDestroy(planC2R); planReady = false; }
 }
@@ -1078,7 +1421,12 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&redI, sizeof(int) * 2));
     CK(cudaMalloc(&redU, sizeof(unsigned long long)));
     CK(cudaMalloc(&redF, sizeof(float)));
-    CK(cudaMalloc(&eaten, sizeof(int)));
+    // 삼킨 수와 블랙홀 자리의 가속도는 블랙홀마다 하나씩. 잡은 직후에 반드시 비운다 —
+    // 미초기화 값을 그대로 읽어 질량에 더하면 블랙홀이 난데없이 무거워진다.
+    CK(cudaMalloc(&eaten, sizeof(int) * kMaxBlackHoles));
+    CK(cudaMalloc(&bhAcc, sizeof(float4) * kMaxBlackHoles));
+    CK(cudaMemset(eaten, 0, sizeof(int) * kMaxBlackHoles));
+    CK(cudaMemset(bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
 
     if (!g_failed) {
         FK(cufftPlan3d(&planR2C, S, S, S, CUFFT_R2C));
@@ -1153,11 +1501,8 @@ void Sim::Impl::giveOrbits() {
     // 적분기가 쓰는 힘을 그대로 넘긴다 — 하나라도 빠지면 궤도가 어긋나 원반이 무너진다.
     const float haloV2 = cfg.haloEnabled ? (cfg.haloSpeed * cfg.haloSpeed) : 0.f;
     const float haloCore2 = cfg.haloCore * cfg.haloCore;
-    const float bhGM = bh.active
-                     ? cfg.gravity * bh.mass / (float)(allocN > 0 ? allocN : 1) : 0.f;
     kAccelMag<<<(allocN + 255) / 256, 256>>>(accG, pos, accMag, allocN, allocG,
-                                             periodic() ? 1 : 0, haloV2, haloCore2,
-                                             bh.active ? 1 : 0, bhGM, bh.x, bh.y, 0.5f);
+                                             periodic() ? 1 : 0, haloV2, haloCore2, packBH());
     // 은하 충돌은 둘을 서로에게 밀어 준다. 나머지는 제자리에서 돈다.
     const float2 base = make_float2(0.f, 0.f);
     kSetOrbit<<<(allocN + 255) / 256, 256>>>(accG, vel, pos, accMag, allocN,
@@ -1201,9 +1546,31 @@ void Sim::Impl::doContact() {
     CK(cudaGetLastError());
 }
 
+void Sim::Impl::doCooling(float dt) {
+    if (g_failed || !cfg.coolingEnabled || cfg.coolingRate <= 0.f || dt <= 0.f) return;
+    const int G = allocG;
+    // 접촉이 켜져 있으면 그쪽이 이미 칸 구간을 만들어 두었다 — 두 번 정렬하지 않는다.
+    if (!cfg.contactEnabled) {
+        const size_t cells = (size_t)G * G * G;
+        sortParticles();
+        kFillInt<<<(int)((cells + 255) / 256), 256>>>(cellStart, (int)cells, -1);
+        kFillInt<<<(int)((cells + 255) / 256), 256>>>(cellEnd, (int)cells, -1);
+        kBuildCellRange<<<(allocN + 255) / 256, 256>>>(keys, allocN, cellStart, cellEnd);
+    }
+    if (g_failed) return;
+    // 제자리에서 고치면 옆 스레드가 이미 식은 값을 읽어 한쪽으로 쏠린다. 정렬이 쓰는
+    // 임시 버퍼에 새 속도를 쓰고 통째로 바꿔 끼운다.
+    kCool<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, G, periodic() ? 1 : 0,
+                                         cellStart, cellEnd, cfg.coolingRate, dt, velTmp);
+    std::swap(vel, velTmp);
+    CK(cudaGetLastError());
+}
+
 // 한 칸에 중력이 접촉을 이길 만큼 쌓이면 그 자리가 무너져 블랙홀이 된다.
 void Sim::Impl::checkCollapse() {
-    if (g_failed || !cfg.collapseEnabled || bh.active) return;
+    // 자리가 다 차면 더 만들지 않는다. 밀어내기(addBlackHole)는 사용자가 놓을 때의 규칙이고,
+    // 저절로 생기는 쪽이 남의 자리를 빼앗으면 놓아 둔 것이 소리 없이 사라진다.
+    if (g_failed || !cfg.collapseEnabled || bhCount >= kMaxBlackHoles) return;
     const int G = allocG, S = stride();
     CK(cudaMemset(redU, 0, sizeof(unsigned long long)));
     kFindDensestCell<<<grd3(G), blk3()>>>(rho, G, S, redU);
@@ -1215,16 +1582,16 @@ void Sim::Impl::checkCollapse() {
 
     const unsigned cell = (unsigned)(key & 0xFFFFFFFFull);
     const int cx = cell % G, cy = (cell / G) % G, cz = cell / (G * G);
-    bh.active = true; bh.born = true;
-    bh.x = (cx + 0.5f) / G; bh.y = (cy + 0.5f) / G;
     // 무너진 칸에 **쌓여 있던 질량**이 그대로 블랙홀이 된다.
     //
     // 전에는 질량을 0 으로 두고 지평선만 알갱이 하나분으로 냈다. 그러면 지평선이
     // 2·G·(1/N)/c² 라 사실상 0 이고, 화면에는 「블랙홀이 되었습니다 · 삼킨 알갱이 0 ·
     // 지평선 0.0000」이라는 앞뒤 안 맞는 말이 뜬다 — 실체 없는 블랙홀이었다.
-    bh.mass = dens;
-    bh.rs = horizonOf(bh.mass);
-    (void)cz;
+    const int i = addBlackHole((cx + 0.5f) / G, (cy + 0.5f) / G, (cz + 0.5f) / G, dens, true);
+    // 저절로 생긴 것은 지평선을 실제 식에서 낸다. 사용자가 놓은 것과 달리 「이만큼 모였다」가
+    // 이미 정해져 있어, 보이게 부풀릴 근거가 그 최소 크기뿐이다.
+    bhs[i].rs = fmaxf(horizonOf(bhs[i].mass), cfg.blackHoleRs);
+    bhRsAtBirth[i] = bhs[i].rs;
 }
 
 // ---------------------------------------------------------------------------
@@ -1281,8 +1648,62 @@ size_t Sim::estimateBytes(int particleCount, int gridSize, Boundary boundary) {
     b += sizeof(float)  * cells * 2;  // rho, pot
     b += sizeof(cufftComplex) * spec * 2;
     b += sizeof(int) * G * G * G * 2; // cellStart, cellEnd
-    b += cells * 2;                   // cuFFT 작업 공간 어림
+
+    // cuFFT 작업 공간 — **어림하지 말고 물어본다.**
+    //
+    // 전에는 `cells * 2` 바이트로 어림했다. 512³ 에서 그것은 268 MB 인데, 실제로 잡히는
+    // 것은 그 몇 배다. 게다가 플랜을 R2C·C2R 두 개 만드므로 두 번 든다. 어림이 작으면
+    // maxParticlesFor 가 남는 양을 실제보다 크게 보고 알갱이를 그만큼 더 허락하는데,
+    // 그 차이는 VRAM 이 바닥나는 자리에서 드러난다 — 가장 나쁜 시점이다.
+    //
+    // cufftEstimate3d 는 플랜을 만들지 않고도 필요한 양을 알려 준다. 못 물으면 그때만
+    // 보수적인 어림(격자 하나 크기)으로 물러난다.
+    {
+        size_t wsR2C = 0, wsC2R = 0;
+        const int s = (int)S;
+        if (cufftEstimate3d(s, s, s, CUFFT_R2C, &wsR2C) != CUFFT_SUCCESS)
+            wsR2C = sizeof(float) * cells;
+        if (cufftEstimate3d(s, s, s, CUFFT_C2R, &wsC2R) != CUFFT_SUCCESS)
+            wsC2R = sizeof(float) * cells;
+        b += wsR2C + wsC2R;
+    }
     return b;
+}
+
+// 이 카드의 메모리 대역폭(GB/s). 감당할 수 있는 격자를 어림하는 데 쓴다 —
+// 격자 계산은 순전히 대역폭이 정하기 때문이다(FFT 는 산술보다 옮기는 일이 많다).
+// 못 읽으면 0.
+double Sim::deviceBandwidthGBs() {
+    // CUDA 13 에서 cudaDeviceProp 의 memoryClockRate·memoryBusWidth 가 빠졌다.
+    // 같은 값을 속성으로 물어본다.
+    int kHz = 0, bits = 0;
+    if (cudaDeviceGetAttribute(&kHz, cudaDevAttrMemoryClockRate, 0) != cudaSuccess) return 0.0;
+    if (cudaDeviceGetAttribute(&bits, cudaDevAttrGlobalMemoryBusWidth, 0) != cudaSuccess) return 0.0;
+    if (kHz <= 0 || bits <= 0) return 0.0;
+    // kHz → Hz, bit → byte. DDR 이라 한 주기에 두 번 오간다.
+    return (double)kHz * 1000.0 * ((double)bits / 8.0) * 2.0 / 1.0e9;
+}
+
+// 이 격자로 한 스텝을 도는 데 드는 시간(ms) 어림.
+//
+// **격자 쪽이 지배한다.** 푸아송을 푸는 동안 rho·pot·주파수 배열을 여러 번 오가는데,
+// 그 양이 한 변의 세제곱으로 자라기 때문이다. 알갱이 쪽은 개수에 정비례할 뿐이다.
+//
+// 계수는 실측이 아니라 「옮기는 바이트 ÷ 대역폭」이다. FFT 는 R2C·C2R 왕복에 여러 패스를
+// 돌므로 격자 한 칸당 대략 스무 번의 읽기·쓰기가 일어난다고 본다. 정확한 값이 목적이
+// 아니라 **512³ 이 128³ 보다 여덟 배 무겁다**는 규모를 놓치지 않는 것이 목적이다.
+double Sim::estimateStepMs(int particleCount, int gridSize, Boundary boundary) {
+    const double bw = deviceBandwidthGBs();
+    if (bw <= 0.0) return 0.0;
+    const double eff = bw * 0.70 * 1.0e9;   // 실효 대역폭(초당 바이트)
+
+    const double G = (double)(gridSize > 0 ? gridSize : 1);
+    const double S = (boundary == Boundary::Isolated) ? G * 2.0 : G;
+    const double cells = S * S * S;
+
+    const double gridBytes = 20.0 * cells * 4.0;              // 푸아송 왕복
+    const double partBytes = (double)particleCount * 80.0;    // pos·vel 읽고 쓰기 + 격자 표집
+    return (gridBytes + partBytes) / eff * 1000.0;
 }
 
 int Sim::maxParticlesFor(int gridSize, Boundary boundary, size_t freeBytes) {
@@ -1343,6 +1764,14 @@ void Sim::reconfigure(const SimConfig& c) {
     d.allocN = (n > 0) ? n : 1;
     d.allocG = g;
     d.allocBoundary = c.boundary;
+
+    // **재할당은 이 프로젝트에서 가장 위험한 동작이다.** 이것이 프레임마다 일어나 드라이버가
+    // 무너진 적이 세 번 있다. 그래서 일어날 때마다 디스크까지 남긴다 — 로그에 이 줄이
+    // 촘촘히 찍혀 있으면 그 자체가 원인이고, 한 번뿐이면 원인은 다른 데 있다.
+    fx::mark("버퍼 다시 잡음: 알갱이 %d, 격자 %d(실제 %d), 경계 %s, 어림 %.0f MB, 여유 %.0f MB",
+             d.allocN, g, d.stride(), d.periodic() ? "주기" : "고립",
+             estimateBytes(d.allocN, g, c.boundary) / 1048576.0, freeB / 1048576.0);
+
     d.allocate();
     d.buildGreen();
     reset();
@@ -1359,14 +1788,17 @@ void Sim::reset() {
     if (g_failed) return;
     d.simTime = 0.0;
     d.stepCount = 0;
-    d.bh = BlackHoleState{};
+    d.bhCount = 0;
+    for (int i = 0; i < kMaxBlackHoles; ++i) {
+        d.bhs[i] = BlackHoleState{};
+        d.bhMassAtBirth[i] = 0.f;
+        d.bhRsAtBirth[i] = 0.f;
+    }
 
     // 블랙홀 장면은 알갱이를 놓기 **전에** 세운다. 나중에 세우면 초기 궤도 속도가
     // 블랙홀 없는 중력만 보고 정해져, 원반이 통째로 빨려 든다.
+    // (마우스로 놓는 쪽은 그럴 수 없으므로 그때는 둘레에 궤도를 따로 준다 — addShape 참조.)
     if (d.cfg.preset == Preset::BlackHole || d.cfg.blackHoleEnabled) {
-        d.bh.active = true;
-        d.bh.x = 0.5f; d.bh.y = 0.5f;
-
         // **질량을 먼저 정하고 지평선을 거기서 낸다.** 반대로 하면 안 된다.
         //
         // 지평선 크기(0.006)에서 질량을 역산하면 rs·c²/(2G) = 1.5 — 판의 모든 알갱이를
@@ -1376,11 +1808,13 @@ void Sim::reset() {
         // 여기서는 2% 로 둔다. 0.1% 로 하면 물리적으로는 옳지만 원반이 블랙홀을 거의
         // 못 느껴 「블랙홀 장면」이라는 이름이 무색해진다. 2% 면 안쪽이 눈에 띄게 감기면서도
         // 원반은 살아남아, 회전하며 빨려 드는 모습이 보인다.
-        d.bh.mass = 0.02f * (float)d.allocN;
+        const int i = d.addBlackHole(0.5f, 0.5f, 0.5f, 0.02f * (float)d.allocN, false);
         // 그 질량의 지평선은 화면에서 점보다 작다. 삼킴 판정과 그리기에 쓸 최소 크기를 준다.
-        d.bh.rs = fmaxf(d.horizonOf(d.bh.mass), d.cfg.blackHoleRs);
+        d.bhs[i].rs = d.cfg.blackHoleRs;
+        d.bhRsAtBirth[i] = d.bhs[i].rs;
     }
-    CK(cudaMemset(d.eaten, 0, sizeof(int)));
+    CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
+    CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
     d.placeInitial();
     d.giveOrbits();
     d.computeAccel();
@@ -1408,36 +1842,84 @@ void Sim::step() {
     float dt = 0.0016f * d.cfg.timeScale;
     const float dtMax = (vmax > 1e-6f) ? (0.8f * cell / vmax) : dt;
     if (dt > dtMax) dt = dtMax;
-    // **바닥을 둔다.** 속도를 광속으로 잘라 두었으므로 정상적인 판에서는 여기 닿지 않는다.
-    // 그래도 한 알갱이가 튀는 순간 dt 가 0 에 수렴해 시간이 멎는 것은 막아야 한다 —
-    // 화면이 멈추면 사용자는 앱이 죽은 줄 안다. 광속에 맞춘 값의 절반을 바닥으로 쓴다.
-    const float dtFloor = 0.4f * cell / sqrtf(fmaxf(d.cfg.lightSpeedSq, 1e-6f));
-    if (dt < dtFloor) dt = dtFloor;
+    // **바닥을 두지 않는다.**
+    //
+    // 「블랙홀을 놓으면 시간이 멎는다」를 고치려고 여기에 dt 하한을 넣은 적이 있다.
+    // 그것은 CFL 을 무력화하는 짓이었다 — CFL 은 「한 스텝에 격자 한 칸을 넘지 마라」는
+    // 물리적 안전장치이고, 넘는 순간 알갱이가 격자를 건너뛰어 힘이 엉뚱해지고 더 튄다.
+    // 블랙홀이 둘이면 가속도가 배가 되어 그 선을 훨씬 쉽게 넘는다.
+    // 2026-08-14 실측: 블랙홀 두 개를 놓자 화면이 멎고 시스템이 재부팅됐다.
+    //
+    // 시간이 안 흐르는 문제는 dt 를 억지로 키워 푸는 것이 아니라, **빠른 알갱이를 없애서**
+    // 푼다 — 지평선 안으로 들어온 것은 삼켜 지운다(아래 bhEatRs). 그러면 vmax 가 내려가고
+    // dt 가 저절로 회복된다.
     d.tm.dtUsed = dt; d.tm.maxSpeed = vmax; d.tm.substeps = 1;
+
+    // 식히는 것은 힘을 더하기 전에 한다 — 이번 스텝의 dt 로 이웃과의 무작위 운동을 걷어낸다.
+    // 속도를 줄이는 쪽이라 방금 CFL 이 정한 dt 를 위태롭게 하지 않는다.
+    d.doCooling(dt);
 
     const float haloV2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
     const float haloCore2 = d.cfg.haloCore * d.cfg.haloCore;
-    const float bhGM = d.bh.active
-                     ? d.cfg.gravity * d.bh.mass / (float)(d.allocN > 0 ? d.allocN : 1) : 0.f;
+    // **삼키는 반경은 그리는 반경보다 훨씬 작다.** (아래 값은 packBH 가 만든다.)
+    //
+    // rs 는 화면에서 보이게 하려고 실제 지평선보다 크게 부풀린 값이다. 그 부풀린 반경을
+    // 삼킴 판정에 그대로 쓰면, 실제로는 지평선 밖에 있어야 할 알갱이까지 먹는다. 그러면
+    // 질량이 늘고 → 중력이 세지고 → 원반이 더 빨려들어, 몇 초 만에 판을 통째로 먹는다
+    // (2026-08-14 실측: 4초에 45%, 14초에 전부).
+    //
+    // 실제 비율(136분의 1)로 두면 아무것도 안 먹으므로, 눈에 띄되 폭주하지 않는 선으로
+    // 그리는 반경의 절반을 쓴다.
+    //
+    // 이 반경은 안전장치이기도 하다. 지평선 가까이 온 알갱이는 가속도가 폭발해 CFL 이
+    // dt 를 극단으로 깎는데, 삼켜서 없애면 그 원인이 사라진다. 15% 로 너무 조여 두었더니
+    // 빠른 알갱이가 지평선 밖에 남아 시간이 흐르지 않았다.
+    //
+    // **그리고 격자 한 칸보다 작아서는 안 된다 — 이 앱에서 시스템이 죽은 원인이다.**
+    //
+    // 삼킴 반경이 한 칸보다 작으면 지평선 바로 바깥 한 칸이 삼켜지지 않는 자리가 된다.
+    // 블랙홀은 계속 끌어당기므로 그 칸에 알갱이가 끝없이 쌓이는데, 질량을 격자에 더하는
+    // 일(kScatter)은 칸마다 원자 연산이라 **같은 주소에 몰린 수만큼 차례를 기다린다.**
+    // 수백만 개가 한 칸에 겹치면 그 커널 하나가 드라이버 타임아웃(2초)을 넘기고,
+    // 강제 리셋 과정에서 커널 자료구조가 깨져 시스템이 재부팅된다
+    // (2026-08-14 실측: 100만 질량 블랙홀의 삼킴 반경 0.0066 < 128³ 한 칸 0.0078).
+    //
+    // 한 칸을 바닥으로 두면 그 자리에 쌓이기 전에 삼켜져 사라진다. 물리적으로도 옳다 —
+    // 격자 한 칸보다 작은 것은 이 시뮬레이션이 아예 구분하지 못하는 크기다.
+    const BHPack bhPack = d.packBH();
 
     kIntegrate<<<(d.allocN + 255) / 256, 256>>>(
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
-        d.bh.active ? 1 : 0, bhGM, d.bh.rs, d.bh.x, d.bh.y, 0.5f,
-        d.cfg.lightSpeedSq, d.eaten, haloV2, haloCore2,
+        bhPack, d.cfg.lightSpeedSq, d.eaten, haloV2, haloCore2,
         d.cfg.contactEnabled ? d.accContact : nullptr,
         d.cfg.spiralWaveEnabled ? d.cfg.spiralWaveStrength : 0.f,
         d.cfg.spiralWavePattern, d.cfg.spiralWavePitch, (float)d.simTime);
     CK(cudaGetLastError());
 
-    // 삼킨 만큼 지평선이 자란다.
-    if (d.bh.active) {
-        int e = 0;
-        CK(cudaMemcpy(&e, d.eaten, sizeof(int), cudaMemcpyDeviceToHost));
-        if (e > 0) {
-            d.bh.mass += (float)e;
-            d.bh.rs = d.horizonOf(d.bh.mass);
-            CK(cudaMemset(d.eaten, 0, sizeof(int)));
+    if (d.bhCount > 0) {
+        // 블랙홀이 놓인 자리의 격자 가속도를 뽑아 둔다 — 둘레 물질이 블랙홀을 끄는 힘이다.
+        // 블랙홀 수만큼만 도는 커널이라 값이 거의 안 든다.
+        kSampleAccAtBH<<<1, kMaxBlackHoles>>>(d.accG, d.allocG, d.periodic() ? 1 : 0,
+                                              bhPack, d.bhAcc);
+        CK(cudaGetLastError());
+
+        // 삼킨 만큼 무거워지고 지평선이 자란다.
+        int e[kMaxBlackHoles] = {0};
+        CK(cudaMemcpy(e, d.eaten, sizeof(int) * d.bhCount, cudaMemcpyDeviceToHost));
+        bool any = false;
+        for (int i = 0; i < d.bhCount; ++i) {
+            if (e[i] <= 0) continue;
+            d.bhs[i].mass += (float)e[i];
+            // 자라는 규칙은 setRsFrom 이 쥔다(세제곱근 — 그 자리의 주석 참조).
+            d.setRsFrom(i);
+            any = true;
         }
+        // 다음 스텝을 위해 비운다. **여기서 비워 두어야** 아래에서 블랙홀이 합쳐지며
+        // 배열이 당겨져도 남은 수가 엉뚱한 블랙홀의 것으로 섞이지 않는다.
+        if (any) CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
+
+        // 블랙홀도 중력을 받아 움직이고, 겹치면 합쳐진다.
+        d.advanceBlackHoles(dt);
     }
     d.checkCollapse();
 
@@ -1460,7 +1942,23 @@ int Sim::gridSize() const { return impl_->allocG; }
 int Sim::particleCount() const { return impl_->allocN; }
 int Sim::activeCount() const { return impl_->active; }
 int Sim::starCount() const { return 0; }
-BlackHoleState Sim::blackHole() const { return impl_->bh; }
+BlackHoleState Sim::blackHole() const { return impl_->heaviest(); }
+int Sim::blackHoleCount() const { return impl_->bhCount; }
+BlackHoleState Sim::blackHoleAt(int i) const {
+    if (i < 0 || i >= impl_->bhCount) return BlackHoleState{};
+    return impl_->bhs[i];
+}
+void Sim::clearBlackHoles() {
+    Impl& d = *impl_;
+    d.bhCount = 0;
+    for (int i = 0; i < kMaxBlackHoles; ++i) {
+        d.bhs[i] = BlackHoleState{};
+        d.bhMassAtBirth[i] = 0.f;
+        d.bhRsAtBirth[i] = 0.f;
+    }
+    if (d.eaten) CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
+    if (d.bhAcc) CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
+}
 
 double Sim::measureTotalGridMass() {
     Impl& d = *impl_;
@@ -1557,21 +2055,29 @@ bool Sim::saveState(const std::string& path) {
 
     StateHeader h{};
     memcpy(h.magic, "STARDUST", 8);
-    h.version = 1;
+    // 판 2 — 블랙홀을 여럿 담는다. 판 1 은 하나만 담았고, 그것은 아래 머리말 자리에
+    // 그대로 남겨 두어 옛 판을 읽는 쪽이 계속 동작한다.
+    h.version = 2;
     h.count = n;
     h.gridSize = d.allocG;
     h.preset = (int)d.cfg.preset;
     h.boundary = (int)d.cfg.boundary;
     h.gravity = d.cfg.gravity;
     h.simTime = (float)d.simTime;
-    h.bhX = d.bh.x; h.bhY = d.bh.y; h.bhRs = d.bh.rs; h.bhMass = d.bh.mass;
-    h.bhActive = d.bh.active ? 1 : 0;
+    {
+        const BlackHoleState top = d.heaviest();
+        h.bhX = top.x; h.bhY = top.y; h.bhRs = top.rs; h.bhMass = top.mass;
+        h.bhActive = top.active ? 1 : 0;
+    }
+    h.reserved[0] = d.bhCount;
 
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
     // 쓴 만큼과 닫기까지 확인한다 — 디스크가 모자라면 fwrite 가 적게 쓰고,
     // 버퍼에 남은 것은 fclose 에서야 실패한다. 둘 다 안 보면 깨진 파일에 성공을 돌려준다.
     bool ok = fwrite(&h, sizeof(h), 1, f) == 1
+           && (d.bhCount <= 0 ||
+               fwrite(d.bhs, sizeof(BlackHoleState), d.bhCount, f) == (size_t)d.bhCount)
            && fwrite(hp.data(), sizeof(float4), n, f) == (size_t)n
            && fwrite(hv.data(), sizeof(float4), n, f) == (size_t)n;
     ok = (fclose(f) == 0) && ok;
@@ -1586,10 +2092,32 @@ bool Sim::loadState(const std::string& path) {
     if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
     StateHeader h{};
     if (fread(&h, sizeof(h), 1, f) != 1 ||
-        memcmp(h.magic, "STARDUST", 8) != 0 || h.version != 1 ||
+        memcmp(h.magic, "STARDUST", 8) != 0 ||
+        (h.version != 1 && h.version != 2) ||
         h.count <= 0 || h.count > 100000000) {
         fclose(f);
         return false;
+    }
+
+    // 블랙홀은 알갱이보다 **먼저** 담겨 있다. 아래 reconfigure 가 판을 새로 깔면서
+    // 블랙홀을 비우므로, 읽어만 두었다가 그 뒤에 되돌린다.
+    BlackHoleState loadedBh[kMaxBlackHoles];
+    int loadedBhCount = 0;
+    if (h.version >= 2) {
+        loadedBhCount = h.reserved[0];
+        if (loadedBhCount < 0 || loadedBhCount > kMaxBlackHoles) { fclose(f); return false; }
+        if (loadedBhCount > 0 &&
+            fread(loadedBh, sizeof(BlackHoleState), loadedBhCount, f) != (size_t)loadedBhCount) {
+            fclose(f);
+            return false;
+        }
+    } else if (h.bhActive) {
+        // 판 1 은 블랙홀을 하나만 담았다. 머리말 자리에 그대로 있다.
+        loadedBh[0] = BlackHoleState{};
+        loadedBh[0].active = true;
+        loadedBh[0].x = h.bhX; loadedBh[0].y = h.bhY; loadedBh[0].z = 0.5f;
+        loadedBh[0].rs = h.bhRs; loadedBh[0].mass = h.bhMass;
+        loadedBhCount = 1;
     }
 
     // 이 카드가 감당할 수 있는 만큼만 읽는다. 파일이 요구하는 대로 잡으면
@@ -1620,8 +2148,18 @@ bool Sim::loadState(const std::string& path) {
 
     d.active = n;
     d.simTime = h.simTime;
-    d.bh.active = (h.bhActive != 0);
-    d.bh.x = h.bhX; d.bh.y = h.bhY; d.bh.rs = h.bhRs; d.bh.mass = h.bhMass;
+
+    // 담아 두었던 블랙홀을 되돌린다. 자라는 기준(bhMassAtBirth·bhRsAtBirth)은 파일에
+    // 없으므로 지금 값을 기준으로 삼는다 — 되살린 순간부터 다시 자라기 시작한다.
+    d.bhCount = loadedBhCount;
+    for (int i = 0; i < kMaxBlackHoles; ++i) {
+        d.bhs[i] = (i < loadedBhCount) ? loadedBh[i] : BlackHoleState{};
+        d.bhMassAtBirth[i] = d.bhs[i].mass;
+        d.bhRsAtBirth[i]   = d.bhs[i].rs;
+    }
+    CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
+    CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
+
     d.computeAccel();
     CK(cudaGetLastError());
     return !g_failed;
@@ -1704,13 +2242,42 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
     // 크기(반지름)가 곧 질량이다. rs = 2GM/c² 이므로 M = rs·c²/(2G) 이고, 크게 놓을수록
     // 무거운 블랙홀이 되어 둘레의 것을 더 멀리서부터 끌어당긴다.
     if (kind == ShapeKind::BlackHole) {
-        // 질량을 먼저 정하고 지평선을 거기서 낸다(위 reset 의 주석 참조).
-        // 브러시 크기가 질량을 정한다 — 크게 놓을수록 무겁다.
-        d.bh.active = true;
-        d.bh.born = false;
-        d.bh.x = cx; d.bh.y = cy;
-        d.bh.mass = fmaxf(radius, 0.01f) * 0.25f * (float)d.allocN;   // 크기 0.12 면 3%
-        d.bh.rs = fmaxf(d.horizonOf(d.bh.mass), d.cfg.blackHoleRs);
+        // **놓는 알갱이 수의 50분의 1 이 블랙홀의 질량이다.**
+        //
+        // 개수를 그대로 질량으로 쓰던 때는 기본값(15만)만으로도 판 물질의 15% 짜리 블랙홀이
+        // 생겼다. 실제 은하는 중심 블랙홀이 은하 질량의 0.1% 안팎이고, 15% 는 그보다 백 배
+        // 넘게 무겁다 — 여럿 놓으면 서로 순식간에 끌려가 합쳐지고, 둘레 알갱이는 슬링샷으로
+        // 판 밖까지 튕겨 나갔다(2026-08-14 실측: 여덟 개가 40초 만에 하나로, 질량은 판
+        // 전체의 292% 까지). 50분의 1 이면 기본값이 판의 0.3% 라 원반이 살아남는다.
+        //
+        // 지평선은 그 질량에서 낸다. 실제로는 질량에 정비례하지만(rs = 2GM/c²), 이 우주의
+        // 광속으로는 화면의 점보다 작아 보이지 않는다. 그래서 「판 전체의 2% 를 모았을 때
+        // 0.006」을 기준으로 잡고 세제곱근으로 키운다 — 선형으로 키우면 부풀린 크기까지
+        // 함께 자라 삼킬수록 커지고 커질수록 삼키는 되먹임이 생긴다(2026-08-14 실측).
+        // 지평선·자리 잡기는 addBlackHole 이 쥔다. 여덟 개까지 나란히 선다.
+        const int bi = d.addBlackHole(cx, cy, 0.5f,
+                                      (float)(count > 0 ? count : 1) / 50.0f, false);
+
+        // **둘레에 궤도를 준다 — 이게 없으면 놓자마자 전부 빨려 든다.**
+        //
+        // 여기 있던 알갱이들의 속도는 이 블랙홀이 없다는 전제로 정해진 것이라, 새 중심에
+        // 대한 각운동량이 거의 없다. 각운동량 없는 것은 궤도를 그리지 못하고 곧장 떨어진다.
+        // reset 이 블랙홀을 알갱이보다 **먼저** 세우는 것도 같은 이유인데, 마우스로 놓는
+        // 쪽은 순서를 그렇게 할 수 없으니 여기서 궤도를 만들어 준다.
+        // (자세한 규칙은 kOrbitAroundBH 의 주석에 있다.)
+        {
+            const float gm = d.cfg.gravity * d.bhs[bi].mass
+                           / (float)(d.allocN > 0 ? d.allocN : 1);
+            // 최소 안정 궤도(3rs) 안쪽은 손대지 않는다 — 거기서는 나선으로 떨어지는 것이
+            // 옳고, 그 모습이 강착원반의 안쪽 가장자리가 깎이는 장면이다.
+            const float rIn  = 3.0f * d.bhs[bi].rs;
+            // 브러시 크기가 「어디까지 돌게 할지」를 정한다. 너무 좁으면 바로 바깥이 그대로
+            // 쏟아져 들어와 결국 같은 일이 벌어지므로 최소 폭을 함께 둔다.
+            const float rOut = fmaxf(radius * 2.0f, rIn * 6.0f);
+            kOrbitAroundBH<<<(d.allocN + 255) / 256, 256>>>(
+                d.pos, d.vel, d.allocN, cx, cy, 0.5f, gm, rIn, rOut);
+            CK(cudaGetLastError());
+        }
         return 1;
     }
 
@@ -1746,11 +2313,9 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
         d.computeAccel();
         const float hv2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
         const float hc2 = d.cfg.haloCore * d.cfg.haloCore;
-        const float gm = d.bh.active
-                       ? d.cfg.gravity * d.bh.mass / (float)(d.allocN > 0 ? d.allocN : 1) : 0.f;
         kAccelMag<<<(d.allocN + 255) / 256, 256>>>(d.accG, d.pos, d.accMag, d.allocN,
                                                    d.allocG, d.periodic() ? 1 : 0, hv2, hc2,
-                                                   d.bh.active ? 1 : 0, gm, d.bh.x, d.bh.y, 0.5f);
+                                                   d.packBH());
         kSetOrbitAt<<<(n + 255) / 256, 256>>>(d.vel, d.pos, d.accMag, from, n, cx, cy);
     }
     CK(cudaGetLastError());
@@ -1774,6 +2339,29 @@ void Sim::wellAt(float cx, float cy, float radius, float strength) {
 int Sim::eraseAt(float cx, float cy, float radius) {
     Impl& d = *impl_;
     if (g_failed) return 0;
+
+    // **브러시 안의 블랙홀도 함께 지운다.**
+    //
+    // 알갱이만 지우면 블랙홀은 둘레가 비어 눈에 안 보일 뿐 그 자리에 그대로 남아 계속
+    // 끌어당긴다. 지운 줄 알았던 블랙홀이 남은 알갱이를 슬링샷으로 판 밖까지 튕겨 내
+    // 화면이 통째로 비었다(2026-08-14 보고 — 알갱이 41만에 블랙홀 질량 521만이 남아 있었다).
+    // 깊이는 보지 않는다 — 화면에서 고르므로, kEraseIn 과 같은 규칙이다.
+    for (int i = d.bhCount - 1; i >= 0; --i) {
+        const float dx = d.bhs[i].x - cx, dy = d.bhs[i].y - cy;
+        if (dx * dx + dy * dy > radius * radius) continue;
+        // 뒤를 당긴다 — 가운데를 비워 두면 번호가 어긋난다(블랙홀 배열의 불변식).
+        for (int k = i; k + 1 < d.bhCount; ++k) {
+            d.bhs[k]           = d.bhs[k + 1];
+            d.bhMassAtBirth[k] = d.bhMassAtBirth[k + 1];
+            d.bhRsAtBirth[k]   = d.bhRsAtBirth[k + 1];
+        }
+        --d.bhCount;
+        d.bhs[d.bhCount] = BlackHoleState{};
+    }
+    // 자리를 당겼으니 「삼킨 수」는 통째로 비운다. 안 비우면 남은 블랙홀이 지워진 것의
+    // 몫을 자기 질량에 얹는다.
+    if (d.eaten) CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
+
     CK(cudaMemset(d.redI, 0, sizeof(int)));
     kEraseIn<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, cx, cy, radius, d.redI);
     int erased = 0;

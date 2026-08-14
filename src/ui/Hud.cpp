@@ -6,10 +6,11 @@
 // 숫자로만 알려주면 어디서 무슨 일이 벌어지는지 볼 수 없다 — 파티클이 어느 원을 넘을 때
 // 나선으로 꺾이는지가 이 장면의 핵심이다.
 void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
-    // 처음부터 놓인 것이든 무너져 생긴 것이든 똑같이 그린다.
-    const BlackHoleState bh = app.sim.blackHole();
-    if (!bh.active || app.uiHidden || !app.showHorizon) return;
+    // 처음부터 놓인 것이든 무너져 생긴 것이든 똑같이 그린다. 판에 여럿 있으면 전부 그린다.
+    if (app.uiHidden || !app.showHorizon) return;
     if (viewW <= 0 || viewH <= 0) return;
+    const int bhN = app.sim.blackHoleCount();
+    if (bhN <= 0) return;
 
     // 시뮬 좌표 -> 화면 픽셀. 렌더 셰이더(kShade·kSplatPoints)와 같은 변환이라야 자리가 맞는다.
     const float aspect = (float)viewW / (float)viewH;
@@ -27,37 +28,47 @@ void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
         return ImVec2(u * viewW, v * viewH);
     };
 
-    const ImVec2 c = toScreen(bh.x, bh.y);
-    // 반지름은 중심에서 한 칸 옆으로 옮긴 점까지의 화면 거리로 잰다(줌·화면비가 저절로 반영된다).
-    auto radiusPx = [&](float r) {
-        const ImVec2 e = toScreen(0.5f + r, 0.5f);
-        return e.x - c.x;
-    };
-
-    const float rs = bh.rs;
-    struct Ring { float r; unsigned col; const char* label; };
-    const Ring rings[3] = {
-        { rs,        IM_COL32(230,  80,  60, 210), "지평선" },
-        { 1.5f * rs, IM_COL32(250, 190,  70, 160), "광자 구면" },
-        { 3.0f * rs, IM_COL32(120, 200, 255, 140), "최소 안정 궤도" },
-    };
-
-    // 지평선이 화면에서 몇 픽셀도 안 될 때가 많다 — 실제 블랙홀도 은하에 견주면 점 하나다.
-    // 그래도 어디에 있는지는 보여야 하므로 그릴 때만 최소 크기를 준다.
-    // 물질이 삼켜지는 반지름은 어디까지나 위의 rs 이고, 이 확대는 화면에만 쓴다.
-    const float rsPxRaw = radiusPx(rs);
-    const float scale = (rsPxRaw < 6.0f && rsPxRaw > 0.0f) ? (6.0f / rsPxRaw) : 1.0f;
+    // 반지름은 한 칸 옆으로 옮긴 점까지의 화면 거리로 잰다(줌·화면비가 저절로 반영된다).
+    // 중심이 어디든 같은 값이므로 블랙홀마다 다시 재지 않는다.
+    const float originX = toScreen(0.5f, 0.5f).x;
+    auto radiusPx = [&](float r) { return toScreen(0.5f + r, 0.5f).x - originX; };
 
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    for (const Ring& g : rings) {
-        const float px = radiusPx(g.r) * scale;
-        if (px < 2.0f || px > (float)viewW * 4.0f) continue;   // 너무 작거나 화면을 벗어나면 생략
-        dl->AddCircle(c, px, g.col, 96, 1.6f);
-        dl->AddText(ImVec2(c.x + px * 0.70f, c.y - px * 0.70f - 14.0f), g.col, g.label);
+
+    for (int i = 0; i < bhN; ++i) {
+        const BlackHoleState bh = app.sim.blackHoleAt(i);
+        if (!bh.active) continue;
+
+        const ImVec2 c = toScreen(bh.x, bh.y);
+        const float rs = bh.rs;
+
+        struct Ring { float r; unsigned col; const char* label; };
+        const Ring rings[3] = {
+            { rs,        IM_COL32(230,  80,  60, 210), "지평선" },
+            { 1.5f * rs, IM_COL32(250, 190,  70, 160), "광자 구면" },
+            { 3.0f * rs, IM_COL32(120, 200, 255, 140), "최소 안정 궤도" },
+        };
+
+        // 지평선이 화면에서 몇 픽셀도 안 될 때가 많다 — 실제 블랙홀도 은하에 견주면 점 하나다.
+        // 그래도 어디에 있는지는 보여야 하므로 그릴 때만 최소 크기를 준다.
+        // 물질이 삼켜지는 반지름은 어디까지나 위의 rs 이고, 이 확대는 화면에만 쓴다.
+        const float rsPxRaw = radiusPx(rs);
+        const float scale = (rsPxRaw < 6.0f && rsPxRaw > 0.0f) ? (6.0f / rsPxRaw) : 1.0f;
+
+        for (const Ring& g : rings) {
+            const float px = radiusPx(g.r) * scale;
+            if (px < 2.0f || px > (float)viewW * 4.0f) continue;  // 너무 작거나 화면 밖이면 생략
+            dl->AddCircle(c, px, g.col, 96, 1.6f);
+            // 이름표는 가장 무거운 것 하나에만 붙인다. 여덟 개가 저마다 세 줄씩 달면
+            // 글씨가 서로 겹쳐 아무것도 못 읽는다.
+            if (i == 0)
+                dl->AddText(ImVec2(c.x + px * 0.70f, c.y - px * 0.70f - 14.0f), g.col, g.label);
+        }
+        // 지평선 안쪽은 빛도 못 나오는 곳이라 까맣게 덮는다.
+        const float rsPx = rsPxRaw * scale;
+        if (rsPx > 2.0f && rsPx < (float)viewW)
+            dl->AddCircleFilled(c, rsPx, IM_COL32(0, 0, 0, 255), 96);
     }
-    // 지평선 안쪽은 빛도 못 나오는 곳이라 까맣게 덮는다.
-    const float rsPx = rsPxRaw * scale;
-    if (rsPx > 2.0f && rsPx < (float)viewW) dl->AddCircleFilled(c, rsPx, IM_COL32(0, 0, 0, 255), 96);
 }
 
 void DrawHud(const App& app) {

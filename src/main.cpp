@@ -10,9 +10,13 @@
 #include <cstring>
 #include <vector>
 
+#include <dbghelp.h>    // MiniDumpWriteDump — 앱이 스스로 죽을 때의 덤프
+
 #include "app/App.h"
 #include "app/ControlBridge.h"
+#include "app/Forensics.h"
 #include "app/Prefs.h"
+#include "app/Version.h"
 #include "gfx/GLContext.h"
 #include "gfx/PngWriter.h"
 #include "gfx/RenderField.h"
@@ -28,6 +32,41 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 namespace {
+
+// 앱이 **스스로** 죽을 때(접근 위반 따위) 덤프를 남긴다.
+//
+// 이 프로젝트의 큰 사고는 시스템이 통째로 재부팅되는 쪽이라 이 손은 닿지 않는다 —
+// 그건 로그의 마지막 줄로 좇아야 한다(Forensics). 여기서 잡는 것은 그보다 흔한
+// 「앱만 사라졌다」 쪽이고, 그때는 덤프 하나면 어디서 죽었는지 바로 나온다.
+LONG WINAPI OnAppCrash(EXCEPTION_POINTERS* ep) {
+    char path[1200];
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    snprintf(path, sizeof(path), "%s\\crash-%04d%02d%02d-%02d%02d%02d.dmp",
+             fx::logDir(), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei{};
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = ep;
+        mei.ClientPointers = FALSE;
+        // 지역 변수와 가리키는 곳까지 담는다. 파일이 몇십 MB 로 커지지만, 알갱이 수·격자처럼
+        // 정작 원인을 말해 주는 값이 스택에 있어서 그것을 빼면 덤프를 열 이유가 없다.
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+                          (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory |
+                                          MiniDumpScanMemory | MiniDumpWithThreadInfo),
+                          &mei, nullptr, nullptr);
+        CloseHandle(h);
+    }
+    if (ep && ep->ExceptionRecord) {
+        fx::mark("!! 앱이 죽었습니다: 예외 0x%08lX, 주소 %p — 덤프 %s",
+                 (unsigned long)ep->ExceptionRecord->ExceptionCode,
+                 ep->ExceptionRecord->ExceptionAddress, path);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 
 App*         g_app  = nullptr;
 GLContext    g_gl;
@@ -312,7 +351,13 @@ void CaptureIfAsked(App& app, int w, int h) {
 } // namespace
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
+    // **무엇보다 먼저 사고 기록을 연다.** 카드를 찾는 것조차 실패할 수 있고, 그 사실도
+    // 남아야 한다. 직전 세션이 재부팅으로 끝났으면 여기서 그 표시가 로그 맨 위에 찍힌다.
+    fx::begin(STARDUST_VERSION);
+    SetUnhandledExceptionFilter(OnAppCrash);
+
     if (!Sim::deviceAvailable()) {
+        fx::mark("CUDA 장치를 찾지 못했습니다 — 끝냅니다");
         MessageBoxW(nullptr,
                     L"CUDA 장치를 찾지 못했습니다.\nNVIDIA 그래픽카드와 드라이버가 필요합니다.",
                     L"nbody-simulator", MB_ICONERROR | MB_OK);
@@ -631,5 +676,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
     g_gl.destroy();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, hInst);
+
+    // 여기까지 왔으면 스스로 끝난 것이다. 표시를 지워 다음 실행이 「정상이었다」로 읽게 한다 —
+    // 이 줄에 닿지 못한 모든 경우(재부팅·강제종료·드라이버 리셋)가 비정상으로 남는다.
+    fx::endOk();
     return 0;
 }

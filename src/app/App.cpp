@@ -1,4 +1,5 @@
 #include "app/App.h"
+#include "app/Forensics.h"
 
 void App::init() {
     cfg.particleCount = 1000000;
@@ -38,11 +39,72 @@ void App::init() {
     int cap = (byMemory < bySpeed) ? byMemory : bySpeed;
     if (cap > 10000000) cap = 10000000;
     if (cap < 200000)   cap = 200000;
+
+    // ── 그 개수가 **부르는 격자**까지 계산에 넣는다 ────────────────────────
+    //
+    // 여기까지의 두 기준은 알갱이만 본다. 그런데 이 앱에서 한 스텝의 시간을 정하는 것은
+    // 알갱이가 아니라 **격자**다 — 푸아송을 푸는 동안 오가는 양이 한 변의 세제곱으로 늘고,
+    // 고립 경계는 거기에 여덟 배가 더 붙기 때문이다.
+    //
+    // 그리고 격자는 따로 고르는 값이 아니라 **알갱이 수가 정한다**(ApplyAutoGrid).
+    // 그래서 상한을 400만 위로 열어 두면 그 순간 격자가 256³ 으로 올라가고, 고립 경계에서
+    // 실제로 도는 것은 512³ 이 된다. 이 카드에서 그것만으로 한 스텝이 25 ms 다 —
+    // 알갱이를 하나도 안 넣어도 그렇다.
+    //
+    // **왜 그것이 재부팅으로 이어지는가.** 스텝이 이미 무거우면 남는 여유가 없다. 거기서
+    // 블랙홀을 놓아 알갱이가 한곳으로 몰리면 격자에 질량을 더하는 원자 연산이 같은 칸에
+    // 겹쳐 커널 하나가 수십 배 느려지는데, 그 배수가 드라이버 타임아웃(2초)을 넘기면
+    // 드라이버가 강제로 리셋되고 그 과정에서 시스템이 죽는다
+    // (2026-08-14 실측: 480만 · 256³ · 블랙홀 질량 100만 — 하루에 여섯 번 재부팅).
+    //
+    // 그래서 **한 프레임 예산 안에 드는 조합만 허락한다.** 예산을 60 프레임에 맞추면
+    // 정상 스텝이 4 ms 언저리가 되어, 몰림으로 백 배가 튀어도 타임아웃 전에 아래
+    // guardPerformance 가 손을 댈 수 있다.
+    {
+        constexpr double kStepBudgetMs = 16.7;   // 60 프레임
+        // 규칙을 여기에 옮겨 적지 않는다 — 실제로 그 개수를 넣어 보고 격자를 받아 온다.
+        auto gridFor = [&](int count) {
+            SimConfig probe = cfg;
+            probe.particleCount = count;
+            probe.contactEnabled = false;   // 접촉은 격자를 한 단계 더 올린다. 상한 산정에서는 뺀다
+            ApplyAutoGrid(probe);
+            return probe.gridSize;
+        };
+
+        double ms = Sim::estimateStepMs(cap, gridFor(cap), cfg.boundary);
+        if (ms > kStepBudgetMs) {
+            // 격자가 비용을 쥐고 있으므로, 한 단계 아래 격자를 부르는 개수까지 내리는 것이
+            // 가장 크게 듣는다. 이분법으로 예산에 드는 가장 큰 개수를 찾는다.
+            int lo = 200000, hi = cap;
+            while (lo < hi) {
+                const int mid = lo + (hi - lo + 1) / 2;
+                if (Sim::estimateStepMs(mid, gridFor(mid), cfg.boundary) <= kStepBudgetMs) lo = mid;
+                else hi = mid - 1;
+            }
+            cap = lo;
+        }
+    }
+    if (cap < 200000) cap = 200000;
     hardMaxParticles = cap;
     if (cfg.particleCount > hardMaxParticles) {
         cfg.particleCount = hardMaxParticles;
         ApplyAutoGrid(cfg);
     }
+
+    // 상한이 어떻게 정해졌는지 남긴다. 사고가 나면 가장 먼저 볼 줄이다 —
+    // 「이 카드에 이 개수가 맞았는가」가 여기서 판가름 나기 때문이다.
+    fx::mark("카드 %s · %s · SM %d · 대역폭 %.0f GB/s · 여유 VRAM %.0f MB",
+             Sim::deviceName().c_str(), Sim::deviceDriver().c_str(),
+             Sim::deviceMultiProcessors(), Sim::deviceBandwidthGBs(), freeB / 1048576.0);
+    fx::mark("상한 %d = min(메모리 %d, 속도 %d) 를 한 프레임 예산으로 다시 조인 값. "
+             "격자 %d, 스텝 어림 %.1f ms, VRAM 어림 %.0f MB",
+             hardMaxParticles, byMemory, bySpeed, cfg.gridSize,
+             Sim::estimateStepMs(cfg.particleCount, cfg.gridSize, cfg.boundary),
+             Sim::estimateBytes(cfg.particleCount, cfg.gridSize, cfg.boundary) / 1048576.0);
+    fx::mark("판 열기: 알갱이 %d, 격자 %d, 경계 %s, 장면 %d, 배속 %.2f",
+             cfg.particleCount, cfg.gridSize,
+             cfg.boundary == Boundary::Isolated ? "고립" : "주기",
+             (int)cfg.preset, cfg.timeScale);
 
     sim.init(cfg);
 
@@ -60,6 +122,38 @@ void App::guardPerformance() {
     constexpr float PATIENCE_MS = 4000.0f; // 이만큼 이어지면 손을 댄다
     constexpr int   COOLDOWN_FRAMES = 900; // 낮춘 뒤 약 15초는 가만히 둔다
 
+    // ── 타임아웃 직전 방어 ────────────────────────────────────────────────
+    //
+    // 아래의 감시는 「4초 동안 계속 느리면」 손을 댄다. 그런데 드라이버 타임아웃은 **2초**다 —
+    // 한 스텝이 그것을 넘으면 드라이버가 강제로 리셋되고, 그 과정에서 커널 자료구조가 깨져
+    // 시스템이 통째로 재부팅된다. 즉 아래 감시는 원리적으로 이 사고를 막을 수 없다.
+    //
+    // 그래서 **스텝 하나**를 보고, 위험선을 넘으면 그 자리에서 멈춘다. 이 값은 GPU 가 실제로
+    // 쓴 시간이다(cudaEvent 로 잰 것). 250 ms 는 타임아웃까지 여덟 배가 남는 자리라,
+    // 다음 스텝이 그보다 몇 배 더 나빠져도 아직 시간이 있다.
+    //
+    // 멈추는 것을 고른 이유: 알갱이를 줄이는 것은 수 GB 버퍼를 다시 잡는 일이라 그 자체가
+    // 위험하고(2026-08-13 첫 재부팅의 원인), 지금은 그럴 여유가 있는 상태가 아니다.
+    // 멈추면 GPU 에 아무것도 밀어 넣지 않으므로 즉시 듣는다.
+    {
+        constexpr float DANGER_STEP_MS = 250.0f;
+        const SimTimings t = sim.timings();
+        if (running && t.totalMs > DANGER_STEP_MS) {
+            running = false;
+            guardHaltedMs = t.totalMs;
+            const BlackHoleState bh = sim.blackHole();
+            // 디스크까지 미는 기록이다. 다음 스텝에서 시스템이 죽어도 이 줄은 남는다 —
+            // 그것이 이 줄의 존재 이유다.
+            fx::mark("!! 위험: 스텝 %.0f ms (타임아웃 2000 ms) — 멈춤. "
+                     "알갱이 %d/%d, 격자 %d, dt %.6g, 최고속도 %.3g, "
+                     "블랙홀 %s 질량 %.0f 지평선 %.5f",
+                     t.totalMs, sim.activeCount(), cfg.particleCount, cfg.gridSize,
+                     t.dtUsed, t.maxSpeed,
+                     bh.active ? "있음" : "없음", bh.mass, bh.rs);
+            return;
+        }
+    }
+
     if (guardCooldown > 0) { --guardCooldown; overBudgetMs = 0.0f; return; }
     if (!running || frameMs <= 0.0f) return;
 
@@ -73,6 +167,8 @@ void App::guardPerformance() {
     int lower = (int)((double)sim.particleCount() * 0.7);
     if (lower < 100000) lower = 100000;
     if (lower < cfg.particleCount) {
+        fx::mark("버거워서 낮춤: %d → %d (프레임 %.1f ms 가 %.0f ms 넘게 이어짐)",
+                 cfg.particleCount, lower, frameMs, PATIENCE_MS);
         cfg.particleCount = lower;
         ApplyAutoGrid(cfg);
         guardCappedTo = lower;
@@ -94,7 +190,27 @@ void App::tick() {
     // 팽창·시간 배속·정렬 주기가 전부 화면에서만 바뀌고 계산에는 안 갔다(round-06 리뷰 P1 #1).
     // 표시를 빠뜨릴 수 있는 구조 자체를 없애고, 재할당이 필요한지는 코어가 판단하게 둔다
     // (Sim::reconfigure 는 파티클 수·격자·경계가 바뀔 때만 버퍼를 다시 잡는다).
-    sim.reconfigure(cfg);
+    //
+    // **다만 판을 다시 깔아야 하는 셋(알갱이 수·격자·경계)은 여기로 흘려보내지 않는다.**
+    //
+    // 그 셋은 슬라이더를 끄는 내내 매 프레임 값이 바뀐다. 그대로 넘기면 지나치는 값마다
+    // 수백 MB 를 해제하고 다시 잡는데, 그것이 이 프로젝트에서 그래픽 드라이버를 무너뜨린
+    // 첫 번째 원인이었다(2026-08-13). 「다시 깔기를 물어보는 중」이라는 표시는 화면에만
+    // 있었고 실제 적용은 여기서 매 프레임 일어나고 있었다 — 2026-08-14 사고 기록에
+    // 0.21초 동안 다섯 번 다시 잡은 것이 그대로 찍혀 있다.
+    //
+    // 물어보는 중에는 코어가 지금 쓰고 있는 값을 그대로 돌려주어 구조를 건드리지 않게 하고,
+    // 나머지 값(중력·압력·배속 따위)은 평소처럼 즉시 반영한다. 실제 적용은 사용자가
+    // 「다시 깔고 적용」을 누를 때 applyConfig() 가 한 번만 한다.
+    {
+        SimConfig live = cfg;
+        if (needsRestart) {
+            live.particleCount = sim.particleCount();
+            live.gridSize      = sim.gridSize();
+            live.boundary      = sim.config().boundary;
+        }
+        sim.reconfigure(live);
+    }
 
     stepsLastFrame = 0;
     if (stepOnce) {                 // "한 스텝" 은 배속과 무관하게 정확히 한 번이다
@@ -135,6 +251,33 @@ void App::tick() {
 
     // 카드가 힘겨워하면 스스로 짐을 던다.
     guardPerformance();
+
+    // ── 사고 기록에 남기는 상태 ───────────────────────────────────────────
+    //
+    // 시스템이 통째로 죽는 사고에서는 종료 코드도 예외도 남지 않는다. 남는 것은 죽기 전에
+    // **디스크까지 닿은** 줄뿐이다. 그래서 두 가지를 적는다.
+    //   · 몇 초에 한 줄 — 평소 상태(느려지는 흐름을 뒤에서 읽을 수 있게)
+    //   · 갑자기 나빠진 순간 — 주기와 무관하게, 디스크까지
+    {
+        const SimTimings t = sim.timings();
+        const bool spike = (t.totalMs > 80.0f) && (t.totalMs > fxLastStepMs * 2.0f);
+        if (--fxTimer <= 0 || spike) {
+            fxTimer = 300;   // 60 프레임이면 5초에 한 줄
+            const BlackHoleState bh = sim.blackHole();
+            const char* how = spike ? "!! 갑자기 무거워짐" : "상태";
+            // 튀는 순간만 디스크까지 민다. 평소 줄까지 밀면 5초마다 수 ms 를 버린다.
+            auto put = spike ? &fx::mark : &fx::line;
+            put("%s: 스텝 %.1f ms (뿌리기 %.1f 푸아송 %.1f 거두기 %.1f 정렬 %.1f), "
+                "프레임 %.1f ms, 알갱이 %d/%d, dt %.6g, 최고속도 %.3g, "
+                "블랙홀 %s 질량 %.0f 지평선 %.5f, 여유 VRAM %.0f MB",
+                how, t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.sortMs,
+                frameMs, sim.activeCount(), cfg.particleCount,
+                t.dtUsed, t.maxSpeed,
+                bh.active ? "있음" : "없음", bh.mass, bh.rs,
+                Sim::deviceFreeBytes() / 1048576.0);
+        }
+        fxLastStepMs = t.totalMs;
+    }
 }
 
 void App::screenToSim(int px, int py, int viewW, int viewH, float& u, float& v) const {
@@ -160,6 +303,12 @@ void App::applyToolAt(float u, float v, bool firstClick) {
         case Tool::AddShape:
             // 형태는 누를 때 한 번만 넣는다. 드래그로 계속 쏟아지면 순식간에 슬롯이 바닥난다.
             if (firstClick) {
+                // 놓는 순간을 디스크까지 남긴다. 시스템이 죽는 사고는 거의 언제나 무언가를
+                // 놓은 **직후**에 났다 — 그 한 줄이 있어야 「무엇을 놓았을 때인가」를 안다.
+                fx::mark("놓기: 모양 %d, 개수 %d, 크기 %.3f, 자리 (%.3f, %.3f) — "
+                         "지금 알갱이 %d, 격자 %d",
+                         (int)brush.shapeKind, brush.shapeCount, brush.shapeRadius, u, v,
+                         sim.activeCount(), cfg.gridSize);
                 sim.addShape(u, v, brush.shapeKind, brush.shapeRadius,
                              brush.shapeCount, brush.autoOrbit);
                 // 한 번 놓았으면 화면 옮기기로 돌아간다.

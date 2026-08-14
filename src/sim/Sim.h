@@ -111,7 +111,10 @@ struct SimConfig {
     float gamma                = 1.6f;
 
     bool  temperatureEnabled   = true;
-    bool  coolingEnabled       = false;
+    // 기본으로 켠다. 이것이 꺼져 있으면 **아무것도 뭉치지 않는다** — 중력으로 모이면
+    // 그 자리가 데워져 도로 흩어지기만 한다. 켜면 같은 알갱이 100만이 18분의 1 넓이로
+    // 모여 나선과 덩어리를 만든다(2026-08-14 실측: 최대밀도 6771 → 94483, 스텝 6.8 ms).
+    bool  coolingEnabled       = true;
     float coolingRate          = 0.25f;
     bool  starFormationEnabled = false;
     float starDensityThreshold = 70.0f;   // 이 밀도를 넘고
@@ -194,11 +197,22 @@ enum class ShapeKind {
 // 지금 판에 있는 블랙홀. 없으면 active 가 false 다.
 struct BlackHoleState {
     bool  active = false;
-    float x = 0.5f, y = 0.5f;  // 0~1 정규화 좌표
+    float x = 0.5f, y = 0.5f, z = 0.5f;  // 0~1 정규화 좌표
+    // **블랙홀도 중력을 받아 움직인다.** 질량이 있으니 당연한데, 오래 고정이었다.
+    // 여럿을 놓을 수 있게 되면서 이것이 중요해졌다 — 둘이 서로를 돌다 합쳐지는 것이
+    // 이 장면에서 가장 볼 만한 일이고, 고정된 점 둘로는 그 일이 일어나지 않는다.
+    float vx = 0.f, vy = 0.f, vz = 0.f;
     float mass = 0.f;          // 삼킨 알갱이 수(전체 대비 비율이 아니라 개수)
     float rs = 0.f;            // 지평선 반지름 — 질량에서 나온다
     bool  born = false;        // 이번 판에서 무너져 생긴 것인가(처음부터 있던 것이 아니라)
 };
+
+// 한 판에 둘 수 있는 블랙홀 수.
+//
+// **상한이 있어야 한다.** 적분 커널이 알갱이마다 이 수만큼 도므로 비용이 정비례한다 —
+// 알갱이 400만이면 한 스텝에 3200만 번이다. 여덟은 눈으로 구분되는 만큼이면서
+// 그 곱이 아직 가벼운 자리다(이 프로젝트에서 상한 없는 반복은 카드를 죽인다).
+constexpr int kMaxBlackHoles = 8;
 
 // 한 스텝의 단계별 소요 시간(ms). 설정 보드 「성능」 섹션이 그대로 표시한다.
 struct SimTimings {
@@ -239,6 +253,17 @@ public:
     static size_t      estimateBytes(int particleCount, int gridSize, Boundary boundary);
     // 가용 VRAM 안에 들어가는 최대 파티클 수. 요청이 넘치면 이 값으로 잘라 쓴다.
     static int         maxParticlesFor(int gridSize, Boundary boundary, size_t freeBytes);
+
+    // 이 카드의 메모리 대역폭(GB/s). 감당할 수 있는 격자를 어림하는 데 쓴다. 못 읽으면 0.
+    static double      deviceBandwidthGBs();
+
+    // 이 조합으로 한 스텝을 도는 데 드는 시간(ms) 어림.
+    //
+    // **메모리만으로 상한을 정하면 안 된다.** VRAM 에는 들어가지만 한 스텝이 몇백 ms 걸리는
+    // 조합이 있고, 그 상태에서 알갱이가 한곳에 몰리면 커널 하나가 드라이버 타임아웃(2초)을
+    // 넘겨 시스템이 재부팅된다(2026-08-14 실측: 480만 알갱이 + 256³ 격자 + 블랙홀).
+    // 상한을 정하는 쪽은 메모리와 이 값을 **둘 다** 봐야 한다.
+    static double      estimateStepMs(int particleCount, int gridSize, Boundary boundary);
 
     void init(const SimConfig& cfg);
     // 파티클 수·격자 해상도가 바뀌면 버퍼를 다시 잡고 초기조건을 새로 만든다.
@@ -313,8 +338,18 @@ public:
     // 별이 된 파티클 수. 별 형성이 꺼져 있으면 0.
     int  starCount() const;
 
-    // 지금 판에 있는 블랙홀. 화면에 지평선을 그리고 상태를 알리는 데 쓴다.
+    // 지금 판에 있는 블랙홀 가운데 **가장 무거운 것**.
+    //
+    // 오래 「판에 하나」였던 자리라 부르는 곳이 많다(하단 막대·재는 창·제어 채널).
+    // 여럿이 된 뒤에도 그 자리들이 알고 싶은 것은 대개 「지금 제일 큰 것」이므로 그대로 둔다.
+    // 전부가 필요한 곳(그리기)은 아래 둘을 쓴다.
     BlackHoleState blackHole() const;
+    // 지금 판에 있는 블랙홀 수(0 ~ kMaxBlackHoles).
+    int            blackHoleCount() const;
+    // i 번째 블랙홀. 범위를 벗어나면 active 가 false 인 것을 돌려준다.
+    BlackHoleState blackHoleAt(int i) const;
+    // 전부 지운다. 삼킨 알갱이가 돌아오지는 않는다.
+    void           clearBlackHoles();
 
     // 화면에 색을 입힐 때 무엇을 기준으로 삼을지.
     // Dispersion 은 속도 분산 — 은하에서 「온도」에 해당한다.

@@ -26,8 +26,12 @@ find_package(CUDAToolkit REQUIRED)
 # Core 층 — 순수 계산. Win32·OpenGL·ImGui 를 전혀 참조하지 않는다.
 #          그래서 창 없이 콘솔 테스트로 검증할 수 있다.
 # ---------------------------------------------------------------------------
+# Forensics 는 Core 층에 둔다. 사고를 설명하는 값(커널 시간·재할당·삼킨 수)은 코어가
+# 쥐고 있어서, 여기 없으면 정작 필요한 줄을 코어가 못 적는다. Win32 를 쓰지 않는
+# 순수 CRT 구현이라 이 층의 규칙(창 없이 콘솔로 돌린다)을 깨지 않는다.
 add_library(nbody_sim STATIC
   src/sim/Sim.cu
+  src/app/Forensics.cpp
 )
 target_include_directories(nbody_sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(nbody_sim PUBLIC CUDA::cufft CUDA::cudart)
@@ -97,6 +101,7 @@ target_link_libraries(nbody PRIVATE
   opengl32
   dwmapi
   winhttp      # 자동 업데이트가 배포 저장소를 확인하는 데 쓴다
+  dbghelp      # 앱이 스스로 죽을 때 덤프를 남긴다(MiniDumpWriteDump)
 )
 
 # 배포하는 이름으로 낸다. 자동 업데이트 스크립트가 이 이름으로 프로세스가 끝나기를 기다리므로
