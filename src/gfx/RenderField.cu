@@ -58,9 +58,21 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
 
     uchar4 px = make_uchar4(0, 0, 0, 255);
     if (u >= 0.f && u < 1.f && v >= 0.f && v < 1.f) {
-        int gx = min(max((int)(u * G), 0), G - 1);
-        int gy = min(max((int)(v * G), 0), G - 1);
-        float d = rho[gy * G + gx];
+        // 네 칸을 섞어 읽는다.
+        //
+        // 확대하면 격자 한 칸이 화면의 여러 픽셀을 덮는다. 가장 가까운 칸 하나만 읽으면
+        // 그 칸 크기의 네모가 그대로 드러나 화면이 계단으로 보인다 — 확대할수록 심해진다.
+        // 이웃 네 칸을 거리로 섞으면 같은 격자로도 매끄럽게 이어진다.
+        const float gfx = u * G - 0.5f, gfy = v * G - 0.5f;
+        int x0 = (int)floorf(gfx), y0 = (int)floorf(gfy);
+        const float tx = gfx - x0, ty = gfy - y0;
+        int x1 = x0 + 1, y1 = y0 + 1;
+        x0 = min(max(x0, 0), G - 1); x1 = min(max(x1, 0), G - 1);
+        y0 = min(max(y0, 0), G - 1); y1 = min(max(y1, 0), G - 1);
+        const float d = rho[y0 * G + x0] * (1.f - tx) * (1.f - ty)
+                      + rho[y0 * G + x1] * tx * (1.f - ty)
+                      + rho[y1 * G + x0] * (1.f - tx) * ty
+                      + rho[y1 * G + x1] * tx * ty;
         // 밀도는 범위가 매우 넓어(빈 곳 0, 중심 수천) 로그로 눌러야 구조가 보인다.
         float t = __powf(fminf(fmaxf(__logf(1.f + d * bright) * 0.30f, 0.f), 1.f), invGamma);
         float3 c = (cmapKind == 2) ? cmapThermal(t)
@@ -117,26 +129,47 @@ __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* 
                             : cmapAstro(t);
     }
 
-    // 알갱이 하나를 몇 픽셀로 찍을지. 1.2 px 이면 한 점, 그보다 크면 둘레도 함께 물들인다.
-    // 반지름을 픽셀 수로 쓰는 대신 정수 칸으로 끊는 이유는, 한 알에 수십 픽셀을 칠하면
-    // 3000만 알에서 그리기가 계산보다 무거워지기 때문이다 — 최대 2칸(5×5)까지만 번진다.
-    const int rad = (sizePx <= 1.5f) ? 0 : (sizePx <= 3.5f ? 1 : 2);
-    if (rad == 0) {
+    // 알갱이 하나를 몇 픽셀로 찍을지.
+    //
+    // 확대할수록 키운다. 멀리서 볼 때는 한 알이 한 점이라 은하 전체의 모양이 보이고,
+    // 다가가면 알 하나하나가 부드러운 원반으로 커져 또렷해진다. 배율을 그대로 곱하면
+    // 조금만 확대해도 화면이 뭉개지므로 제곱근으로 눌러 천천히 자라게 하고,
+    // 위로 여섯 배까지만 키운다 — 한 알에 수백 픽셀을 칠하면 그리기가 계산보다 무거워진다.
+    const float grow = fminf(sqrtf(fmaxf(zoom, 1.0f)), 6.0f);
+    const float rr = sizePx * grow * 0.5f;          // 알의 반지름(픽셀)
+    const int rad = min((int)rr, 12);
+    if (rad <= 0) {
         float3* px = &accum[y * W + x];
         atomicAdd(&px->x, c.x);
         atomicAdd(&px->y, c.y);
         atomicAdd(&px->z, c.z);
         return;
     }
-    // 가운데가 가장 밝고 가장자리로 갈수록 옅어지게 나눈다. 균일하게 칠하면 알이 네모로 보인다.
-    const float inv = 1.0f / ((2 * rad + 1) * (2 * rad + 1));
+
+    // 가운데가 가장 밝고 가장자리로 갈수록 사그라드는 종 모양으로 퍼뜨린다.
+    // 균일하게 칠하면 알이 네모로 보이고, 딱 잘라 끝내면 테두리가 생긴다.
+    //
+    // 퍼뜨린 값을 다 더하면 1 이 되게 나눠 준다. 안 그러면 확대할 때마다 같은 알갱이가
+    // 더 많은 픽셀에 같은 밝기로 쌓여 화면이 통째로 하얗게 탄다.
+    const float sigma2 = 0.5f * rr * rr;
+    float sum = 0.0f;
+    for (int dy = -rad; dy <= rad; ++dy)
+        for (int dx = -rad; dx <= rad; ++dx) {
+            const float d2 = (float)(dx * dx + dy * dy);
+            if (d2 <= rr * rr) sum += __expf(-d2 / sigma2);
+        }
+    if (sum <= 0.0f) sum = 1.0f;
+    const float norm = 1.0f / sum;
+
     for (int dy = -rad; dy <= rad; ++dy) {
         const int yy = y + dy;
         if (yy < 0 || yy >= H) continue;
         for (int dx = -rad; dx <= rad; ++dx) {
             const int xx = x + dx;
             if (xx < 0 || xx >= W) continue;
-            const float fall = (dx == 0 && dy == 0) ? 1.0f : inv;
+            const float d2 = (float)(dx * dx + dy * dy);
+            if (d2 > rr * rr) continue;
+            const float fall = __expf(-d2 / sigma2) * norm;
             float3* px = &accum[yy * W + xx];
             atomicAdd(&px->x, c.x * fall);
             atomicAdd(&px->y, c.y * fall);
@@ -151,12 +184,27 @@ __global__ void kClearAccum(float3* a, int n) {
 }
 
 // 누적값을 화면 색으로 바꾼다. 겹친 수가 넓은 범위를 가지므로 로그로 눌러야 다 보인다.
+//
+// useCmap 을 켜면 쌓인 양을 그대로 색 배열에 통과시킨다. 확대해서 격자 대신 알갱이를
+// 그리게 됐을 때 쓴다 — 격자 쪽은 밀도에 따라 남색에서 주황을 거쳐 흰색으로 가는데
+// 점 쪽이 한 가지 색이면 넘어가는 순간 화면 색이 통째로 바뀐 것처럼 보인다.
 __global__ void kAccumToRGBA(const float3* accum, uchar4* out, int n,
-                             float bright, float invGamma) {
+                             float bright, float invGamma, int useCmap, int cmapKind) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float3 a = accum[i];
     float lum = (a.x + a.y + a.z) * 0.3333f;
+
+    if (useCmap) {
+        const float t = __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma);
+        const float3 c = (cmapKind == 2) ? cmapThermal(t)
+                       : (cmapKind == 1) ? make_float3(t, t, t)
+                                         : cmapAstro(t);
+        out[i] = make_uchar4((unsigned char)(c.x * 255.f), (unsigned char)(c.y * 255.f),
+                             (unsigned char)(c.z * 255.f), 255);
+        return;
+    }
+
     float s = (lum > 1e-6f) ? __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma) / lum
                             : 0.f;
     float r = fminf(a.x * s, 1.f), g = fminf(a.y * s, 1.f), b = fminf(a.z * s, 1.f);
@@ -218,9 +266,23 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     const int cmapKind = (view.cmap == ColorMap::Thermal) ? 2
                        : (view.cmap == ColorMap::Gray)    ? 1 : 0;
 
+    // 다가가면 격자 대신 알갱이를 직접 그린다.
+    //
+    // 밀도 격자는 칸 단위다. 한 칸이 화면에서 여러 픽셀을 덮을 만큼 확대하면 그 칸 모양이
+    // 그대로 얼룩으로 드러난다 — 네 칸을 섞어 매끄럽게 이어도 마찬가지다. 격자에 없는
+    // 정보를 만들어 낼 수는 없기 때문이다. 알갱이는 격자보다 훨씬 촘촘하므로 그때부터는
+    // 알갱이를 찍는 편이 실제로 더 선명하다.
+    //
+    // 넘어가는 선은 「한 칸이 화면에서 두 픽셀보다 커질 때」다. 그보다 작으면 칸이 픽셀에
+    // 묻혀 안 보이고, 그때는 격자 쪽이 더 매끄럽고 훨씬 싸다.
+    const float shortSide = (float)(viewW < viewH ? viewW : viewH);
+    const int   gridG     = app.sim.gridSize();
+    const float cellPx    = (gridG > 0) ? shortSide * app.zoom / (float)gridG : 0.0f;
+    const bool  usePoints = (view.mode == RenderMode::Points) || (cellPx > 2.0f);
+
     // 점 렌더는 누적 버퍼가 따로 필요하다. 화면 버퍼만 있고 누적 버퍼가 없으면 밀도 필드로 내려간다.
     if (!devPixels_) { if (hostPixels_) memset(hostPixels_, 0, devBytes_); }
-    else if (view.mode == RenderMode::Points && devAccum_) {
+    else if (usePoints && devAccum_) {
         // 파티클 점 — 겹칠수록 밝아지도록 누적한 뒤 한 번에 색으로 바꾼다.
         const int n = app.sim.activeCount();
         kClearAccum<<<(npix + 255) / 256, 256>>>((float3*)devAccum_, npix);
@@ -232,9 +294,20 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
                 app.zoom, app.panX, app.panY, app.ui.pointSizePx);
         }
+        // 격자에서 알갱이로 저절로 넘어갈 때 화면이 갑자기 어두워지지 않게 밝기를 맞춘다.
+        //
+        // 격자 쪽은 평균 밀도로 나눠 「평균의 몇 배인가」로 그린다(아래 밀도 필드 가지 참조).
+        // 점 쪽은 쌓인 값을 그대로 쓰므로, 자동으로 넘어온 경우에는 같은 배수를 곱해 줘야
+        // 넘어가는 순간에 밝기가 이어진다. 사용자가 직접 점 모드를 고른 경우는 건드리지 않는다.
+        const bool autoPoints = (view.mode != RenderMode::Points);
+        const float meanRho = (gridG > 0) ? (float)app.sim.particleCount() / (float)(gridG * gridG)
+                                          : 1.0f;
+        const float pointBright = autoPoints ? view.brightness / fmaxf(meanRho, 1e-6f)
+                                             : view.brightness;
         kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
                                                   (uchar4*)devPixels_, npix,
-                                                  view.brightness, 1.0f / view.gamma);
+                                                  pointBright, 1.0f / view.gamma,
+                                                  autoPoints ? 1 : 0, cmapKind);
         // 복사가 실패하면 hostPixels_ 는 이전 프레임 그대로다 — 그걸 새 화면인 양 올리면
         // 사용자는 시뮬레이션이 도는 줄 안다. 실패하면 검은 화면으로 두어 이상을 드러낸다
         // (round-08 리뷰 A11).

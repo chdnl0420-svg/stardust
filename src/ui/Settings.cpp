@@ -85,8 +85,11 @@ void Line() {
 // 여러 줄이 이어질 때 값들이 세로로 맞아떨어지게 한다 — 어긋나면 표가 아니라 목록이 된다.
 //
 // 위치는 0~1 로만 주고받으므로 선형이든 로그든 정수든 같은 그림을 쓴다.
+// enabled 가 false 면 흐리게 그리고 끌리지 않는다.
+// 시안에는 있으나 아직 만들지 않은 값들이 그렇다 — 자리를 지우면 무엇이 빠졌는지 알 수 없고,
+// 만질 수 있게 두면 만졌는데 아무 일도 안 일어난다. 둘 다 아닌 자리가 「보이지만 못 만짐」이다.
 bool Track(const char* id, const char* label, const char* valueText, float* t,
-           float labelW = 146.0f, float valueW = 88.0f) {
+           bool enabled = true, float labelW = 146.0f, float valueW = 88.0f) {
     ImGui::PushID(id);
     const float total = ImGui::GetContentRegionAvail().x;
     const float trackW = total - labelW - valueW - 20.0f;
@@ -94,8 +97,8 @@ bool Track(const char* id, const char* label, const char* valueText, float* t,
     const float rowH = 26.0f;
 
     ImGui::InvisibleButton("##hit", ImVec2(total, rowH));
-    const bool act = ImGui::IsItemActive();
-    const bool hov = ImGui::IsItemHovered();
+    const bool act = ImGui::IsItemActive() && enabled;
+    const bool hov = ImGui::IsItemHovered() && enabled;
 
     bool changed = false;
     if (act) {
@@ -108,38 +111,43 @@ bool Track(const char* id, const char* label, const char* valueText, float* t,
     const float cy = p.y + rowH * 0.5f;
     const ImVec2 lsz = ImGui::CalcTextSize(label);
     const ImVec2 vsz = ImGui::CalcTextSize(valueText);
-    dl->AddText(ImVec2(p.x, cy - lsz.y * 0.5f), kInkDim, label);
+    dl->AddText(ImVec2(p.x, cy - lsz.y * 0.5f), enabled ? kInkDim : kInkGhost, label);
 
     const float x0 = p.x + labelW, x1 = x0 + trackW;
     const float gx = x0 + trackW * Clampf(*t, 0.0f, 1.0f);
     dl->AddLine(ImVec2(x0, cy), ImVec2(x1, cy), kTrack, 3.0f);
-    dl->AddLine(ImVec2(x0, cy), ImVec2(gx, cy), kAccent, 3.0f);
-    dl->AddCircleFilled(ImVec2(gx, cy), (hov || act) ? 7.5f : 6.0f, kInk);
+    if (enabled) {
+        dl->AddLine(ImVec2(x0, cy), ImVec2(gx, cy), kAccent, 3.0f);
+        dl->AddCircleFilled(ImVec2(gx, cy), (hov || act) ? 7.5f : 6.0f, kInk);
+    } else {
+        dl->AddLine(ImVec2(x0, cy), ImVec2(gx, cy), IM_COL32(255, 255, 255, 46), 3.0f);
+        dl->AddCircleFilled(ImVec2(gx, cy), 6.0f, IM_COL32(255, 255, 255, 71));
+    }
 
-    dl->AddText(ImVec2(p.x + total - vsz.x, cy - vsz.y * 0.5f), kInk, valueText);
+    dl->AddText(ImVec2(p.x + total - vsz.x, cy - vsz.y * 0.5f), enabled ? kInk : kInkGhost, valueText);
     ImGui::PopID();
     return changed;
 }
 
 bool SliderLine(const char* id, const char* label, float* v, float lo, float hi,
-                const char* fmt, bool log = false) {
+                const char* fmt, bool log = false, bool enabled = true) {
     char val[48]; snprintf(val, sizeof(val), fmt, *v);
     const float c = Clampf(*v, lo, hi);
     float t = log ? (logf(c / lo) / logf(hi / lo)) : ((c - lo) / (hi - lo));
-    const bool moved = Track(id, label, val, &t);
+    const bool moved = Track(id, label, val, &t, enabled);
     // 만지지 않았으면 되돌려 쓰지 않는다 — 왕복 변환만으로 값이 깎이는 것을 막는다.
     if (moved) *v = log ? lo * expf(logf(hi / lo) * t) : lo + (hi - lo) * t;
     return moved;
 }
 
 bool SliderLineInt(const char* id, const char* label, int* v, int lo, int hi,
-                   const char* fmt, bool log = false) {
+                   const char* fmt, bool log = false, bool enabled = true) {
     char val[48]; snprintf(val, sizeof(val), fmt, *v);
     const float flo = (float)lo, fhi = (float)hi;
     const float c = Clampf((float)*v, flo, fhi);
     float t = (hi <= lo) ? 0.0f
             : (log ? (logf(c / flo) / logf(fhi / flo)) : ((c - flo) / (fhi - flo)));
-    const bool moved = Track(id, label, val, &t);
+    const bool moved = Track(id, label, val, &t, enabled);
     if (moved) {
         const float nv = log ? flo * expf(logf(fhi / flo) * t) : flo + (fhi - flo) * t;
         *v = (int)(nv + 0.5f);
@@ -233,16 +241,20 @@ bool Toggle(const char* id, const char* title, const char* desc, bool* v, bool e
 }
 
 // 채운 버튼 / 테두리 버튼.
-bool Btn(const char* id, const char* label, bool filled, float w = 0.0f) {
+bool Btn(const char* id, const char* label, bool filled, float w = 0.0f, bool enabled = true) {
     ImGui::PushID(id);
     const ImVec2 tsz = ImGui::CalcTextSize(label);
     const float bw = (w > 0.0f) ? w : tsz.x + 34.0f;
     const float bh = 36.0f;
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    const bool pressed = ImGui::InvisibleButton("##b", ImVec2(bw, bh));
-    const bool hov = ImGui::IsItemHovered();
+    const bool pressed = ImGui::InvisibleButton("##b", ImVec2(bw, bh)) && enabled;
+    const bool hov = ImGui::IsItemHovered() && enabled;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    if (filled) {
+    if (!enabled) {
+        dl->AddRectFilled(p, ImVec2(p.x + bw, p.y + bh), IM_COL32(255, 255, 255, 10), 9.0f);
+        dl->AddRect(p, ImVec2(p.x + bw, p.y + bh), IM_COL32(255, 255, 255, 15), 9.0f);
+        dl->AddText(ImVec2(p.x + (bw - tsz.x) * 0.5f, p.y + (bh - tsz.y) * 0.5f), kInkGhost, label);
+    } else if (filled) {
         dl->AddRectFilled(p, ImVec2(p.x + bw, p.y + bh),
                           hov ? IM_COL32(255, 196, 138, 255) : kAccent, 9.0f);
         dl->AddText(ImVec2(p.x + (bw - tsz.x) * 0.5f, p.y + (bh - tsz.y) * 0.5f),
@@ -323,10 +335,11 @@ void TabGravity(App& app) {
     SliderLine("dt", "한 칸의 크기", &app.cfg.timeScale, 0.1f, 10.0f, "%.3f", true);
     ImGui::Dummy(ImVec2(1.0f, 6.0f));
 
+    // 아래 둘은 코어를 손봐야 하는 자리라 아직 만들지 않았다. 자리만 둔다.
     Toggle("substep", "위험하면 자동으로 잘게 쪼개기",
-           "가까이 붙은 알갱이가 튀어 날아가는 것을 막는다", &app.ui.autoSubstep);
+           "가까이 붙은 알갱이가 튀어 날아가는 것을 막는다", &app.ui.autoSubstep, false);
     Toggle("drift", "에너지 새는 정도 보기",
-           "계산이 얼마나 정확한지 숫자로 감시한다", &app.ui.showEnergyDrift);
+           "계산이 얼마나 정확한지 숫자로 감시한다", &app.ui.showEnergyDrift, false);
 
     Line();
     GroupLabel("알갱이끼리");
@@ -354,18 +367,19 @@ void TabBounds(App& app) {
         app.cfg.boundary = (edge == 0) ? Boundary::Isolated : Boundary::Periodic;
     UnderNote("\"반대편에서 나옴\"은 우주 거미줄처럼 끝없이 이어진 우주를 볼 때 쓴다.");
 
-    SliderLine("box", "우주 상자 크기", &app.ui.boxSizeKpc, 10.0f, 1000.0f, "%.0f kpc", true);
+    SliderLine("box", "우주 상자 크기", &app.ui.boxSizeKpc, 10.0f, 1000.0f, "%.0f kpc", true, false);
 
     int cull = app.ui.cullFarAway ? 1 : 0;
     const char* culls[2] = { "그대로 둔다", "지운다" };
-    if (Segmented("cull", culls, 2, &cull, nullptr, 146.0f, "너무 멀어진 알갱이"))
+    const bool canCull[2] = { true, false };
+    if (Segmented("cull", culls, 2, &cull, canCull, 146.0f, "너무 멀어진 알갱이"))
         app.ui.cullFarAway = (cull == 1);
 
     Line();
     Toggle("com", "무게중심을 화면 가운데에 붙여두기",
            "은하가 화면 밖으로 흘러가지 않는다", &app.ui.keepCenterOfMass);
     Toggle("mom", "새로 놓을 때 전체 운동량 0 으로 맞추기",
-           "우주 전체가 한쪽으로 표류하는 것을 막는다", &app.ui.zeroMomentum);
+           "우주 전체가 한쪽으로 표류하는 것을 막는다", &app.ui.zeroMomentum, false);
 }
 
 void TabLook(App& app) {
@@ -397,7 +411,8 @@ void TabLook(App& app) {
 
     Line();
     SliderLine("psize", "알갱이 크기", &app.ui.pointSizePx, 0.5f, 6.0f, "%.1f px");
-    SliderLine("trail", "덧그림 남는 시간", &app.ui.trailSeconds, 0.0f, 3.0f, "%.1f 초");
+    UnderNote("확대할수록 이 크기에서 더 커지고 또렷해진다.");
+    SliderLine("trail", "덧그림 남는 시간", &app.ui.trailSeconds, 0.0f, 3.0f, "%.1f 초", false, false);
 
     int bg = app.ui.background;
     const char* bgs[2] = { "순수 검정", "아주 옅은 보라" };
@@ -405,7 +420,7 @@ void TabLook(App& app) {
 
     Line();
     Toggle("grid", "계산 격자 겹쳐 보기", nullptr, &app.ui.showGridOverlay);
-    Toggle("trails", "무거운 천체의 지나온 길 그리기", nullptr, &app.ui.showBodyTrails);
+    Toggle("trails", "무거운 천체의 지나온 길 그리기", nullptr, &app.ui.showBodyTrails, false);
     Toggle("horizon", "블랙홀 경계 그리기",
            "지평선\xC2\xB7광자 구면\xC2\xB7최소 안정 궤도를 원으로 얹는다", &app.showHorizon);
 }
@@ -473,7 +488,7 @@ void TabInput(App& app) {
     Line();
     Toggle("winv", "휠 방향 뒤집기", nullptr, &app.ui.wheelInverted);
     Toggle("bleft", "막대를 왼쪽 끝에 붙이기",
-           "왼손잡이 배치 \xE2\x80\x94 저장\xC2\xB7녹화가 왼쪽으로 간다", &app.ui.barOnLeft);
+           "왼손잡이 배치 \xE2\x80\x94 저장\xC2\xB7녹화가 왼쪽으로 간다", &app.ui.barOnLeft, false);
 
     Line();
     GroupLabel("단축키");
@@ -515,9 +530,11 @@ void TabSave(App& app) {
     int fmt = app.ui.imageFormat;
     const char* fmts[2] = { "PNG", "JPG" };
     if (Segmented("ifmt", fmts, 2, &fmt, nullptr, 146.0f, "이미지")) app.ui.imageFormat = fmt;
+    // 화면보다 크게 찍으려면 큰 프레임버퍼에 한 번 더 그려야 한다. 아직 없다.
     int sc = app.ui.imageScale;
     const char* scs[3] = { "1\xC3\x97", "2\xC3\x97", "4\xC3\x97" };
-    if (Segmented("iscale", scs, 3, &sc, nullptr, 146.0f, "크게 찍기")) app.ui.imageScale = sc;
+    const bool canScale[3] = { true, false, false };
+    if (Segmented("iscale", scs, 3, &sc, canScale, 146.0f, "크게 찍기")) app.ui.imageScale = sc;
 
     Line();
     // MP4 는 인코더가 필요해 아직 없다. PNG 연속만 실제로 돈다.
@@ -538,11 +555,11 @@ void TabSave(App& app) {
 
     Line();
     GroupLabel("우주 상태");
-    if (Btn("save", "지금 상태 저장", false, 168.0f)) app.saveStateRequested = true;
+    if (Btn("save", "지금 상태 저장", false, 168.0f, false)) app.saveStateRequested = true;
     ImGui::SameLine();
-    if (Btn("load", "불러오기", false, 168.0f)) app.loadStateRequested = true;
+    if (Btn("load", "불러오기", false, 168.0f, false)) app.loadStateRequested = true;
     ImGui::Dummy(ImVec2(1.0f, 8.0f));
-    UnderNote("100만 알 기준 한 파일 약 24 MB \xE2\x80\x94 장면 서랍의 \"불러오기\"에서도 열 수 있다.");
+    UnderNote("아직 없다 \xE2\x80\x94 100만 알 기준 한 파일이 약 24 MB 가 된다.");
 }
 
 } // namespace
