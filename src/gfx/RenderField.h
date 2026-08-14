@@ -39,5 +39,10 @@ private:
     void*    devSmooth_ = nullptr;
     int      smoothCells_ = 0;              // 잡아 둔 칸 수(줄어들 때는 다시 잡지 않는다)
     bool     smoothPrimed_ = false;         // 첫 프레임은 섞을 앞 그림이 없다
+    // 밝기 기준 — 값이 있는 칸의 평균. 뭉치면 판 대부분이 비므로 「알갱이 수 ÷ 칸 수」로는
+    // 화면이 새까매진다. 매 프레임 재되 급변하지 않게 천천히 따라가게 한다.
+    void*    devStat_ = nullptr;            // float 합 + int 개수
+    float    liveMean_ = 0.0f;
+    int      statTick_ = 0;                 // 몇 프레임에 한 번만 잰다(아래 참조)
     void ensureSize(int w, int h);
 };

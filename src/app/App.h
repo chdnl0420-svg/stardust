@@ -27,7 +27,11 @@ struct ViewSettings {
     ColorBy    colorBy = ColorBy::Density;
     ColorMap   cmap    = ColorMap::Astro;
     float      brightness = 2.0f;   // 1.0 은 바깥쪽 구조가 안 보일 만큼 어둡다(실측)
-    float      gamma      = 1.8f;
+    // 감마는 어두운 쪽을 얼마나 들어 올릴지를 정한다. 1.8 로 두었더니 식히기가 들어와
+    // 뭉치기 시작한 뒤로 판의 대부분이 평균의 100분의 1 아래로 내려가 새까매졌다
+    // (그 밀도에서 화면값 0.058). 3.0 이면 같은 자리가 0.20 으로 살아나 필라멘트와
+    // 시트가 보인다 — 밝은 쪽은 어차피 포화라 달라지지 않는다(2026-08-14 실측).
+    float      gamma      = 3.0f;
     bool       showHud    = true;
 };
 

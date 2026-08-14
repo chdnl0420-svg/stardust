@@ -37,6 +37,24 @@ __device__ __forceinline__ float3 cmapThermal(float t) {
     return make_float3(r, g, b);
 }
 
+// 값이 있는 칸의 합과 개수를 센다 — 밝기를 실제 분포에 맞추기 위한 것.
+//
+// 밝기 기준을 오래 「알갱이 수 ÷ 격자 칸 수」로 잡았는데, 그것은 알갱이가 판 전체에
+// 고르게 퍼져 있다는 가정이다. 식히기가 들어가면서 그 가정이 깨졌다 — 209만 칸 중
+// 9천 칸(0.4%)에만 몰리니, 가정 평균으로 나누면 뭉친 자리는 포화되고 나머지는 평균의
+// 100분의 1 아래로 떨어져 새까맣게 된다. 밝기 슬라이더를 끝까지 올려도 이 대비는
+// 그대로다(2026-08-14 실측: 알갱이 399만이 격자 안에 다 있는데 화면이 검었다).
+//
+// 비용: 화면 격자 칸 수만큼(128² 이면 1만 6천). 알갱이 수와 무관하다.
+__global__ void kSumNonZero(const float* g, int n, float* sum, int* cnt) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float v = g[i];
+    if (v <= 0.f) return;
+    atomicAdd(sum, v);
+    atomicAdd(cnt, 1);
+}
+
 // 앞 프레임의 격자에 이번 것을 조금씩 섞는다(a=1 이면 그대로 갈아탄다).
 //
 // 격자는 128칸인데 화면은 1600픽셀이라 한 칸이 12픽셀로 늘어난다. 거기에 뭉친 자리는
@@ -265,7 +283,8 @@ void RenderField::shutdown() {
     if (devPixels_)  { cudaFree(devPixels_); devPixels_ = nullptr; devBytes_ = 0; }
     if (devAccum_)   { cudaFree(devAccum_);  devAccum_  = nullptr; }
     if (devSmooth_)  { cudaFree(devSmooth_); devSmooth_ = nullptr; }
-    smoothCells_ = 0; smoothPrimed_ = false;
+    if (devStat_)    { cudaFree(devStat_);   devStat_   = nullptr; }
+    smoothCells_ = 0; smoothPrimed_ = false; liveMean_ = 0.f;
 }
 
 void RenderField::ensureSize(int w, int h) {
@@ -405,8 +424,39 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             //
             // 온도·속도는 밀도로 가중평균한 값이라 개수와 무관하다. 대신 값의 범위가 0~1 로 좁아
             // 로그 압축이 과하므로 그 자리에서 배율을 올린다.
+            // **밝기 기준을 실제로 차 있는 칸에서 낸다.**
+            //
+            // meanRho(= 알갱이 수 ÷ 칸 수)는 고르게 퍼졌을 때만 맞는 값이라, 뭉치고 나면
+            // 화면이 통째로 검어진다. 값이 있는 칸의 평균으로 나누면 퍼져 있든 뭉쳐 있든
+            // 「그 자리가 이웃보다 얼마나 진한가」로 그려져 구조가 늘 보인다.
+            // 급변하면 화면이 출렁이므로 열 프레임에 걸쳐 따라가게 한다.
+            float norm = meanRho;
+            if (f == Sim::Field::Density && grid && gridG > 0) {
+                // **열다섯 프레임에 한 번만 잰다.**
+                //
+                // 재려면 결과를 호스트로 가져와야 하는데, 그 복사가 GPU 파이프라인을 세운다.
+                // 매 프레임 하도록 두었더니 알갱이 399만에서 스텝이 8.7 → 13.8 ms 로 뛰어
+                // 예산(16.7) 코앞까지 갔다(2026-08-14 실측). 밝기 기준은 장면이 서서히
+                // 바뀌는 것을 따라가면 되는 값이라 0.25초에 한 번으로 충분하다.
+                if ((statTick_++ % 15) == 0) {
+                    const int cells = gridG * gridG;
+                    if (!devStat_) cudaMalloc(&devStat_, sizeof(float) + sizeof(int));
+                    if (devStat_) {
+                        cudaMemset(devStat_, 0, sizeof(float) + sizeof(int));
+                        kSumNonZero<<<(cells + 255) / 256, 256>>>(
+                            grid, cells, (float*)devStat_, (int*)((char*)devStat_ + sizeof(float)));
+                        struct { float sum; int cnt; } st{};
+                        if (cudaMemcpy(&st, devStat_, sizeof(st), cudaMemcpyDeviceToHost) == cudaSuccess
+                            && st.cnt > 0) {
+                            const float m = st.sum / (float)st.cnt;
+                            liveMean_ = (liveMean_ > 0.f) ? (liveMean_ + (m - liveMean_) * 0.3f) : m;
+                        }
+                    }
+                }
+                if (liveMean_ > 1e-6f) norm = liveMean_;
+            }
             const float bright = (f == Sim::Field::Density)
-                               ? view.brightness / fmaxf(meanRho, 1e-6f)
+                               ? view.brightness / fmaxf(norm, 1e-6f)
                                : view.brightness * 60.0f;
             if (grid) {
                 dim3 b(16, 16), g((viewW + 15) / 16, (viewH + 15) / 16);
