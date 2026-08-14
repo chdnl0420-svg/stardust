@@ -902,16 +902,31 @@ constexpr int MAX_SHARDS = 4096;
 // 부서진 천체를 가스 파티클로 되돌린다.
 // 파편은 천체 속도에 바깥으로 튀는 속도를 얹어 흩어진다 — 그래야 그 자리에서 다시 뭉치지 않고
 // 퍼졌다가 나중에 새 씨앗으로 모인다.
+//
+// 파편은 **먹혀서 비어 있는 자리에만** 놓는다. 자리가 모자라면 그 파편은 만들지 않는다.
+// 전에는 자리가 떨어지면 링 버퍼 커서로 넘어갔는데, 그 커서가 부호 있는 정수라 오래 돌리면
+// 음수로 넘어가고 `% cap` 도 음수가 되어 배열 앞쪽 밖으로 썼다. 3000만 개에서는 한 스텝에
+// 파편이 수백만 개까지 나와 몇 초면 그 지점에 닿는다 —
+// 2026-08-14 시스템 재부팅(BugCheck 0x139 LIST_ENTRY 손상, 3분 전 nvlddmkm Event 153).
+// 자리 목록으로 묶으면 스텝당 파편이 목록 크기 이하로 제한돼 그 폭주 자체가 없어진다.
 __global__ void kShatter(const float2* bPos, const float2* bVel, const float* bMass,
                          const int* bState,
                          float2* pos, float2* vel, float* temp, unsigned char* isStar,
-                         const int* freeSlots, int* freeCount,
-                         int cap, int* ringCur, float cell, float grabCells, unsigned seed) {
+                         const int* freeSlots, int* freeCount, int freeCap,
+                         int cap, float cell, float grabCells, unsigned seed) {
     const int b = blockIdx.y;
     if (bState[b] != BODY_SHATTER) return;
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     const int m = (int)bMass[b];
     if (k >= m || k >= MAX_SHARDS) return;
+
+    // 되돌릴 자리를 먼저 잡는다. 없으면 이 파편은 사라진다(질량은 그만큼 줄어든다).
+    const int fs = atomicSub(freeCount, 1) - 1;
+    if (fs < 0 || fs >= freeCap) return;
+    const int slot = freeSlots[fs];
+    // 목록에 담긴 값도 한 번 더 본다. 여기서 범위를 벗어난 값 하나가 그대로 쓰기로 이어지면
+    // 디바이스 메모리가 조용히 망가지고, 드러날 때는 이미 드라이버가 넘어간 뒤다.
+    if (slot < 0 || slot >= cap) return;
 
     const float2 bp = bPos[b], bv = bVel[b];
     const float  R  = bodyRadiusOf(bMass[b], cell, grabCells);
@@ -922,10 +937,6 @@ __global__ void kShatter(const float2* bPos, const float2* bVel, const float* bM
     const float r  = R * (0.3f + 0.7f * sqrtf(u1));
     // 튀는 속도는 그 천체의 탈출속도 언저리로 준다 — 부서졌다는 것은 그만큼 뿌리쳤다는 뜻이다.
     const float spread = R * 12.0f * (0.5f + u3);
-
-    // 먹혀서 비어 있는 자리를 먼저 쓰고, 다 썼으면 링 버퍼로 넘어간다.
-    const int fs = atomicSub(freeCount, 1) - 1;
-    const int slot = (fs >= 0) ? freeSlots[fs] : (atomicAdd(ringCur, 1) % cap);
 
     pos[slot]  = make_float2(bp.x + r * cosf(th), bp.y + r * sinf(th));
     vel[slot]  = make_float2(bv.x + cosf(th) * spread, bv.y + sinf(th) * spread);
@@ -1103,7 +1114,6 @@ struct Sim::Impl {
     int    *bodyCell = nullptr;    // G×G — 각 칸을 차지한 천체 번호(-1 이면 없음)
     int    *bCounters = nullptr;   // [0] 먹힌 파티클 · [1] 합체 · [2] 파괴 · [3] 화면 복사 개수
     float  *bPack = nullptr;       // 화면용 (x, y, 질량, 반지름, 등급) × MAX_BODIES
-    int    *shardCursor = nullptr; // 파편을 뿌릴 파티클 슬롯 커서(빈 자리 목록이 떨어졌을 때)
     // 먹혀서 비워진 파티클 자리 목록. 천체가 부서지면 파편을 여기에 되돌린다.
     int    *freeSlots = nullptr, *freeCount = nullptr;
     int    freeCap = 0;
@@ -1114,7 +1124,14 @@ struct Sim::Impl {
     // 죽은 슬롯이 이만큼 쌓이면 살아 있는 파티클을 앞으로 모은다.
     // 매 스텝 모으면 1000만 개를 통째로 복사하느라 프레임 예산을 넘고, 아예 안 모으면
     // 활성 개수 표시가 실제보다 커지고 링 커서가 살아 있는 파티클을 덮는다.
-    static constexpr int COMPACT_THRESHOLD = 200000;
+    //
+    // 고정값으로 두면 파티클이 많을수록 압축이 자주 돈다 — 3000만에서 20만은 0.7% 라
+    // 몇 프레임마다 3000만 개를 통째로 다시 모으게 되고, 그 한 프레임이 수백 ms 로 튄다.
+    // 전체의 5% 로 잡으면 압축 간격이 개수와 무관하게 일정해진다.
+    int compactThreshold() const {
+        const int byRatio = allocN / 20;
+        return (byRatio > 200000) ? byRatio : 200000;
+    }
 
     int  stride() const { return (cfg.boundary == Boundary::Isolated) ? allocG * 2 : allocG; }
     int  padCells() const { int s = stride(); return s * s; }
@@ -1169,10 +1186,10 @@ void Sim::Impl::releaseParticles() {
     isStar = nullptr; isStar2 = nullptr; starCnt = nullptr; starN = 0;
     cudaFree(bPos); cudaFree(bVel); cudaFree(bMom); cudaFree(bMass); cudaFree(bGain);
     cudaFree(bState); cudaFree(bMergeTo); cudaFree(bNum); cudaFree(bCounters);
-    cudaFree(bPack); cudaFree(shardCursor);
+    cudaFree(bPack);
     cudaFree(freeSlots); cudaFree(freeCount);
     bPos = bVel = bMom = nullptr; bMass = bGain = nullptr; bPack = nullptr;
-    bState = bMergeTo = bNum = bCounters = shardCursor = nullptr;
+    bState = bMergeTo = bNum = bCounters = nullptr;
     freeSlots = freeCount = nullptr; freeCap = 0;
     hostBNum = 0; eatenPending = 0; bstats = BodyStats{};
     pos = vel = pos2 = vel2 = nullptr; temp = temp2 = nullptr;
@@ -1301,7 +1318,6 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&bPack,  sizeof(float)  * MAX_BODIES * 5));
     CK(cudaMalloc(&bNum,   sizeof(int)));
     CK(cudaMalloc(&bCounters, sizeof(int) * 4));
-    CK(cudaMalloc(&shardCursor, sizeof(int)));
     CK(cudaMalloc(&bodyCell, sizeof(int) * allocG * allocG));
     // 빈 자리 목록은 파티클 수만큼 잡을 필요가 없다 — 한 스텝에 부서질 수 있는 양의 몇 배면
     // 충분하고, 넘치는 만큼은 그냥 기록하지 않는다(다음 압축이 정리한다).
@@ -1403,7 +1419,6 @@ void Sim::Impl::clearBodies() {
     CK(cudaMemset(bGain, 0, sizeof(float)  * MAX_BODIES));
     CK(cudaMemset(bNum,      0, sizeof(int)));
     CK(cudaMemset(bCounters, 0, sizeof(int) * 4));
-    CK(cudaMemset(shardCursor, 0, sizeof(int)));
     CK(cudaMemset(freeCount,   0, sizeof(int)));
     hostBNum = 0;
     eatenPending = 0;
@@ -1458,7 +1473,7 @@ void Sim::Impl::stepBodies(float dt) {
         {
             dim3 g(MAX_SHARDS / BS, num);
             kShatter<<<g, BS>>>(bPos, bVel, bMass, bState, pos, vel, temp, isStar,
-                                freeSlots, freeCount, allocN, shardCursor, cell, grab,
+                                freeSlots, freeCount, freeCap, allocN, cell, grab,
                                 (unsigned)(steps * 2654435761u + 12345u));
         }
         kClampCount<<<1, 1>>>(freeCount, freeCap);
@@ -1824,7 +1839,7 @@ void Sim::step() {
     //       흡수가 파티클을 지우므로, 지워진 것을 그대로 적분해 봐야 헛일이다.
     if (d->cfg.bodiesEnabled) {
         d->stepBodies(dtUse);
-        if (d->eatenPending >= Impl::COMPACT_THRESHOLD) d->compactParticles();
+        if (d->eatenPending >= d->compactThreshold()) d->compactParticles();
     }
 
     for (int s = 0; s < sub; ++s) {

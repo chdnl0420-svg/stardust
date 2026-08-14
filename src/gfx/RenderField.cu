@@ -213,9 +213,21 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                            : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
                                                                     : Sim::Field::Density;
         const float* grid = app.sim.fieldDevicePtr(f);
-        // 온도·속도는 값 범위가 밀도와 달라 로그 압축이 과하다. 밝기를 그 자리에서 보정한다.
-        const float bright = (f == Sim::Field::Density) ? view.brightness
-                                                        : view.brightness * 60.0f;
+
+        // 밀도는 파티클 수에 그대로 비례한다 — 같은 배치라도 3000만 개는 100만 개의 30배다.
+        // 원시값을 그대로 넣으면 개수를 올리는 순간 판 전체가 순백으로 타 버린다
+        // (실측 2026-08-14: 3000만에서 평균 밀도만 28.6, 포화선은 13.5).
+        // 평균 밀도로 나눠 「평균의 몇 배인가」로 그리면 개수를 바꿔도 같은 그림이 나온다.
+        //
+        // 나누는 기준은 살아 있는 수가 아니라 **설정된 최대 개수**다. 살아 있는 수로 나누면
+        // 천체가 가스를 먹어 줄어들 때 남은 가스가 오히려 밝아진다 — 줄면 어두워지는 것이 맞다.
+        const int   G       = app.sim.gridSize();
+        const float meanRho = (float)app.sim.particleCount() / (float)(G * G);
+        // 온도·속도는 밀도로 가중평균한 값이라 개수와 무관하다. 대신 값의 범위가 0~1 로 좁아
+        // 로그 압축이 과하므로 그 자리에서 배율을 올린다.
+        const float bright = (f == Sim::Field::Density)
+                           ? view.brightness / fmaxf(meanRho, 1e-6f)
+                           : view.brightness * 60.0f;
         if (grid) {
             dim3 b(16, 16), g((viewW + 15) / 16, (viewH + 15) / 16);
             kShade<<<g, b>>>(grid, app.sim.gridSize(), (uchar4*)devPixels_, viewW, viewH,

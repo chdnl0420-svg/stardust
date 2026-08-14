@@ -16,7 +16,13 @@ void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
         float v = (sy - 0.5f + app.panY) * app.zoom + 0.5f;
         if (aspect > 1.0f) u = (u - 0.5f) / aspect + 0.5f;
         else               v = (v - 0.5f) * aspect + 0.5f;
-        return ImVec2(u * viewW, (1.0f - v) * viewH);
+        // 세로를 여기서 뒤집지 않는다. 밀도 격자를 화면에 붙이는 쿼드가 텍스처 (0,0) 을
+        // 화면 왼쪽 **아래**에 두고(glVertex2f(-1,-1)), 격자를 담을 때 행을 (1-v)·H 로 이미
+        // 한 번 뒤집는다 — 두 번 뒤집으면 제자리로 돌아온다. 마우스 입력(screenToSim)도
+        // 화면 위를 v=0 으로 읽으므로 같은 방향이다.
+        // 뒤집힌 채로 두면 천체가 가스와 아래위 반대편에 그려진다(2026-08-14 실측).
+        // 블랙홀 원은 중심 대칭이라 같은 버그를 갖고도 멀쩡해 보였다.
+        return ImVec2(u * viewW, v * viewH);
     };
 
     const ImVec2 c = toScreen(0.5f, 0.5f);
@@ -60,7 +66,13 @@ void DrawBodies(const App& app, int viewW, int viewH) {
         float v = (sy - 0.5f + app.panY) * app.zoom + 0.5f;
         if (aspect > 1.0f) u = (u - 0.5f) / aspect + 0.5f;
         else               v = (v - 0.5f) * aspect + 0.5f;
-        return ImVec2(u * viewW, (1.0f - v) * viewH);
+        // 세로를 여기서 뒤집지 않는다. 밀도 격자를 화면에 붙이는 쿼드가 텍스처 (0,0) 을
+        // 화면 왼쪽 **아래**에 두고(glVertex2f(-1,-1)), 격자를 담을 때 행을 (1-v)·H 로 이미
+        // 한 번 뒤집는다 — 두 번 뒤집으면 제자리로 돌아온다. 마우스 입력(screenToSim)도
+        // 화면 위를 v=0 으로 읽으므로 같은 방향이다.
+        // 뒤집힌 채로 두면 천체가 가스와 아래위 반대편에 그려진다(2026-08-14 실측).
+        // 블랙홀 원은 중심 대칭이라 같은 버그를 갖고도 멀쩡해 보였다.
+        return ImVec2(u * viewW, v * viewH);
     };
     // 화면 반지름 환산 배율. 중심에서 한 칸 옆으로 옮긴 점까지의 거리로 잰다.
     const ImVec2 o0 = toScreen(0.0f, 0.5f), o1 = toScreen(1.0f, 0.5f);

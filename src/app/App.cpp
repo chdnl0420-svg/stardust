@@ -103,9 +103,25 @@ void ApplyLook(App& app) {
         app.view.colorBy = ColorBy::Temperature;
         app.view.cmap    = ColorMap::Thermal;
         app.cfg.temperatureEnabled = true;   // 온도를 안 재면 보여줄 값이 없다
+        app.view.brightness = app.brightTemp;
+        app.view.gamma      = app.gammaTemp;
     } else {
         app.view.colorBy = ColorBy::Density;
         app.view.cmap    = ColorMap::Astro;
+        app.view.brightness = app.brightDensity;
+        app.view.gamma      = app.gammaDensity;
+    }
+}
+
+void RememberLook(App& app) {
+    // 슬라이더로 방금 맞춘 값을 지금 보고 있는 쪽에 담아 둔다. 이게 없으면 밀도↔온도를
+    // 오갈 때마다 ApplyLook 이 예전 값으로 되돌려 방금 맞춘 것이 사라진다.
+    if (app.look == App::Look::Temperature) {
+        app.brightTemp = app.view.brightness;
+        app.gammaTemp  = app.view.gamma;
+    } else {
+        app.brightDensity = app.view.brightness;
+        app.gammaDensity  = app.view.gamma;
     }
 }
 

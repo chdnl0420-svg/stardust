@@ -76,6 +76,11 @@ struct App {
     enum class Look { Density, Temperature };
     Look  look = Look::Density;
 
+    // 밀도와 온도는 값의 범위가 달라 보기 좋은 밝기·세기가 서로 다르다.
+    // 하나를 공유하면 전환할 때마다 다시 맞춰야 하므로 각자 기억한다.
+    float brightDensity = 2.0f, brightTemp = 2.0f;
+    float gammaDensity  = 1.8f, gammaTemp  = 1.8f;
+
     // 「점으로 그리기」 체크박스. view.mode 와 짝인데, 체크박스가 bool 을 직접 받아야 해서 따로 둔다.
     bool  pointsMode = false;
 
@@ -108,3 +113,6 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset);
 // 「보기」에서 고른 표현 방식에 맞춰 색과 온도 설정을 함께 맞춘다.
 // 사용자가 만지는 것은 밀도/온도 둘 중 하나뿐이고, 컬러맵·색 기준·온도 추적은 여기서 정한다.
 void ApplyLook(App& app);
+
+// 밝기·세기 슬라이더를 만진 직후에 부른다. 지금 보고 있는 쪽(밀도 또는 온도)에 그 값을 담아 둔다.
+void RememberLook(App& app);

@@ -46,6 +46,28 @@ bool CountRow(const char* id, int* valueMan, int minMan, int maxMan, int* dragCa
     return committed;
 }
 
+// 넓은 범위를 눈금 0~100 으로 다루는 슬라이더.
+//
+// ImGui 의 로그 슬라이더(ImGuiSliderFlags_Logarithmic)에 실수 값을 직접 물리면
+// 값→위치→값 왕복에서 생기는 부동소수 오차가 프레임마다 쌓여, 손도 안 댔는데 값이
+// 저절로 깎인다(2026-08-14 실측: 밝기가 25초 만에 2.0 에서 0.29 로 내려가 화면이 캄캄해졌다).
+// 정수 눈금을 사이에 두면 왕복이 반올림으로 닫혀 그 누적이 생기지 않는다.
+bool LogRow(const char* id, float* value, float lo, float hi, const char* fmt) {
+    const float span = logf(hi / lo);
+    int notch = (int)(100.0f * logf(*value / lo) / span + 0.5f);
+    if (notch < 0) notch = 0;
+    if (notch > 100) notch = 100;
+
+    char label[48];
+    snprintf(label, sizeof(label), fmt, *value);
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::PushID(id);
+    const bool moved = ImGui::SliderInt("##v", &notch, 0, 100, label);
+    ImGui::PopID();
+    if (moved) *value = lo * expf(span * (float)notch / 100.0f);
+    return moved;
+}
+
 void Title(const char* text) {
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.68f, 0.78f, 1.0f));
@@ -162,6 +184,13 @@ void DrawBoard(App& app, bool& boardOpen) {
     if (ImGui::Button("온도", ImVec2(half, 0))) { app.look = App::Look::Temperature; ApplyLook(app); }
     Help("얼마나 뜨거운지를 색으로 보여줍니다. 부딪히는 자리가 달아오릅니다.");
     if (!isDensity) ImGui::PopStyleColor();
+
+    // 밝기·세기는 밀도와 온도가 각자 기억한다. 슬라이더를 만지면 지금 보고 있는 쪽에 담긴다.
+    if (LogRow("bright", &app.view.brightness, 0.05f, 20.0f, "밝기 %.2f")) RememberLook(app);
+    Help("화면이 하얗게 타면 내리고, 너무 어두우면 올립니다.\n"
+         "밀도와 온도는 각자 따로 기억합니다.");
+    if (LogRow("gam", &app.view.gamma, 0.4f, 4.0f, "희미한 것 %.2f")) RememberLook(app);
+    Help("올리면 옅은 것까지 드러나고, 내리면 진한 곳만 남아 또렷해집니다.");
 
     // ---------------- 녹화 ----------------
     Title("녹화");
