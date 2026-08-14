@@ -203,11 +203,15 @@ void ApplyAutoGrid(SimConfig& cfg) {
 }
 
 bool ContactFitsCount(int particleCount, int gridSize) {
-    // 알갱이 반지름은 격자 칸의 절반이다. 그 원들이 판의 60% 를 넘게 채우면
+    // 알갱이 반지름은 격자 칸의 절반이다. 그 공들이 판의 40% 를 넘게 채우면
     // 서로 밀어내기만 하다 판이 굳어 버리므로 그 선에서 접촉을 끈다.
-    //   N · π · (0.5/G)² ≤ 0.6   →   N ≤ 0.764 · G²
+    //
+    // **3D 라 넓이가 아니라 부피로 센다.**
+    //   N · (4/3)π · (0.5/G)³ ≤ 0.4   →   N ≤ 0.764 · G³
+    // 2D 공식(G²)을 그대로 두었더니 128 격자에서 상한이 1만 2천이라, 100만 알에서
+    // 접촉을 아예 켤 수 없었다(2026-08-14 실측). 실제 상한은 160만이다.
     const double g = (double)(gridSize > 0 ? gridSize : 1);
-    return (double)particleCount <= 0.764 * g * g;
+    return (double)particleCount <= 0.764 * g * g * g;
 }
 
 void ApplyLook(App& app) {

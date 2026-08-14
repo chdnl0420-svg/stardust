@@ -127,18 +127,29 @@ __device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s
     if (r > R * 1.6f) r = R * 1.6f;                  // 아주 먼 꼬리는 자른다
     r = fmaxf(r, R * 0.015f);
 
-    const float tanI = 0.325f;                       // tan(18°)
+    // 감김각. 작을수록 촘촘히 감긴다. 22°(0.40)로 벌렸더니 팔이 거의 안 감겨 막대처럼
+    // 보였다(2026-08-14 실측) — 16° 로 조여 두 팔이 확실히 한 바퀴 이상 돌게 한다.
+    const float tanI = 0.29f;
     const float psi = __logf(r / (R * 0.06f)) / tanI;
 
     const float th0 = u2 * 6.2831853f;
-    // 팔의 진하기. 1 에 가까울수록 팔과 그 사이의 대비가 크다.
-    // 안쪽은 팽대부가 덮으므로 팔이 시작되는 자리부터 진해지고, 아주 바깥에서 다시 흐려진다.
-    // 팔이 가장 진한 반지름을 바깥으로 옮긴다 — 안쪽은 팽대부가 덮어 팔이 보이지 않는다.
-    // A 는 1 을 넘으면 안 된다. 변환의 야코비안이 1 - A·cos 이라, 1 이 되는 순간 각이
-    // 접혀 알갱이가 한 줄에 겹쳐 쌓인다.
+    // 팔을 뾰족하게 만든다.
+    //
+    // 각을 -(A/2)·sin(2Δ) 만큼 당기면 밀도가 1 + A·cos(2Δ) 가 된다(변환의 야코비안).
+    // 그런데 코사인 하나로는 팔이 완만한 언덕이라, A 를 상한까지 올려도 팔과 그 사이의
+    // 경계가 흐리다. 두 배 빠른 항을 함께 당기면 밀도에 cos(4Δ) 가 더해져 마루가 좁아지고
+    // 골이 넓어진다 — 실제 은하의 팔이 그렇게 생겼다(좁은 띠와 넓은 빈 공간).
+    //
+    // 제약은 야코비안 1 - A·cos(2Δ) - B·cos(4Δ) 가 0 보다 커야 한다는 것이다. 둘이 함께
+    // 최대가 되는 자리에서 A + B 가 1 을 넘으면 각이 접혀 알갱이가 한 줄에 겹쳐 쌓인다.
+    //
+    // 팔이 가장 진한 반지름은 바깥으로 둔다 — 안쪽은 팽대부가 덮어 어차피 안 보인다.
     const float rn = r / R;
-    const float A = 0.94f * __expf(-(rn - 0.55f) * (rn - 0.55f) / 0.42f);
-    const float th = th0 - (A * 0.5f) * __sinf(2.0f * (th0 - psi));
+    const float env = __expf(-(rn - 0.55f) * (rn - 0.55f) / 0.42f);
+    const float A = 0.62f * env;
+    const float B = 0.30f * env;                     // A + B <= 0.92 — 접히지 않는 선
+    const float dd = 2.0f * (th0 - psi);
+    const float th = th0 - (A * 0.5f) * __sinf(dd) - (B * 0.25f) * __sinf(2.0f * dd);
 
     const float sigma = thickness * (0.6f + 0.9f * r / R);
     const float z = rndNormal(s ^ 0x2545F491u) * sigma;
@@ -187,13 +198,32 @@ __global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
             const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
             x = cx + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
         }
-    } else if (preset == 2) {                    // 우주 거미줄 — 공간 전체에 고르게 + 잔물결
+    } else if (preset == 2) {                    // 우주 거미줄 — 고르게 깔고 씨앗을 심는다
         x = u1; y = u2; z = u3;
-        // 아주 작은 요동을 얹는다. 완전히 고르면 중력이 자랄 씨앗이 없다.
-        const float k = 6.2831853f * 4.0f;
-        x += 0.010f * __sinf(k * u2 + 1.3f);
-        y += 0.010f * __sinf(k * u3 + 2.1f);
-        z += 0.010f * __sinf(k * u1 + 0.7f);
+
+        // **알갱이를 밀어 밀도 요동을 만든다.**
+        //
+        // 균등하게 뿌린 위에 작은 사인파를 더하는 것만으로는 밀도가 거의 균등해서 아무것도
+        // 자라지 않는다(2026-08-14 실측: 판이 끝까지 밋밋했다). 실제 우주론 계산이 쓰는
+        // 방법은 알갱이를 **위치에 따라 밀어내는** 것이다 — 미는 양이 자리마다 다르면
+        // 밀려 온 곳은 빽빽해지고 밀려 나간 곳은 성겨진다. 그것이 중력이 자랄 씨앗이 된다.
+        //
+        // 파장을 셋 겹쳐 한 방향으로만 줄무늬가 지지 않게 한다.
+        // 미는 양이 크면 그만큼 처음부터 뚜렷한 벽과 빈 공간이 생긴다. 0.055 로는 판이
+        // 끝까지 밋밋했다 — 실제 우주론 계산도 처음 요동이 너무 작으면 구조가 자라는 데
+        // 우주 나이만큼이 걸린다. 눈으로 볼 시간 안에 자라도록 크게 준다.
+        const float tau = 6.2831853f;
+        float dx = 0.f, dy = 0.f, dz = 0.f;
+        for (int m = 0; m < 3; ++m) {
+            const float k = tau * (2.0f + (float)m * 2.0f);   // 파장 넷·여섯·여덟 조각
+            const float amp = 0.16f / (1.0f + (float)m);      // 긴 파장이 더 크다
+            dx += amp * __sinf(k * (y + 0.13f * (float)m)) * __cosf(k * (z + 0.29f));
+            dy += amp * __sinf(k * (z + 0.19f * (float)m)) * __cosf(k * (x + 0.37f));
+            dz += amp * __sinf(k * (x + 0.23f * (float)m)) * __cosf(k * (y + 0.11f));
+        }
+        x += dx; y += dy; z += dz;
+        // 판 밖으로 밀려 나간 것은 반대편으로 감는다 — 이 장면은 주기 경계를 쓴다.
+        x -= floorf(x); y -= floorf(y); z -= floorf(z);
     } else {                                     // 빈 판
         pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
         vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -1229,10 +1259,19 @@ void Sim::reset() {
     if (d.cfg.preset == Preset::BlackHole || d.cfg.blackHoleEnabled) {
         d.bh.active = true;
         d.bh.x = 0.5f; d.bh.y = 0.5f;
-        d.bh.rs = d.cfg.blackHoleRs;
-        // rs = 2GM/c² 의 역 — 지평선 크기 하나가 질량까지 정한다.
-        d.bh.mass = d.bh.rs * d.cfg.lightSpeedSq / (2.0f * fmaxf(d.cfg.gravity, 1e-6f))
-                  * (float)d.allocN;
+
+        // **질량을 먼저 정하고 지평선을 거기서 낸다.** 반대로 하면 안 된다.
+        //
+        // 지평선 크기(0.006)에서 질량을 역산하면 rs·c²/(2G) = 1.5 — 판의 모든 알갱이를
+        // 합친 것의 1.5배다. 은하보다 무거우니 원반이 통째로 곧장 빨려 들었다
+        // (2026-08-14 실측). 실제 은하의 중심 블랙홀은 은하 질량의 0.1% 안팎이다.
+        //
+        // 여기서는 2% 로 둔다. 0.1% 로 하면 물리적으로는 옳지만 원반이 블랙홀을 거의
+        // 못 느껴 「블랙홀 장면」이라는 이름이 무색해진다. 2% 면 안쪽이 눈에 띄게 감기면서도
+        // 원반은 살아남아, 회전하며 빨려 드는 모습이 보인다.
+        d.bh.mass = 0.02f * (float)d.allocN;
+        // 그 질량의 지평선은 화면에서 점보다 작다. 삼킴 판정과 그리기에 쓸 최소 크기를 준다.
+        d.bh.rs = fmaxf(d.horizonOf(d.bh.mass), d.cfg.blackHoleRs);
     }
     CK(cudaMemset(d.eaten, 0, sizeof(int)));
     d.placeInitial();
@@ -1421,13 +1460,13 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
     // 크기(반지름)가 곧 질량이다. rs = 2GM/c² 이므로 M = rs·c²/(2G) 이고, 크게 놓을수록
     // 무거운 블랙홀이 되어 둘레의 것을 더 멀리서부터 끌어당긴다.
     if (kind == ShapeKind::BlackHole) {
-        const float rs = fmaxf(radius * 0.06f, 1e-4f);   // 브러시 크기를 지평선으로 옮긴다
+        // 질량을 먼저 정하고 지평선을 거기서 낸다(위 reset 의 주석 참조).
+        // 브러시 크기가 질량을 정한다 — 크게 놓을수록 무겁다.
         d.bh.active = true;
         d.bh.born = false;
         d.bh.x = cx; d.bh.y = cy;
-        d.bh.rs = rs;
-        d.bh.mass = rs * d.cfg.lightSpeedSq / (2.0f * fmaxf(d.cfg.gravity, 1e-6f))
-                  * (float)d.allocN;
+        d.bh.mass = fmaxf(radius, 0.01f) * 0.25f * (float)d.allocN;   // 크기 0.12 면 3%
+        d.bh.rs = fmaxf(d.horizonOf(d.bh.mass), d.cfg.blackHoleRs);
         return 1;
     }
 
