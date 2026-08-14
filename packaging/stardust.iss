@@ -9,7 +9,7 @@
 ; 사용자 폴더에 깐다.
 
 #define AppName    "Stardust"
-#define AppVersion "0.1.0"
+#define AppVersion "0.2.0"
 #define AppExe     "Stardust.exe"
 #define AppPublisher "JustKim"
 
@@ -33,7 +33,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#AppExe}
-SetupIconFile=assets\stardust.ico
+; 설치 마법사 아이콘만 작은 크기(48px 이하)로 따로 둔다.
+; Inno Setup 은 PNG 로 압축된 256px 항목을 못 읽고 파일 전체를 거부한다.
+; 실행 파일에 박는 아이콘(stardust.rc)은 원본을 그대로 쓴다.
+SetupIconFile=assets\stardust-setup.ico
 ; 설치 파일이 250 MB 가까이 된다 — 진행 표시가 있어야 멈춘 것으로 오해하지 않는다.
 SetupLogging=yes
 
