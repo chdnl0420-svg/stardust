@@ -4,6 +4,7 @@
 //   메시지 펌프 -> 시뮬레이션 한 스텝 -> 밀도 격자를 화면에 그림 -> ImGui(보드·HUD·툴바) -> 버퍼 교체
 #include <windows.h>
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
+#include <shlobj.h>     // SHBrowseForFolderW — 저장 폴더 고르기
 #include <GL/gl.h>
 #include <cstdio>
 #include <cstring>
@@ -486,6 +487,57 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         // 제어 명령은 화면을 다 그린 뒤, 버퍼를 교체하기 전에 처리한다.
         // 그래야 screenshot 이 지금 프레임을 집는다(교체 후엔 백버퍼 내용이 바뀐다).
         if (bridge.poll(app, g_w, g_h)) quit = true;
+
+        // 「기본값으로」 — 앱의 습관과 보기만 되돌린다. 물리 설정(중력·격자·알갱이 수)은
+        // 장면이 정하는 것이라 여기서 건드리지 않는다. 그건 장면을 다시 고르면 돌아온다.
+        if (app.resetSettingsRequested) {
+            app.resetSettingsRequested = false;
+            app.ui = UiSettings{};
+            app.view = ViewSettings{};
+            app.brightDensity = app.brightTemp = 2.0f;
+            app.gammaDensity  = app.gammaTemp  = 1.8f;
+            ApplyLook(app);
+        }
+
+        // 저장 폴더 고르기. 대화상자가 뜬 동안 프레임이 멎으므로 그리기가 다 끝난 여기서 연다.
+        if (app.pickSaveFolder) {
+            app.pickSaveFolder = false;
+            BROWSEINFOW bi{};
+            bi.hwndOwner = hwnd;
+            bi.lpszTitle = L"그림을 저장할 폴더";
+            bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+            if (pidl) {
+                wchar_t wpath[MAX_PATH] = {0};
+                if (SHGetPathFromIDListW(pidl, wpath)) {
+                    char utf8[MAX_PATH * 3] = {0};
+                    WideCharToMultiByte(CP_UTF8, 0, wpath, -1, utf8, sizeof(utf8), nullptr, nullptr);
+                    app.ui.saveFolder = utf8;
+                }
+                CoTaskMemFree(pidl);
+            }
+        }
+
+        // 프레임 상한.
+        //
+        // 「화면에 맞춤」은 화면 주사에 맞춰 기다리고(vsync), 「무제한」은 기다리지 않는다.
+        // 「60」은 vsync 를 켠 채로도 남는 시간이 있으면 재워, 120 Hz 화면에서도 60 이 되게 한다.
+        {
+            typedef BOOL (WINAPI *SwapIntervalFn)(int);
+            static SwapIntervalFn swapInterval =
+                (SwapIntervalFn)wglGetProcAddress("wglSwapIntervalEXT");
+            static int appliedCap = -1;
+            if (swapInterval && appliedCap != app.ui.frameCap) {
+                swapInterval(app.ui.frameCap == 2 ? 0 : 1);
+                appliedCap = app.ui.frameCap;
+            }
+            if (app.ui.frameCap == 1) {
+                LARGE_INTEGER end; QueryPerformanceCounter(&end);
+                const double used = (end.QuadPart - prev.QuadPart) * 1000.0 / freq.QuadPart;
+                const double want = 1000.0 / 60.0;
+                if (used < want - 1.0) Sleep((DWORD)(want - used));
+            }
+        }
 
         g_gl.present();
     }
