@@ -44,7 +44,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // 그 바람에 제목을 세우고 읽는 메시지가 기본 처리에 닿지 못해, 제목이 첫 글자('S')로
     // 잘린 채 남았다 — 밖에서 같은 API 로 넣으면 멀쩡히 들어가는 것과 대비된다(2026-08-14 실측).
     if (msg == WM_SETTEXT || msg == WM_GETTEXT || msg == WM_GETTEXTLENGTH)
-        return DefWindowProc(hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, msg, wp, lp);
 
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
 
@@ -113,24 +113,96 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PostQuitMessage(0);
             return 0;
     }
-    return DefWindowProc(hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// 시안이 정한 옷을 ImGui 전체에 입힌다.
+//
+// 하단 막대는 직접 그리므로 시안대로였지만, 거기서 열리는 팝업과 설정 보드는
+// ImGui 기본값이라 파란 슬라이더에 회색 버튼으로 따로 놀았다. 팔레트를 한 벌로 맞춘다 —
+// 값은 ui/Board.cpp 의 색 상수와 같은 것이다(흑연 바탕 + 주황 하나).
 void ApplyDarkStyle() {
     ImGui::StyleColorsDark();
     ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 0.0f;
-    s.FrameRounding  = 4.0f;
-    s.GrabRounding   = 4.0f;
-    s.WindowPadding  = ImVec2(11, 9);
-    s.ItemSpacing    = ImVec2(8, 6);
-    s.Colors[ImGuiCol_WindowBg]      = ImVec4(0.12f, 0.12f, 0.14f, 0.98f);
-    s.Colors[ImGuiCol_FrameBg]       = ImVec4(0.20f, 0.20f, 0.23f, 1.00f);
-    s.Colors[ImGuiCol_Button]        = ImVec4(0.20f, 0.20f, 0.23f, 1.00f);
-    s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.24f, 0.27f, 1.00f);
-    s.Colors[ImGuiCol_SliderGrab]    = ImVec4(0.29f, 0.62f, 0.85f, 1.00f);
-    s.Colors[ImGuiCol_CheckMark]     = ImVec4(0.29f, 0.62f, 0.85f, 1.00f);
-    s.Colors[ImGuiCol_Header]        = ImVec4(0.17f, 0.17f, 0.20f, 1.00f);
+
+    // 모서리는 알약(높이의 절반)만큼은 아니지만 확실히 둥글게 —
+    // 각진 창이 하나라도 섞이면 막대만 따로 만든 티가 난다.
+    s.WindowRounding    = 14.0f;
+    s.PopupRounding     = 14.0f;
+    s.ChildRounding     = 10.0f;
+    s.FrameRounding     = 8.0f;
+    s.GrabRounding      = 8.0f;
+    s.ScrollbarRounding = 8.0f;
+    s.TabRounding       = 8.0f;
+
+    s.WindowBorderSize = 1.0f;
+    s.FrameBorderSize  = 0.0f;
+    s.PopupBorderSize  = 1.0f;
+    s.WindowPadding    = ImVec2(16, 14);
+    s.FramePadding     = ImVec2(11, 6);
+    s.ItemSpacing      = ImVec2(10, 9);
+    s.ItemInnerSpacing = ImVec2(8, 6);
+    s.GrabMinSize      = 14.0f;
+    s.ScrollbarSize    = 12.0f;
+
+    ImVec4* c = s.Colors;
+    const ImVec4 accent(1.000f, 0.690f, 0.400f, 1.00f);   // #ffb066
+    const ImVec4 accentHi(1.000f, 0.769f, 0.541f, 1.00f); // #ffc48a
+
+    // 바탕: 막대 뒤에 까는 스크림과 같은 흑연. 불투명에 가깝게 둬야 글자가 우주에 묻히지 않는다.
+    c[ImGuiCol_WindowBg]        = ImVec4(0.043f, 0.043f, 0.055f, 0.97f);
+    c[ImGuiCol_PopupBg]         = ImVec4(0.043f, 0.043f, 0.055f, 0.98f);
+    c[ImGuiCol_ChildBg]         = ImVec4(1.000f, 1.000f, 1.000f, 0.03f);
+    c[ImGuiCol_Border]          = ImVec4(1.000f, 1.000f, 1.000f, 0.10f);
+    c[ImGuiCol_BorderShadow]    = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
+
+    c[ImGuiCol_Text]            = ImVec4(1.000f, 1.000f, 1.000f, 1.00f);
+    c[ImGuiCol_TextDisabled]    = ImVec4(0.420f, 0.404f, 0.475f, 1.00f);   // #6b6779
+
+    // 입력 칸·버튼은 「유리」다 — 바탕색을 칠하지 않고 흰색을 옅게 얹는다.
+    // 슬라이더 트랙이 여기 해당한다. 너무 옅으면 어디까지가 움직일 수 있는 길인지 안 보인다.
+    c[ImGuiCol_FrameBg]         = ImVec4(1.000f, 1.000f, 1.000f, 0.11f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(1.000f, 1.000f, 1.000f, 0.16f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(1.000f, 1.000f, 1.000f, 0.20f);
+    c[ImGuiCol_Button]          = ImVec4(1.000f, 1.000f, 1.000f, 0.07f);
+    c[ImGuiCol_ButtonHovered]   = ImVec4(1.000f, 1.000f, 1.000f, 0.13f);
+    c[ImGuiCol_ButtonActive]    = ImVec4(1.000f, 0.690f, 0.400f, 0.22f);
+
+    // 고른 것·움직이는 것에만 주황을 쓴다. 강조가 둘 이상이면 어느 것도 강조가 아니다.
+    c[ImGuiCol_SliderGrab]       = accent;
+    c[ImGuiCol_SliderGrabActive] = accentHi;
+    c[ImGuiCol_CheckMark]        = accent;
+    c[ImGuiCol_Header]           = ImVec4(1.000f, 0.690f, 0.400f, 0.16f);
+    c[ImGuiCol_HeaderHovered]    = ImVec4(1.000f, 0.690f, 0.400f, 0.24f);
+    c[ImGuiCol_HeaderActive]     = ImVec4(1.000f, 0.690f, 0.400f, 0.32f);
+    c[ImGuiCol_ResizeGrip]       = ImVec4(1.000f, 1.000f, 1.000f, 0.08f);
+    c[ImGuiCol_ResizeGripHovered]= ImVec4(1.000f, 0.690f, 0.400f, 0.30f);
+    c[ImGuiCol_ResizeGripActive] = accent;
+
+    c[ImGuiCol_Separator]        = ImVec4(1.000f, 1.000f, 1.000f, 0.12f);
+    c[ImGuiCol_SeparatorHovered] = ImVec4(1.000f, 0.690f, 0.400f, 0.40f);
+    c[ImGuiCol_SeparatorActive]  = accent;
+
+    c[ImGuiCol_TitleBg]          = ImVec4(0.043f, 0.043f, 0.055f, 1.00f);
+    c[ImGuiCol_TitleBgActive]    = ImVec4(0.075f, 0.071f, 0.090f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.043f, 0.043f, 0.055f, 0.80f);
+
+    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
+    c[ImGuiCol_ScrollbarGrab]         = ImVec4(1.000f, 1.000f, 1.000f, 0.12f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(1.000f, 1.000f, 1.000f, 0.20f);
+    c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(1.000f, 0.690f, 0.400f, 0.55f);
+
+    c[ImGuiCol_PlotHistogram]        = accent;
+    c[ImGuiCol_PlotHistogramHovered] = accentHi;
+    c[ImGuiCol_PlotLines]            = ImVec4(0.714f, 0.698f, 0.769f, 1.00f);
+    c[ImGuiCol_PlotLinesHovered]     = accent;
+
+    // 안내문은 막대의 유리 알약과 같은 옷을 입는다.
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(1.000f, 1.000f, 1.000f, 0.06f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(1.000f, 1.000f, 1.000f, 0.14f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(1.000f, 1.000f, 1.000f, 0.08f);
+    c[ImGuiCol_NavCursor]            = accent;
+    c[ImGuiCol_DragDropTarget]       = accent;
 }
 
 } // namespace
@@ -160,6 +232,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
 
     RECT r{ 0, 0, g_w, g_h };
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    // 창 이름은 여기서 한 번만 세운다. 오래 「S」 한 글자로 잘려 나오던 원인은
+    // 아래 WndProc 이 DefWindowProc(=UNICODE 미정의라 ANSI 판)을 부른 데 있었다 —
+    // 제목을 저장하는 기본 처리가 UTF-16 문자열을 ANSI 로 읽어 둘째 바이트 0x00 에서 끊었다.
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Stardust",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 r.right - r.left, r.bottom - r.top,
@@ -177,8 +252,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;   // 창 배치를 파일로 저장하지 않는다(항상 시안 배치로 뜬다)
     // 기본 폰트에는 한글 글리프가 없다. 윈도우 기본 한글 폰트를 한글 범위와 함께 올린다.
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f, nullptr,
-                                 io.Fonts->GetGlyphRangesKorean());
+    //
+    // ImGui 가 주는 한글 범위에는 「일반 문장부호」 구간이 빠져 있다. 그 구간이 없으면
+    // 우리가 안내문에 쓰는 긴 줄표(—)와 말줄임표(…)가 통째로 네모로 나온다.
+    static const ImWchar kRanges[] = {
+        0x0020, 0x00FF,   // 기본 라틴 + 라틴 보충 (·, × 도 여기 있다)
+        0x2000, 0x206F,   // 일반 문장부호 — 여기가 ImGui 기본 범위에서 빠진 자리다
+        0x3131, 0x3163,   // 자모
+        0xAC00, 0xD7A3,   // 완성형 한글
+        0xFFFD, 0xFFFD,   // 없는 글자 자리표
+        0,
+    };
+    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f, nullptr, kRanges);
     ApplyDarkStyle();
     ImGui_ImplWin32_InitForOpenGL(hwnd);
     ImGui_ImplOpenGL2_Init();
@@ -212,21 +297,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
-    // 창 제목은 **다 만들어 띄운 뒤에** 세운다.
-    //
-    // CreateWindowExW 에 이름을 넘겨도, 그 직후에 SetWindowTextW 로 다시 넣어도
-    // 제목이 첫 글자 하나('S')로 잘렸다. 같은 호출을 밖에서 창 핸들에 대고 하면 멀쩡히
-    // 여덟 글자가 들어간다 — 즉 이른 시점에 세운 이름이 뒤이은 초기화 어딘가에서 밀린다.
-    // 원인을 못 밝혀 순서로 피한다. 작업표시줄이 이 이름을 그대로 쓴다(2026-08-14 실측).
-    //
-    // 넓은 리터럴(L"...")을 그대로 넘기면 첫 글자만 들어가므로, 좁은 리터럴에서 조립해 넘긴다.
-    // 밖에서 같은 API 로 넣으면 여덟 글자가 멀쩡히 들어가는 것을 확인했다.
-    {
-        wchar_t title[32] = { 0 };
-        MultiByteToWideChar(CP_UTF8, 0, "Stardust", -1, title, 32);
-        SetWindowTextW(hwnd, title);
-    }
-
     LARGE_INTEGER freq, prev;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&prev);
@@ -241,15 +311,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             DispatchMessage(&msg);
         }
         if (quit) break;
-
-        // 창 제목은 루프가 돌기 시작한 뒤에 한 번 세운다.
-        //
-        // 창을 만드는 자리나 ShowWindow 직후에 세우면 첫 글자('S')만 남았다. 같은 API 를
-        // 밖에서 창 핸들에 대고 부르면 여덟 글자가 멀쩡히 들어간다 — 초기화가 다 끝나기 전에는
-        // 이름이 어딘가에서 밀린다는 뜻이다. 원인을 못 밝혀 시점으로 피한다.
-        // 작업표시줄과 Alt+Tab 이 이 이름을 그대로 쓴다(2026-08-14 실측).
-        static bool titleSet = false;
-        if (!titleSet) { SetWindowTextW(hwnd, L"Stardust"); titleSet = true; }
 
         // 업데이트를 받아 두었으면 여기서 끝낸다. 옆에 남겨 둔 스크립트가 앱이 완전히 끝나기를
         // 기다렸다가 실행 파일을 갈아 끼우고 다시 띄운다 — 돌고 있는 파일은 덮어쓸 수 없다.

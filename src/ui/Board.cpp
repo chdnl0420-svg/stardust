@@ -48,27 +48,158 @@ void Divider() {
     ImGui::SameLine(0.0f, 7.0f);
 }
 
-// 값을 보여 주는 알약. 누르면 그 자리에 조절기가 열린다.
-// 값을 늘 곁에 두면서도 조절기는 필요할 때만 꺼내는 방식이다.
-bool Pill(const char* id, const char* label, const char* value, bool accentValue = false) {
+float Clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// 시안의 조절기 한 줄 — 이름과 값은 위에 나란히, 트랙은 그 아래 얇게.
+//
+// ImGui 기본 슬라이더는 값 글자를 트랙 한가운데 얹고 손잡이가 그 위를 지나므로,
+// 손잡이가 값 근처에 오면 정작 읽어야 할 숫자가 가려진다. 여기서는 층을 나눠
+// 손잡이가 어디 있든 값이 늘 읽힌다.
+//
+// 위치는 0~1 로만 주고받는다. 실제 값으로 바꾸는 일은 부르는 쪽이 하므로
+// 선형이든 로그든 정수든 같은 그림을 쓴다.
+bool TrackRow(const char* label, const char* valueText, float* t, float width) {
+    const float rowH = 34.0f;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##row", ImVec2(width, rowH));
+    const bool act = ImGui::IsItemActive();
+    const bool hov = ImGui::IsItemHovered();
+
+    bool changed = false;
+    if (act) {
+        const float nt = Clampf((ImGui::GetIO().MousePos.x - p.x) / width, 0.0f, 1.0f);
+        if (nt != *t) { *t = nt; changed = true; }
+    }
+
+    const float ty = p.y + rowH - 7.0f;               // 트랙은 줄 아래쪽
+    const float gx = p.x + width * Clampf(*t, 0.0f, 1.0f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 vsz = ImGui::CalcTextSize(valueText);
+    dl->AddText(ImVec2(p.x, p.y + 1.0f), kInkDim, label);
+    dl->AddText(ImVec2(p.x + width - vsz.x, p.y + 1.0f), kInk, valueText);
+    dl->AddLine(ImVec2(p.x, ty), ImVec2(p.x + width, ty), IM_COL32(255, 255, 255, 28), 3.0f);
+    dl->AddLine(ImVec2(p.x, ty), ImVec2(gx, ty), kAccent, 3.0f);
+    dl->AddCircleFilled(ImVec2(gx, ty), (hov || act) ? 7.0f : 5.5f, kAccent);
+    return changed;
+}
+
+// 실수 조절기. log 를 켜면 눈금을 배수로 나눈다 —
+// 밝기처럼 0.05 와 20 이 한 줄에 있어야 하는 값은 그래야 양쪽 다 만질 수 있다.
+bool SliderRow(const char* id, const char* label, float* v, float lo, float hi,
+               const char* fmt, bool log = false, float width = 262.0f) {
+    char val[40]; snprintf(val, sizeof(val), fmt, *v);
+    float t = log ? (logf(Clampf(*v, lo, hi) / lo) / logf(hi / lo))
+                  : ((Clampf(*v, lo, hi) - lo) / (hi - lo));
+    ImGui::PushID(id);
+    const bool moved = TrackRow(label, val, &t, width);
+    ImGui::PopID();
+    // 만지지 않았으면 값을 되돌려 쓰지 않는다 — 왕복 변환만으로 값이 조금씩 깎이는 것을 막는다.
+    if (moved) *v = log ? lo * expf(logf(hi / lo) * t) : lo + (hi - lo) * t;
+    return moved;
+}
+
+// 정수 조절기. 개수처럼 「몇 만」 단위로 세는 값에 쓴다.
+bool SliderRowInt(const char* id, const char* label, int* v, int lo, int hi,
+                  const char* fmt, bool log = false, float width = 262.0f) {
+    char val[40]; snprintf(val, sizeof(val), fmt, *v);
+    const float flo = (float)lo, fhi = (float)hi;
+    const float fv = Clampf((float)*v, flo, fhi);
+    float t = (hi <= lo) ? 0.0f
+            : (log ? (logf(fv / flo) / logf(fhi / flo)) : ((fv - flo) / (fhi - flo)));
+    ImGui::PushID(id);
+    const bool moved = TrackRow(label, val, &t, width);
+    ImGui::PopID();
+    if (moved) {
+        const float nv = log ? flo * expf(logf(fhi / flo) * t) : flo + (fhi - flo) * t;
+        *v = (int)(nv + 0.5f);
+        if (*v < lo) *v = lo;
+        if (*v > hi) *v = hi;
+    }
+    return moved;
+}
+
+// 막대에서 여는 팝업은 위로 펼친다.
+//
+// ImGui 는 팝업을 누른 자리 아래에 여는데, 이 막대는 화면 맨 아래라 아래쪽에 자리가 없다.
+// 기준점을 팝업의 **바닥**으로 잡아(pivot y=1) 누른 것 위로 자라게 한다.
+// 인자는 방금 그린 항목의 좌상단 — `ImGui::GetItemRectMin()` 을 그대로 넘긴다.
+// pivotX 를 1 로 주면 기준점이 팝업의 오른쪽 끝이 된다 —
+// 막대 오른쪽에 붙은 것은 그렇게 열어야 창 밖으로 나가지 않는다.
+void AnchorAbove(const ImVec2& itemTopLeft, float pivotX = 0.0f) {
+    ImGui::SetNextWindowPos(ImVec2(itemTopLeft.x, itemTopLeft.y - 10.0f),
+                            ImGuiCond_Always, ImVec2(pivotX, 1.0f));
+}
+
+// 알약 오른쪽 끝에 「좌우로 끌면 바뀐다」는 표시를 그린다.
+// 폰트에 없는 기호(⇄)를 쓰면 네모로 깨지므로 화살표를 직접 그린다.
+void DragMark(ImDrawList* dl, const ImVec2& c, ImU32 col) {
+    const float w = 4.5f, h = 3.2f;
+    dl->AddLine(ImVec2(c.x - 5.5f, c.y - 2.0f), ImVec2(c.x + 5.5f, c.y - 2.0f), col, 1.2f);
+    dl->AddLine(ImVec2(c.x - 5.5f, c.y - 2.0f), ImVec2(c.x - 5.5f + w, c.y - 2.0f - h), col, 1.2f);
+    dl->AddLine(ImVec2(c.x + 5.5f, c.y + 2.0f), ImVec2(c.x - 5.5f, c.y + 2.0f), col, 1.2f);
+    dl->AddLine(ImVec2(c.x + 5.5f, c.y + 2.0f), ImVec2(c.x + 5.5f - w, c.y + 2.0f + h), col, 1.2f);
+}
+
+// 값을 보여 주는 알약.
+//
+// 값은 늘 곁에 두되 조절기는 필요할 때만 꺼낸다. 두 가지로 만질 수 있다.
+//   · 좌우로 끌면 그 자리에서 값이 바뀐다(오른쪽 끝 화살표가 그 표시다)
+//   · 누르면 조절기가 열려 세밀하게 맞춘다
+// 끌기를 먼저 보는 이유는, 대개 조금만 올리거나 내리고 싶어서다 —
+// 그때마다 창을 열었다 닫는 것은 성가시다.
+//
+// 돌려주는 값: 0 아무 일 없음 · 1 눌렸음(조절기를 열 차례) · 2 끄는 중(delta 에 변화량)
+int Pill(const char* id, const char* label, const char* value, float* delta,
+         bool accentValue = false, const ImU32* gradient = nullptr) {
     ImGui::PushID(id);
     const ImVec2 lsz = ImGui::CalcTextSize(label);
     const ImVec2 vsz = ImGui::CalcTextSize(value);
-    const float w = lsz.x + vsz.x + 8.0f + 24.0f;
+    const float extra = gradient ? 44.0f : 22.0f;   // 그라데이션 막대 또는 화살표 자리
+    const float w = lsz.x + vsz.x + 8.0f + 24.0f + extra;
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float h = 30.0f;
 
-    const bool pressed = ImGui::InvisibleButton("##pill", ImVec2(w, h));
+    ImGui::InvisibleButton("##pill", ImVec2(w, h),
+                           ImGuiButtonFlags_MouseButtonLeft);
     const bool hov = ImGui::IsItemHovered();
+    const bool act = ImGui::IsItemActive();
+
+    int result = 0;
+    if (act) {
+        const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 2.0f);
+        if (d.x != 0.0f) {
+            *delta = d.x;
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            result = 2;
+        }
+    }
+    // 끌지 않고 뗐으면 그냥 누른 것이다.
+    if (ImGui::IsItemDeactivated() && result == 0
+        && ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 2.0f).x == 0.0f)
+        result = 1;
+
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h),
-                      hov ? IM_COL32(255, 255, 255, 33) : kGlass, h * 0.5f);
+                      (hov || act) ? IM_COL32(255, 255, 255, 33) : kGlass, h * 0.5f);
     dl->AddRect(p, ImVec2(p.x + w, p.y + h), kGlassLine, h * 0.5f);
     const float ty = p.y + (h - lsz.y) * 0.5f;
     dl->AddText(ImVec2(p.x + 12.0f, ty), kInkFaint, label);
     dl->AddText(ImVec2(p.x + 12.0f + lsz.x + 8.0f, ty), accentValue ? kAccentText : kInk, value);
+
+    const float rx = p.x + w - 12.0f;
+    if (gradient) {
+        // 지금 컬러맵을 작은 띠로 보여 준다 — 밝기를 만질 때 어떤 색이 어떤 밝기인지 함께 보인다.
+        const ImVec2 a(rx - 34.0f, p.y + h * 0.5f - 4.0f), b(rx, p.y + h * 0.5f + 4.0f);
+        const float step = (b.x - a.x) * 0.25f;
+        for (int i = 0; i < 4; ++i)
+            dl->AddRectFilledMultiColor(ImVec2(a.x + step * i, a.y), ImVec2(a.x + step * (i + 1), b.y),
+                                        gradient[i], gradient[i + 1], gradient[i + 1], gradient[i]);
+        dl->AddRect(a, b, IM_COL32(255, 255, 255, 41), 2.0f);
+    } else {
+        DragMark(dl, ImVec2(rx - 6.0f, p.y + h * 0.5f), kInkGhost);
+    }
     ImGui::PopID();
-    return pressed;
+    return result;
 }
 
 // 도구 하나. 36×32 자리에 도형만 그린다.
@@ -349,19 +480,13 @@ void DrawShapeDrawer(App& app, int viewW, int viewH) {
         const ImVec2 p = ImGui::GetCursorScreenPos();
         ImGui::BeginGroup();
         ImGui::Dummy(ImVec2(cardW, 10.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.545f, 0.525f, 0.612f, 1.0f));
-        ImGui::TextUnformatted("한 번에");
-        ImGui::PopStyleColor();
         int man = app.brush.shapeCount / 10000; if (man < 1) man = 1;
         const int cap = (app.cfg.particleCount / 10000) > 1 ? (app.cfg.particleCount / 10000) : 1;
         if (man > cap) man = cap;
-        ImGui::SetNextItemWidth(cardW);
-        if (ImGui::SliderInt("##n", &man, 1, cap, "%d만",
-                             ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+        if (SliderRowInt("drawer_n", "한 번에", &man, 1, cap, "%d만", true, cardW))
             app.brush.shapeCount = man * 10000;
         ImGui::Spacing();
-        ImGui::SetNextItemWidth(cardW);
-        ImGui::SliderFloat("##r", &app.brush.shapeRadius, 0.02f, 0.35f, "크기 %.2f");
+        SliderRow("drawer_r", "크기", &app.brush.shapeRadius, 0.02f, 0.35f, "%.2f", false, cardW);
         ImGui::EndGroup();
         (void)p;
     }
@@ -526,14 +651,19 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
     // ── 값 알약 ───────────────────────────────────────────────────────────
     {
         char v[32];
-        snprintf(v, sizeof(v), "%.1fx", app.cfg.timeScale);
-        if (Pill("speed", "빠르기", v)) ImGui::OpenPopup("##speedpop");
-        Tip("시간이 흐르는 속도입니다.");
+        float drag = 0.0f;
+        snprintf(v, sizeof(v), "%.1f\xC3\x97", app.cfg.timeScale);   // × (곱셈 기호)
+        // 빠르기만 곱셈이 아니라 덧셈으로 끈다. 표시가 `%.1f` 라 0.1 이 한 눈금인데,
+        // 곱셈으로 하면 1.0 근처에서 한 픽셀이 0.008 밖에 못 움직여 눈금을 못 넘긴다.
+        const int rs = Pill("speed", "빠르기", v, &drag);
+        const ImVec2 aSpeed = ImGui::GetItemRectMin();
+        if (rs == 1) ImGui::OpenPopup("##speedpop");
+        else if (rs == 2) app.cfg.timeScale = Clampf(app.cfg.timeScale + drag * 0.02f, 0.1f, 10.0f);
+        Tip("시간이 흐르는 속도입니다. 좌우로 끌어도 됩니다.");
+        AnchorAbove(aSpeed);
         if (ImGui::BeginPopup("##speedpop")) {
-            ImGui::SetNextItemWidth(220.0f);
-            ImGui::SliderFloat("##s", &app.cfg.timeScale, 0.1f, 10.0f, "%.1f 배");
-            if (app.cfg.timeScale > 1.0f) app.cfg.timeScale = (float)(int)(app.cfg.timeScale + 0.5f);
-            ImGui::SameLine();
+            SliderRow("s", "빠르기", &app.cfg.timeScale, 0.1f, 10.0f, "%.1f\xC3\x97", true, 236.0f);
+            ImGui::Spacing();
             if (ImGui::Button(app.running ? "멈춤" : "재생")) app.running = !app.running;
             ImGui::SameLine();
             if (ImGui::Button("처음부터")) { app.applyConfig(); app.sim.reset(); }
@@ -542,46 +672,88 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
 
         ImGui::SameLine();
         char c[24]; CountText(c, sizeof(c), app.brush.shapeCount);
-        if (Pill("shape", "한 번에", c, true)) ImGui::OpenPopup("##shapepop");
-        Tip("한 번 클릭할 때 놓을 알갱이 수와 모양입니다.");
+        drag = 0.0f;
+        const int rc = Pill("shape", "한 번에", c, &drag, true);
+        const ImVec2 aShape = ImGui::GetItemRectMin();
+        if (rc == 1) ImGui::OpenPopup("##shapepop");
+        else if (rc == 2) {
+            // 개수는 1만에서 수백만까지 걸치므로 곱셈으로 끈다 —
+            // 덧셈이면 작은 쪽에서는 한 픽셀이 너무 크고 큰 쪽에서는 하염없이 끌어야 한다.
+            const float hi = (float)(app.cfg.particleCount > 10000 ? app.cfg.particleCount : 10000);
+            app.brush.shapeCount =
+                (int)Clampf((float)app.brush.shapeCount * expf(drag * 0.012f), 10000.0f, hi);
+        }
+        Tip("한 번 클릭할 때 놓을 알갱이 수와 모양입니다. 좌우로 끌어도 됩니다.");
+        AnchorAbove(aShape);
         if (ImGui::BeginPopup("##shapepop")) {
             const char* names[5] = { "은하", "태양", "고리", "구름", "덩어리" };
             for (int i = 0; i < 5; ++i) {
                 if (i > 0) ImGui::SameLine();
                 const bool sel = ((int)app.brush.shapeKind == i);
-                if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.17f, 0.44f, 0.62f, 1.0f));
+                // 고른 것에만 주황을 얹는다. 시안이 강조로 쓰는 색은 이것 하나다.
+                if (sel) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 0.69f, 0.40f, 0.26f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.69f, 0.40f, 0.34f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 0.77f, 0.54f, 1.00f));
+                }
                 if (ImGui::Button(names[i], ImVec2(58, 0))) {
                     app.brush.shapeKind = (ShapeKind)i;
                     app.tool = Tool::AddShape;
                 }
-                if (sel) ImGui::PopStyleColor();
+                if (sel) ImGui::PopStyleColor(3);
             }
+            ImGui::Spacing();
             int man = app.brush.shapeCount / 10000; if (man < 1) man = 1;
             const int cap = (app.cfg.particleCount / 10000) > 1 ? (app.cfg.particleCount / 10000) : 1;
-            ImGui::SetNextItemWidth(310.0f);
-            if (ImGui::SliderInt("##n", &man, 1, cap, "%d만", ImGuiSliderFlags_Logarithmic))
+            if (SliderRowInt("popn", "한 번에", &man, 1, cap, "%d만", true, 322.0f))
                 app.brush.shapeCount = man * 10000;
             ImGui::EndPopup();
         }
 
         ImGui::SameLine();
         snprintf(v, sizeof(v), "%.1f", app.view.brightness);
-        if (Pill("bright", "밝기", v)) ImGui::OpenPopup("##brightpop");
-        Tip("화면이 하얗게 타면 내리고 너무 어두우면 올립니다.");
+        // 지금 쓰는 컬러맵을 알약 안에 띠로 보여 준다 — RenderField.cu 의 두 맵을
+        // 다섯 점으로 훑은 값이다. 밝기를 만질 때 어느 밝기가 무슨 색인지 함께 보인다.
+        static const ImU32 kAstro[5] = {
+            IM_COL32(0, 0, 0, 255),      IM_COL32(23, 22, 73, 255),  IM_COL32(88, 56, 150, 255),
+            IM_COL32(219, 136, 74, 255), IM_COL32(255, 255, 240, 255)
+        };
+        static const ImU32 kThermal[5] = {
+            IM_COL32(0, 0, 0, 255),     IM_COL32(140, 0, 0, 255),    IM_COL32(255, 87, 0, 255),
+            IM_COL32(255, 208, 41, 255), IM_COL32(255, 255, 245, 255)
+        };
+        drag = 0.0f;
+        const int rb = Pill("bright", "밝기", v, &drag, false,
+                            (app.look == App::Look::Density) ? kAstro : kThermal);
+        const ImVec2 aBright = ImGui::GetItemRectMin();
+        if (rb == 1) ImGui::OpenPopup("##brightpop");
+        else if (rb == 2) {
+            app.view.brightness = Clampf(app.view.brightness * expf(drag * 0.010f), 0.05f, 20.0f);
+            RememberLook(app);
+        }
+        Tip("화면이 하얗게 타면 내리고 너무 어두우면 올립니다. 좌우로 끌어도 됩니다.");
+        AnchorAbove(aBright);
         if (ImGui::BeginPopup("##brightpop")) {
+            // 지금 고른 쪽에만 주황을 얹는다 — 이름 뒤에 「(지금)」을 붙이지 않아도 알 수 있다.
             const bool dens = (app.look == App::Look::Density);
-            if (ImGui::Button(dens ? "밀도 (지금)" : "밀도", ImVec2(110, 0))) {
-                app.look = App::Look::Density; ApplyLook(app);
+            for (int i = 0; i < 2; ++i) {
+                const bool sel = (i == 0) ? dens : !dens;
+                if (i > 0) ImGui::SameLine();
+                if (sel) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 0.69f, 0.40f, 0.26f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.69f, 0.40f, 0.34f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 0.77f, 0.54f, 1.00f));
+                }
+                if (ImGui::Button(i == 0 ? "밀도" : "온도", ImVec2(120, 0))) {
+                    app.look = (i == 0) ? App::Look::Density : App::Look::Temperature;
+                    ApplyLook(app);
+                }
+                if (sel) ImGui::PopStyleColor(3);
             }
-            ImGui::SameLine();
-            if (ImGui::Button(!dens ? "온도 (지금)" : "온도", ImVec2(110, 0))) {
-                app.look = App::Look::Temperature; ApplyLook(app);
-            }
-            ImGui::SetNextItemWidth(228.0f);
-            if (ImGui::SliderFloat("##b", &app.view.brightness, 0.05f, 20.0f, "밝기 %.2f",
-                                   ImGuiSliderFlags_Logarithmic)) RememberLook(app);
-            ImGui::SetNextItemWidth(228.0f);
-            if (ImGui::SliderFloat("##g", &app.view.gamma, 0.4f, 4.0f, "희미한 것 %.2f"))
+            ImGui::Spacing();
+            if (SliderRow("b", "밝기", &app.view.brightness, 0.05f, 20.0f, "%.2f", true, 252.0f))
+                RememberLook(app);
+            if (SliderRow("g", "희미한 것", &app.view.gamma, 0.4f, 4.0f, "%.2f", false, 252.0f))
                 RememberLook(app);
             ImGui::EndPopup();
         }
@@ -599,7 +771,9 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
         // 톱니 — 시안에 없던 나머지 값들을 여기 모았다. 자주 만지지 않는 것들이라
         // 막대에 상주시키면 「평소엔 우주뿐」이 무너진다.
         if (ToolButton("settings", 4, false)) ImGui::OpenPopup("##setpop");
+        const ImVec2 aSet(ImGui::GetItemRectMax().x, ImGui::GetItemRectMin().y);
         Tip("나머지 설정 — 최대 개수, 알갱이끼리 부딪힘, 보이지 않는 무게");
+        AnchorAbove(aSet, 1.0f);
         // 팝업은 우주 위에 뜨므로 배경이 비치면 글자가 묻힌다. 불투명하게 깔고 여백을 준다.
         ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.055f, 0.05f, 0.075f, 0.985f));
         ImGui::PushStyleColor(ImGuiCol_Border,  ImVec4(1.0f, 0.69f, 0.40f, 0.35f));
@@ -614,9 +788,7 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
             int maxMan = app.cfg.particleCount / 10000; if (maxMan < 1) maxMan = 1;
             int hardMan = app.hardMaxParticles / 10000; if (hardMan < 1) hardMan = 1;
             if (maxMan > hardMan) maxMan = hardMan;
-            ImGui::SetNextItemWidth(300.0f);
-            if (ImGui::SliderInt("##cap", &maxMan, 1, hardMan, "최대 %d만",
-                                 ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
+            if (SliderRowInt("cap", "최대", &maxMan, 1, hardMan, "%d만", true, 300.0f)) {
                 app.cfg.particleCount = maxMan * 10000;
                 ApplyAutoGrid(app.cfg);
             }
