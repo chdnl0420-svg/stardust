@@ -1,7 +1,9 @@
 #include "ui/Board.h"
+#include "app/Version.h"
 
 #include "imgui.h"
 #include <cstdio>
+#include <string>
 
 namespace {
 
@@ -268,8 +270,40 @@ void DrawBoard(App& app, bool& boardOpen) {
         ImGui::PopStyleColor();
     }
 
+    // ---------------- 새 버전 ----------------
+    // 확인은 앱을 켤 때 저절로 하지만, **받는 것은 눌렀을 때만** 한다.
+    // 받아 온 것을 바로 실행하는 일이라 모르는 사이에 프로그램이 바뀌어 있으면 안 된다.
+    {
+        const UpdateInfo up = app.updater.status();
+        if (up.available) {
+            Title("새 버전");
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.85f, 0.62f, 1.0f));
+            ImGui::TextWrapped("%s 이(가) 나왔습니다", up.latest.c_str());
+            ImGui::PopStyleColor();
+            if (app.updateBusy) {
+                ImGui::TextDisabled("받는 중입니다...");
+            } else if (ImGui::Button("받아서 다시 켜기", ImVec2(full, 0))) {
+                app.updateError.clear();
+                app.updateBusy = true;
+                std::string err;
+                if (!app.updater.applyUpdate(err)) {
+                    app.updateError = err;
+                    app.updateBusy = false;
+                }
+            }
+            Help("새 실행 파일을 받아 갈아 끼우고 앱을 다시 켭니다.\n"
+                 "받는 곳은 이 앱의 배포 저장소 한 곳으로 못 박혀 있습니다.");
+        }
+        if (!app.updateError.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.35f, 0.30f, 1.0f));
+            ImGui::TextWrapped("업데이트 실패 — %s", app.updateError.c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("확인")) app.updateError.clear();
+        }
+    }
+
     ImGui::Spacing();
-    ImGui::TextDisabled("Tab: 화면만 보기");
+    ImGui::TextDisabled("Stardust %s · Tab: 화면만 보기", STARDUST_VERSION);
 
     ImGui::End();
 }

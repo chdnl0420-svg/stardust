@@ -67,6 +67,7 @@ add_executable(nbody WIN32
   src/main.cpp
   src/app/App.cpp
   src/app/ControlBridge.cpp
+  src/app/Updater.cpp
   src/gfx/GLContext.cpp
   src/gfx/PngWriter.cpp
   src/gfx/RenderField.cu
@@ -90,7 +91,12 @@ target_link_libraries(nbody PRIVATE
   nbody_sim
   opengl32
   dwmapi
+  winhttp      # 자동 업데이트가 배포 저장소를 확인하는 데 쓴다
 )
+
+# 배포하는 이름으로 낸다. 자동 업데이트 스크립트가 이 이름으로 프로세스가 끝나기를 기다리므로
+# 여기를 바꾸면 Updater.cpp 의 대기 조건도 함께 바꿔야 한다.
+set_target_properties(nbody PROPERTIES OUTPUT_NAME "Stardust")
 
 # CUDA 13 은 런타임 DLL 을 bin\x64\ 에 둔다(bin 직하에는 없다).
 # 실행 파일 옆에 복사해 두지 않으면 더블클릭 실행이 STATUS_DLL_NOT_FOUND 로 죽는다.

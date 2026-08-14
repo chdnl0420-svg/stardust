@@ -3,7 +3,10 @@
 // 물리 계산은 하지 않는다(그건 Core 인 Sim 의 몫).
 #pragma once
 
+#include <string>
+
 #include "sim/Sim.h"
+#include "app/Updater.h"
 
 // 마우스 도구. 증분 1 에서는 카메라만 동작하고 나머지는 자리만 잡아 둔다.
 enum class Tool { Camera, Spray, Well, AddShape, Erase };
@@ -74,6 +77,13 @@ struct App {
     // **매 프레임 다시 재지 않는다** — 남은 VRAM 은 다른 프로그램 때문에 매 순간 오르내리고,
     // 그 값으로 상한을 흔들면 요청이 그대로인데도 버퍼를 계속 다시 잡는다(1차 재부팅의 원인).
     int   hardMaxParticles = 30000000;
+
+    // 자동 업데이트. 앱을 켤 때 한 번 배포 저장소를 확인하고, 새 버전이 있으면 알린다.
+    // 받는 것은 사용자가 눌렀을 때만 한다 — 받아 온 것을 바로 실행하는 일이라
+    // 모르는 사이에 프로그램이 바뀌어 있으면 안 된다.
+    Updater updater;
+    bool    updateBusy = false;   // 내려받는 중
+    std::string updateError;      // 마지막 실패 사유(비어 있으면 없음)
 
     // 도는 동안의 감시. 프레임이 예산을 계속 넘으면 알갱이 수를 스스로 낮춘다.
     float overBudgetMs = 0.0f;   // 예산을 넘긴 채 흘러간 시간

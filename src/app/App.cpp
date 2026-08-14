@@ -39,6 +39,9 @@ void App::init() {
     }
 
     sim.init(cfg);
+
+    // 새 버전이 나왔는지 배포 저장소에 물어본다. 다른 스레드에서 도므로 창이 뜨는 것을 막지 않는다.
+    updater.startCheck();
 }
 
 void App::guardPerformance() {
