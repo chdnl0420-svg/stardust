@@ -754,6 +754,38 @@ __global__ void kFindDensestCell(const float* g, int G, int S, unsigned long lon
     atomicMax(out, key);
 }
 
+// 회전곡선 — 반지름 고리마다 회전 속도를 모은다.
+//
+// 회전 속도는 속도 벡터에서 **접선 성분**만 뽑은 것이다. 중심을 향하거나 멀어지는 성분과
+// 위아래 성분은 회전과 무관하다. 부호를 없애 크기만 더하는 이유는, 반대로 도는 알갱이가
+// 섞여 있어도 「얼마나 빨리 도는가」를 보고 싶기 때문이다.
+//
+// 비용: N 스레드 × 2 atomicAdd.
+__global__ void kRotationAccum(const float4* pos, const float4* vel, int n,
+                               float* sumV, float* cnt, int bins, float maxR) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+    const float dx = p.x - 0.5f, dy = p.y - 0.5f;
+    const float r = sqrtf(dx * dx + dy * dy);
+    if (r < 1e-5f || r > maxR) return;
+    const int b = min((int)(r / maxR * bins), bins - 1);
+    const float4 v = vel[i];
+    // 접선 방향 단위벡터는 (-dy, dx)/r 다.
+    const float vt = (-dy * v.x + dx * v.y) / r;
+    atomicAdd(&sumV[b], fabsf(vt));
+    atomicAdd(&cnt[b], 1.0f);
+}
+
+__global__ void kKineticAccum(const float4* pos, const float4* vel, int n, double* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (pos[i].x < 0.f) return;
+    const float4 v = vel[i];
+    atomicAdd(out, (double)(v.x * v.x + v.y * v.y + v.z * v.z) * 0.5);
+}
+
 // 살아 있는 알갱이를 앞으로 모은다(지우개가 만든 구멍 메우기).
 __global__ void kMarkAlive(const float4* pos, int n, int* flag) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1469,6 +1501,136 @@ void Sim::measureCentroid(double& cx, double& cy) {
 }
 
 double Sim::measureMeanTemperature() { return 0.0; }
+
+namespace {
+// 파일 첫머리에 두는 표식. 다른 파일을 열었을 때 조용히 이상한 우주가 되는 것을 막는다.
+// 형식이 바뀌면 판을 올린다 — 옛 파일을 읽어 알갱이가 엉뚱한 곳에 놓이는 것보다
+// 「못 읽는다」가 낫다.
+struct StateHeader {
+    char  magic[8];      // "STARDUST"
+    int   version;       // 1
+    int   count;         // 살아 있는 알갱이 수
+    int   gridSize;
+    int   preset;
+    int   boundary;
+    float gravity;
+    float simTime;
+    float bhX, bhY, bhRs, bhMass;
+    int   bhActive;
+    int   reserved[5];
+};
+} // namespace
+
+bool Sim::saveState(const std::string& path) {
+    Impl& d = *impl_;
+    if (g_failed || d.allocN <= 0) return false;
+    const int n = (d.active > 0) ? d.active : d.allocN;
+
+    std::vector<float4> hp(n), hv(n);
+    if (cudaMemcpy(hp.data(), d.pos, sizeof(float4) * n, cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(hv.data(), d.vel, sizeof(float4) * n, cudaMemcpyDeviceToHost) != cudaSuccess)
+        return false;
+
+    StateHeader h{};
+    memcpy(h.magic, "STARDUST", 8);
+    h.version = 1;
+    h.count = n;
+    h.gridSize = d.allocG;
+    h.preset = (int)d.cfg.preset;
+    h.boundary = (int)d.cfg.boundary;
+    h.gravity = d.cfg.gravity;
+    h.simTime = (float)d.simTime;
+    h.bhX = d.bh.x; h.bhY = d.bh.y; h.bhRs = d.bh.rs; h.bhMass = d.bh.mass;
+    h.bhActive = d.bh.active ? 1 : 0;
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+    // 쓴 만큼과 닫기까지 확인한다 — 디스크가 모자라면 fwrite 가 적게 쓰고,
+    // 버퍼에 남은 것은 fclose 에서야 실패한다. 둘 다 안 보면 깨진 파일에 성공을 돌려준다.
+    bool ok = fwrite(&h, sizeof(h), 1, f) == 1
+           && fwrite(hp.data(), sizeof(float4), n, f) == (size_t)n
+           && fwrite(hv.data(), sizeof(float4), n, f) == (size_t)n;
+    ok = (fclose(f) == 0) && ok;
+    return ok;
+}
+
+bool Sim::loadState(const std::string& path) {
+    Impl& d = *impl_;
+    if (g_failed) return false;
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    StateHeader h{};
+    if (fread(&h, sizeof(h), 1, f) != 1 ||
+        memcmp(h.magic, "STARDUST", 8) != 0 || h.version != 1 ||
+        h.count <= 0 || h.count > 100000000) {
+        fclose(f);
+        return false;
+    }
+
+    // 이 카드가 감당할 수 있는 만큼만 읽는다. 파일이 요구하는 대로 잡으면
+    // 다른 컴퓨터에서 만든 파일 하나로 여기서 메모리가 터진다.
+    SimConfig c = d.cfg;
+    c.particleCount = h.count;
+    c.gridSize = h.gridSize;
+    c.preset = (Preset)h.preset;
+    c.boundary = (Boundary)h.boundary;
+    c.gravity = h.gravity;
+    reconfigure(c);
+    if (g_failed) { fclose(f); return false; }
+
+    const int n = (h.count < d.allocN) ? h.count : d.allocN;
+    std::vector<float4> hp(n), hv(n);
+    bool ok = fread(hp.data(), sizeof(float4), n, f) == (size_t)n
+           && fread(hv.data(), sizeof(float4), n, f) == (size_t)n;
+    fclose(f);
+    if (!ok) return false;
+
+    if (cudaMemcpy(d.pos, hp.data(), sizeof(float4) * n, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d.vel, hv.data(), sizeof(float4) * n, cudaMemcpyHostToDevice) != cudaSuccess)
+        return false;
+    // 파일보다 버퍼가 크면 남는 자리를 빈 슬롯으로 눌러 둔다 — 미초기화 좌표가
+    // 격자 밖을 가리키면 그대로 커널이 배열 밖을 건드린다.
+    if (n < d.allocN)
+        kHideRange<<<((d.allocN - n) + 255) / 256, 256>>>(d.pos, d.vel, n, d.allocN);
+
+    d.active = n;
+    d.simTime = h.simTime;
+    d.bh.active = (h.bhActive != 0);
+    d.bh.x = h.bhX; d.bh.y = h.bhY; d.bh.rs = h.bhRs; d.bh.mass = h.bhMass;
+    d.computeAccel();
+    CK(cudaGetLastError());
+    return !g_failed;
+}
+
+void Sim::measureRotationCurve(float* out, int bins, float maxRadius) {
+    Impl& d = *impl_;
+    for (int i = 0; i < bins; ++i) out[i] = 0.f;
+    if (g_failed || d.allocN <= 0 || bins <= 0 || maxRadius <= 0.f) return;
+
+    // 고리마다 합과 개수를 따로 모아 나눈다. 화면 격자(projA/projB)를 빌려 쓴다 —
+    // 이 둘은 색을 칠할 때만 쓰이고 지금은 비어 있어, 새로 잡지 않아도 된다.
+    const int cells = d.allocG * d.allocG;
+    if (bins > cells) bins = cells;
+    kClearF<<<(bins + 255) / 256, 256>>>(d.projA, bins);
+    kClearF<<<(bins + 255) / 256, 256>>>(d.projB, bins);
+    kRotationAccum<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN,
+                                                    d.projA, d.projB, bins, maxRadius);
+    std::vector<float> sum(bins), cnt(bins);
+    CK(cudaMemcpy(sum.data(), d.projA, sizeof(float) * bins, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(cnt.data(), d.projB, sizeof(float) * bins, cudaMemcpyDeviceToHost));
+    for (int i = 0; i < bins; ++i) out[i] = (cnt[i] > 0.5f) ? (sum[i] / cnt[i]) : 0.f;
+}
+
+double Sim::measureKineticEnergy() {
+    Impl& d = *impl_;
+    if (g_failed || d.allocN <= 0) return 0.0;
+    CK(cudaMemset(d.redD, 0, sizeof(double)));
+    kKineticAccum<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redD);
+    double e = 0.0;
+    CK(cudaMemcpy(&e, d.redD, sizeof(double), cudaMemcpyDeviceToHost));
+    return e;
+}
 
 // 격자 중력의 정확도를 O(N²) 직접 계산과 견준다.
 // 3D 전환에서는 이 진단을 쓰지 않는다 — 필요해지면 그때 되살린다.

@@ -535,6 +535,20 @@ void TabSave(App& app) {
     ImGui::Dummy(ImVec2(1.0f, 6.0f));
     Toggle("noui", "녹화에 UI 넣지 않기", "막대와 판은 영상에 찍히지 않는다", &app.ui.recordWithoutUi);
     Toggle("shutter", "저장할 때 딸깍 소리", nullptr, &app.ui.shutterSound);
+
+    Line();
+    GroupLabel("우주 상태");
+    if (Btn("save", "지금 상태 저장", false, 168.0f)) app.saveStateRequested = true;
+    ImGui::SameLine();
+    if (Btn("load", "불러오기", false, 168.0f)) app.loadStateRequested = true;
+    ImGui::Dummy(ImVec2(1.0f, 8.0f));
+    if (app.stateMessageFrames > 0 && !app.stateMessage.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.77f, 0.54f, 1.0f));
+        ImGui::TextUnformatted(app.stateMessage.c_str());
+        ImGui::PopStyleColor();
+    } else {
+        UnderNote("알갱이의 자리와 속도를 담는다 \xE2\x80\x94 100만 알이면 약 32 MB 다.");
+    }
 }
 
 } // namespace

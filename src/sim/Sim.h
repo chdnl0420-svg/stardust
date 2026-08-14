@@ -265,6 +265,30 @@ public:
     void   measureCentroid(double& cx, double& cy);
     // 살아 있는 파티클의 평균 온도. 냉각이 실제로 식히는지를 보는 1차 지표다.
     double measureMeanTemperature();
+    // ── 지금 우주를 파일로 남기고 되살리기 ────────────────────────────────
+    //
+    // 흥미로운 상태는 우연히 나온다. 저장할 수 없으면 앱을 끄는 순간 사라지고, 같은 것을
+    // 다시 만들 방법이 없다 — 마우스로 만진 것은 난수 씨앗으로 재현되지 않는다.
+    //
+    // 담는 것은 알갱이의 위치·속도와 그것을 읽는 데 필요한 최소한의 설정뿐이다.
+    // 격자는 담지 않는다 — 위치에서 다시 만들 수 있고, 128³ 이면 그 자체로 수백 MB 다.
+    bool saveState(const std::string& path);
+    bool loadState(const std::string& path);
+
+    // 회전곡선 — 반지름별 평균 회전 속도.
+    //
+    // 은하 시뮬레이터에서 가장 먼저 보는 그래프다. 알갱이 자신의 무게만으로 도는 원반은
+    // 바깥으로 갈수록 느려지는데(케플러), 보이지 않는 무게(암흑물질 헤일로)가 감싸면
+    // 곡선이 평평해진다 — 실제 은하가 그렇게 관측되고, 그것이 암흑물질의 증거다.
+    // 이 앱의 핵심 주장을 눈으로 확인하는 자리다.
+    //
+    // bins 칸으로 나눠 out[i] 에 그 고리의 평균 |회전 속도| 를 담는다. 판 한가운데를
+    // 중심으로 xy 평면에서 재고, 위아래 속도는 회전과 무관하므로 세지 않는다.
+    void   measureRotationCurve(float* out, int bins, float maxRadius);
+
+    // 에너지 — 운동에너지와 그 변화를 보는 값. 계산이 새는지 감시한다.
+    double measureKineticEnergy();
+
     // 직접 O(N²) 계산을 정답지로 놓고 격자 중력의 상대오차 RMS 를 잰다.
     // 이 호출은 독립적으로 자기 버퍼를 잡고 끝나면 반납한다(현재 상태를 건드리지 않는다).
     double measureForceErrorVsDirect(int n, int gridSize, float softeningCells);

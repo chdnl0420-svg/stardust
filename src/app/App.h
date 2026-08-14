@@ -147,6 +147,9 @@ struct App {
 
     // 설정 창이 열려 있는가. 화면 한가운데에 뜨는 큰 판이라 열려 있는 동안은
     // 우주가 뒤로 물러난다 — 값이 많아 막대 옆 작은 팝업으로는 담기지 않는다.
+    // 재는 창(회전곡선·프레임 시간·에너지)이 열려 있는가. M 키로 여닫는다.
+    bool  metersOpen = false;
+
     bool  settingsOpen = false;
     int   settingsTab  = 0;   // 0 중력과 시간 · 1 우주의 경계 · 2 보기와 색 · 3 성능 · 4 조작 · 5 저장
 
@@ -154,6 +157,12 @@ struct App {
     // 표시만 세워 두고 실제 처리는 App::tick 이 한 뒤 지운다.
     bool  pickSaveFolder        = false;
     bool  resetSettingsRequested = false;
+    bool  saveStateRequested    = false;
+    bool  loadStateRequested    = false;
+    // 방금 저장·불러오기가 어떻게 됐는지 잠깐 띄우는 말. 조용히 실패하면 사용자는
+    // 파일이 생긴 줄 안다.
+    std::string stateMessage;
+    int   stateMessageFrames = 0;
 
     // 판을 다시 깔아야 반영되는 값(알갱이 수·격자·경계·장면)을 만졌는가.
     //

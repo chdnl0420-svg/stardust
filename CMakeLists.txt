@@ -74,6 +74,7 @@ add_executable(nbody WIN32
   src/gfx/RenderField.cu
   src/ui/Board.cpp
   src/ui/Hud.cpp
+  src/ui/Meters.cpp
   src/ui/Settings.cpp
   ${IMGUI_DIR}/imgui.cpp
   ${IMGUI_DIR}/imgui_draw.cpp

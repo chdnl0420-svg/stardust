@@ -18,6 +18,7 @@
 #include "gfx/RenderField.h"
 #include "ui/Board.h"
 #include "ui/Hud.h"
+#include "ui/Meters.h"
 #include "ui/Settings.h"
 
 #include "imgui.h"
@@ -474,13 +475,17 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
                 app.drawerOpen = !app.drawerOpen;
                 app.shapeDrawerOpen = false;
             }
-            // Esc 는 「지금 열려 있는 것을 닫는다」 하나로 읽힌다. 설정이 떠 있으면 그것부터.
+            // Esc 는 「지금 열려 있는 것을 닫는다」 하나로 읽힌다.
+            // 감춤 상태에서는 그것이 곧 「돌아오기」다 — 화면에 아무 안내도 없으므로
+            // 사람이 가장 먼저 눌러 보는 키가 통해야 한다.
             if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-                if (app.settingsOpen) app.settingsOpen = false;
+                if (app.uiHidden)          app.uiHidden = false;
+                else if (app.settingsOpen) app.settingsOpen = false;
                 else { app.drawerOpen = false; app.shapeDrawerOpen = false; }
             }
-            // S 로 설정을 여닫는다.
+            // S 로 설정을, M 으로 재는 창을 여닫는다.
             if (ImGui::IsKeyPressed(ImGuiKey_S, false)) app.settingsOpen = !app.settingsOpen;
+            if (ImGui::IsKeyPressed(ImGuiKey_M, false)) app.metersOpen = !app.metersOpen;
             // H 로 막대까지 전부 감춘다(녹화·감상용).
             if (ImGui::IsKeyPressed(ImGuiKey_H, false)) {
                 app.uiHidden = !app.uiHidden;
@@ -495,16 +500,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             }
         }
 
+        // 감추면 **아무것도 남기지 않는다.**
+        //
+        // 전에는 「H: 조작부 보이기」를 한 줄 띄웠다. 돌아오는 길을 알려 주려던 것인데,
+        // 그 한 줄 때문에 화면이 우주만 남지 못했다 — 녹화하거나 그냥 보고 싶어서 감추는
+        // 것이므로 남는 글자가 하나라도 있으면 감춘 뜻이 없다. Esc 와 H 둘 다 돌아온다.
         if (app.uiHidden) {
-            // 완전히 감추면 돌아오는 길을 모른다 — 한 줄짜리 힌트만 남긴다.
-            ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
-            ImGui::SetNextWindowBgAlpha(0.35f);
-            ImGui::Begin("##hint", nullptr,
-                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
-                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
-            ImGui::TextDisabled("H: 조작부 보이기");
-            ImGui::End();
+            // 아무것도 그리지 않는다.
         } else {
             // 그리는 순서가 곧 쌓이는 순서다. 어둠 → 서랍 → 막대 순으로 얹는다.
             DrawBottomScrim(app, g_w, g_h);
@@ -513,6 +515,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             DrawSceneDrawer(app, g_w, g_h);
             DrawShapeDrawer(app, g_w, g_h);
             DrawBottomBar(app, g_w, g_h);
+            DrawMeters(app, g_w, g_h);
             // 설정은 맨 마지막이다 — 열려 있는 동안은 막대까지 뒤로 물러나야 한다.
             const bool wasOpen = app.settingsOpen;
             DrawSettings(app, g_w, g_h);
@@ -545,6 +548,34 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             app.brightDensity = app.brightTemp = 2.0f;
             app.gammaDensity  = app.gammaTemp  = 1.8f;
             ApplyLook(app);
+        }
+
+        // 우주 상태 저장·불러오기. 파일 대화상자가 뜬 동안 프레임이 멎으므로 여기서 한다.
+        if (app.stateMessageFrames > 0) --app.stateMessageFrames;
+        if (app.saveStateRequested || app.loadStateRequested) {
+            const bool saving = app.saveStateRequested;
+            app.saveStateRequested = app.loadStateRequested = false;
+
+            wchar_t wpath[MAX_PATH] = L"stardust.uni";
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"Stardust 우주\0*.uni\0모든 파일\0*.*\0";
+            ofn.lpstrFile = wpath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrDefExt = L"uni";
+            ofn.Flags = OFN_NOCHANGEDIR | (saving ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+            const BOOL got = saving ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
+            if (got) {
+                char utf8[MAX_PATH * 3] = {0};
+                WideCharToMultiByte(CP_UTF8, 0, wpath, -1, utf8, sizeof(utf8), nullptr, nullptr);
+                const bool ok = saving ? app.sim.saveState(utf8) : app.sim.loadState(utf8);
+                // 조용히 실패하면 사용자는 파일이 생긴 줄 안다 — 결과를 반드시 말한다.
+                app.stateMessage = saving
+                    ? (ok ? "저장했습니다" : "저장하지 못했습니다")
+                    : (ok ? "불러왔습니다" : "불러오지 못했습니다 — 형식이 다르거나 깨진 파일입니다");
+                app.stateMessageFrames = 240;
+            }
         }
 
         // 저장 폴더 고르기. 대화상자가 뜬 동안 프레임이 멎으므로 그리기가 다 끝난 여기서 연다.
