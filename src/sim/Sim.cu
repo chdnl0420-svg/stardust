@@ -776,7 +776,8 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
 
     const int kMaxPeers = 96;            // kContact 과 같은 상한
     float sx = 0.f, sy = 0.f, sz = 0.f;
-    int seen = 0;
+    int seen = 0;                        // **들여다본** 수 — 상한은 이것으로 센다
+    int used = 0;                        // 그중 실제로 더한 수
 
     for (int dz = -1; dz <= 1 && seen < kMaxPeers; ++dz)
     for (int dy = -1; dy <= 1 && seen < kMaxPeers; ++dy)
@@ -786,15 +787,18 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
         if (s0 < 0 || e0 <= s0) continue;
         for (int j = s0; j < e0 && seen < kMaxPeers; ++j) {
             if (j == i) continue;
+            // 상한은 죽은 것까지 세어 올린다. 건너뛰며 세지 않으면 죽은 알갱이가 많은
+            // 칸에서 루프가 칸 끝까지 돌아 상한이 무력해진다(kContact 과 같은 규칙).
+            ++seen;
             if (pos[j].x < 0.f) continue;
             const float4 vj = vel[j];
             sx += vj.x; sy += vj.y; sz += vj.z;
-            ++seen;
+            ++used;
         }
     }
-    if (seen <= 0) return;               // 이웃이 없으면 잴 온도도 없다
+    if (used <= 0) return;               // 이웃이 없으면 잴 온도도 없다
 
-    const float inv = 1.f / (float)seen;
+    const float inv = 1.f / (float)used;
     // 한 스텝에 걷어내는 몫. dt 를 곱해 배속을 바꿔도 식는 속도가 그대로이게 하고,
     // 절반에서 끊는다 — 한 스텝에 이웃 속도로 통째로 갈아타면 알갱이들이 한 덩어리로
     // 굳어 버려 흐름이 사라진다.
@@ -1604,7 +1608,21 @@ void Sim::Impl::doContact() {
 void Sim::Impl::doCooling(float dt) {
     if (g_failed || !cfg.coolingEnabled || cfg.coolingRate <= 0.f || dt <= 0.f) return;
     const int G = allocG;
-    // 접촉이 켜져 있으면 그쪽이 이미 칸 구간을 만들어 두었다 — 두 번 정렬하지 않는다.
+
+    // **몇 스텝에 한 번만 식힌다. 매 스텝 하면 시스템이 죽는다.**
+    //
+    // 식히려면 이웃을 알아야 하고, 이웃을 알려면 알갱이를 칸 순서로 줄 세워야 한다.
+    // 접촉이 꺼져 있으면 그 줄 세우기를 여기서 해야 하는데, 그것을 매 스텝 하도록
+    // 두었더니 알갱이 399만에서 초당 60번씩 radix sort + 격자 209만 칸 초기화가 돌았고
+    // 드라이버가 타임아웃돼 시스템이 재부팅됐다(2026-08-14 22:58, BugCheck 0xD1).
+    //
+    // 여덟 스텝에 한 번 하고 dt 를 그만큼 곱한다. 식히기는 여러 스텝에 걸친 평균이라
+    // 결과가 같고, 값은 8분의 1이 된다. 접촉이 켜져 있으면 그쪽이 이미 매 스텝
+    // 줄을 세워 두므로 얹혀 간다(공짜다).
+    const int every = cfg.contactEnabled ? 1 : 8;
+    if ((stepCount % every) != 0) return;
+    dt *= (float)every;
+
     if (!cfg.contactEnabled) {
         const size_t cells = (size_t)G * G * G;
         sortParticles();

@@ -33,5 +33,11 @@ private:
     void*    devPixels_ = nullptr;          // 디바이스 RGBA 버퍼
     void*    devAccum_  = nullptr;          // 점 렌더 누적 버퍼(float3)
     size_t   devBytes_ = 0;
+    // 앞 프레임의 격자를 남겨 두고 섞는다 — 알갱이가 칸 경계를 넘나들 때 그 자리가
+    // 켜졌다 꺼졌다 하는 것을 눌러 준다. 멈춰 세우고 두 프레임을 견주면 픽셀이 하나도
+    // 다르지 않으니(실측 0.00%) 떨림은 그리기가 아니라 움직임에서 온다.
+    void*    devSmooth_ = nullptr;
+    int      smoothCells_ = 0;              // 잡아 둔 칸 수(줄어들 때는 다시 잡지 않는다)
+    bool     smoothPrimed_ = false;         // 첫 프레임은 섞을 앞 그림이 없다
     void ensureSize(int w, int h);
 };

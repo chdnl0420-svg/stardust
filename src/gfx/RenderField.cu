@@ -37,6 +37,20 @@ __device__ __forceinline__ float3 cmapThermal(float t) {
     return make_float3(r, g, b);
 }
 
+// 앞 프레임의 격자에 이번 것을 조금씩 섞는다(a=1 이면 그대로 갈아탄다).
+//
+// 격자는 128칸인데 화면은 1600픽셀이라 한 칸이 12픽셀로 늘어난다. 거기에 뭉친 자리는
+// 평균의 1700배까지 오르므로, 알갱이 몇 개가 칸 경계를 넘나드는 것만으로 그 자리가
+// 켜졌다 꺼졌다 한다. 멈춰 세우고 두 프레임을 견주면 픽셀이 하나도 다르지 않으니
+// (실측 0.00%) 그리기가 아니라 움직임이 원인이고, 그렇다면 시간으로 눌러야 한다.
+//
+// 비용: 격자 칸 수만큼(128² 이면 1만 6천) 읽고 쓰기 한 번. 화면 픽셀 수보다 훨씬 적다.
+__global__ void kBlendGrid(float* dst, const float* src, int n, float a) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] += (src[i] - dst[i]) * a;
+}
+
 // 격자를 화면 픽셀로 샘플링해 RGBA8 을 만든다.
 // zoom/pan 은 화면 중앙을 기준으로 시뮬레이션 공간 [0,1]² 을 확대·이동한다.
 __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
@@ -250,6 +264,8 @@ void RenderField::shutdown() {
     if (hostPixels_) { free(hostPixels_); hostPixels_ = nullptr; }
     if (devPixels_)  { cudaFree(devPixels_); devPixels_ = nullptr; devBytes_ = 0; }
     if (devAccum_)   { cudaFree(devAccum_);  devAccum_  = nullptr; }
+    if (devSmooth_)  { cudaFree(devSmooth_); devSmooth_ = nullptr; }
+    smoothCells_ = 0; smoothPrimed_ = false;
 }
 
 void RenderField::ensureSize(int w, int h) {
@@ -354,6 +370,30 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                                : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
                                                                         : Sim::Field::Density;
             const float* grid = app.sim.fieldDevicePtr(f);
+
+            // 앞 프레임과 섞어 떨림을 누른다. 새 그림을 35% 만 받아들이면 서너 프레임에
+            // 걸쳐 따라가므로, 빠르게 도는 것도 뭉개지지 않으면서 깜빡임은 사라진다.
+            // 멈춰 있을 때는 섞을 것도 없고(두 프레임이 같다) 새 장면으로 갈아탄 직후에는
+            // 앞 그림이 방해가 되므로, 도는 동안에만 섞는다.
+            if (grid && app.running && gridG > 0) {
+                const int cells = gridG * gridG;
+                if (cells > smoothCells_) {          // 커질 때만 다시 잡는다
+                    if (devSmooth_) cudaFree(devSmooth_);
+                    devSmooth_ = nullptr;
+                    if (cudaMalloc(&devSmooth_, sizeof(float) * (size_t)cells) != cudaSuccess)
+                        devSmooth_ = nullptr;
+                    smoothCells_ = devSmooth_ ? cells : 0;
+                    smoothPrimed_ = false;
+                }
+                if (devSmooth_) {
+                    const float a = smoothPrimed_ ? 0.35f : 1.0f;
+                    kBlendGrid<<<(cells + 255) / 256, 256>>>((float*)devSmooth_, grid, cells, a);
+                    smoothPrimed_ = true;
+                    grid = (const float*)devSmooth_;
+                }
+            } else {
+                smoothPrimed_ = false;               // 멈춘 동안 쌓인 것은 버린다
+            }
 
             // 밀도는 파티클 수에 그대로 비례한다 — 같은 배치라도 3000만 개는 100만 개의 30배다.
             // 원시값을 그대로 넣으면 개수를 올리는 순간 판 전체가 순백으로 타 버린다
