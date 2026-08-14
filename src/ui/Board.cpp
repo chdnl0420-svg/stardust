@@ -129,6 +129,24 @@ void DrawBoard(App& app, bool& boardOpen) {
         if (i % 2 == 0) ImGui::SameLine();
     }
 
+    // 알갱이끼리 부딪히게 할지. 장면을 고르면 그 장면에 맞는 값으로 정해지지만,
+    // 어느 장면에서든 여기서 덮어쓸 수 있다.
+    if (ImGui::Checkbox("알갱이끼리 부딪힘", &app.cfg.contactEnabled))
+        ApplyAutoGrid(app.cfg);   // 켜면 알갱이가 움직일 공간이 나오도록 격자를 다시 고른다
+    Help("켜면 알갱이가 서로 통과하지 못합니다. 겹치면 밀어내고 부딪히면 에너지를 잃습니다.\n"
+         "그래서 모이다가 더 눌리지 않는 지점에서 멈추고, 그 덩어리가 소행성이 됩니다.\n\n"
+         "끄면 서로 지나쳐 안개처럼 흐릅니다. 은하나 우주 구조를 볼 때는 이쪽이 맞습니다.\n\n"
+         "알갱이가 판을 너무 많이 채우면 움직일 공간이 없어 자동으로 꺼집니다.");
+    if (app.cfg.contactEnabled
+        && !ContactFitsCount(app.cfg.particleCount, app.cfg.gridSize)) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
+        ImGui::TextWrapped("알갱이가 너무 많아 지금은 꺼져 있습니다");
+        ImGui::PopStyleColor();
+        // 켜지는 한도(0.764 × 격자²)를 만 단위로 알려 준다.
+        ImGui::TextDisabled("최대 개수를 %d만 이하로",
+                            (int)(0.764 * (double)app.cfg.gridSize * app.cfg.gridSize / 10000.0));
+    }
+
     // ---------------- 놓기 ----------------
     // 제목에 특수 문자를 쓰지 않는다 — 이 폰트에 없는 글자는 네모(◈)로 깨져 나온다.
     Title("놓기 (고르고 화면 클릭)");
@@ -194,10 +212,6 @@ void DrawBoard(App& app, bool& boardOpen) {
          "밀도와 온도는 각자 따로 기억합니다.");
     if (LogRow("gam", &app.view.gamma, 0.4f, 4.0f, "희미한 것 %.2f")) RememberLook(app);
     Help("올리면 옅은 것까지 드러나고, 내리면 진한 곳만 남아 또렷해집니다.");
-    ImGui::Checkbox("덧그림", &app.showOverlay);
-    Help("계산 결과 위에 얹어 그리는 그림입니다.\n"
-         "천체 동그라미, 블랙홀의 지평선·광자 구면·최소 안정 궤도 원과 이름표.\n\n"
-         "끄면 계산된 화면만 남습니다.");
 
     // ---------------- 녹화 ----------------
     Title("녹화");

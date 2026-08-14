@@ -104,10 +104,6 @@ void App::tick() {
         stepsLastFrame = Sim::failed() ? 0 : reps;
     }
 
-    // 화면에 그릴 천체를 프레임에 한 번만 가져온다. 멈춰 있을 때도 가져와야 일시정지 중에
-    // 천체가 사라지지 않는다.
-    bodyListCount = cfg.bodiesEnabled ? sim.readBodies(bodyList, MAX_DRAW_BODIES) : 0;
-
     // 카드가 힘겨워하면 스스로 짐을 던다.
     guardPerformance();
 }
@@ -219,11 +215,10 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
         cfg.temperatureEnabled = true;   // 안쪽으로 갈수록 빨라지는 것을 온도로도 볼 수 있게
         return;
     }
-    // 천체 만들기는 알갱이끼리 **실제로 부딪히게** 해서 덩어리가 되는 장면이다.
-    // 임계값을 넘으면 천체를 만들어 주던 예전 방식(bodiesEnabled)은 더 쓰지 않는다 —
-    // 뭉치는 것이 물리가 아니라 규칙이었고, 소행성·행성·별의 경계도 사람이 정한 숫자였다.
+    // 뭉치기는 알갱이끼리 **실제로 부딪히게** 해서 덩어리가 되는 장면이다.
+    // 임계값을 넘으면 천체를 만들어 주던 예전 방식은 걷어냈다 — 뭉치는 것이 물리가 아니라
+    // 규칙이었고, 소행성·행성·별의 경계도 사람이 정한 숫자였다.
     // 접촉력만 있으면 모이다가 더 못 눌리는 지점에서 저절로 멈추고, 그 덩어리가 곧 소행성이다.
-    cfg.bodiesEnabled  = false;
     cfg.contactEnabled = (preset == Preset::Accretion);
     if (preset == Preset::Accretion) {
         cfg.boundary = Boundary::Isolated;

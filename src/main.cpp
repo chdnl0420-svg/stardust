@@ -236,9 +236,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         if (ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !ImGui::GetIO().WantTextInput)
             app.uiHidden = !app.uiHidden;
 
-        // 천체는 설명이 아니라 화면에 있는 물체다 — UI 를 감춰도 계속 그린다.
-        DrawBodies(app, g_w, g_h);
-
         if (app.uiHidden) {
             // 완전히 감추면 돌아오는 길을 모른다 — 한 줄짜리 힌트만 남긴다.
             ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);

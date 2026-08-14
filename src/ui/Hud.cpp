@@ -6,7 +6,7 @@
 // 숫자로만 알려주면 어디서 무슨 일이 벌어지는지 볼 수 없다 — 파티클이 어느 원을 넘을 때
 // 나선으로 꺾이는지가 이 장면의 핵심이다.
 void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
-    if (!app.cfg.blackHoleEnabled || app.uiHidden || !app.showOverlay) return;
+    if (!app.cfg.blackHoleEnabled || app.uiHidden) return;
     if (viewW <= 0 || viewH <= 0) return;
 
     // 시뮬 좌표 -> 화면 픽셀. 렌더 셰이더(kShade·kSplatPoints)와 같은 변환이라야 자리가 맞는다.
@@ -50,59 +50,6 @@ void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
     // 지평선 안쪽은 빛도 못 나오는 곳이라 까맣게 덮는다.
     const float rsPx = radiusPx(rs);
     if (rsPx > 2.0f) dl->AddCircleFilled(c, rsPx, IM_COL32(0, 0, 0, 255), 96);
-}
-
-// 가스가 뭉쳐 만들어진 천체를 화면에 겹쳐 그린다.
-//
-// 밀도 격자에 얹혀 있기는 하지만, 천체 하나가 격자 한두 칸이라 밀도 그림만으로는
-// 「저 점이 별인지 그냥 빽빽한 가스인지」 구분할 수 없다. 등급을 색으로 갈라 준다.
-void DrawBodies(const App& app, int viewW, int viewH) {
-    if (!app.cfg.bodiesEnabled || app.bodyListCount <= 0 || !app.showOverlay) return;
-    if (viewW <= 0 || viewH <= 0) return;
-
-    const float aspect = (float)viewW / (float)viewH;
-    auto toScreen = [&](float sx, float sy) -> ImVec2 {
-        float u = (sx - 0.5f + app.panX) * app.zoom + 0.5f;
-        float v = (sy - 0.5f + app.panY) * app.zoom + 0.5f;
-        if (aspect > 1.0f) u = (u - 0.5f) / aspect + 0.5f;
-        else               v = (v - 0.5f) * aspect + 0.5f;
-        // 세로를 여기서 뒤집지 않는다. 밀도 격자를 화면에 붙이는 쿼드가 텍스처 (0,0) 을
-        // 화면 왼쪽 **아래**에 두고(glVertex2f(-1,-1)), 격자를 담을 때 행을 (1-v)·H 로 이미
-        // 한 번 뒤집는다 — 두 번 뒤집으면 제자리로 돌아온다. 마우스 입력(screenToSim)도
-        // 화면 위를 v=0 으로 읽으므로 같은 방향이다.
-        // 뒤집힌 채로 두면 천체가 가스와 아래위 반대편에 그려진다(2026-08-14 실측).
-        // 블랙홀 원은 중심 대칭이라 같은 버그를 갖고도 멀쩡해 보였다.
-        return ImVec2(u * viewW, v * viewH);
-    };
-    // 화면 반지름 환산 배율. 중심에서 한 칸 옆으로 옮긴 점까지의 거리로 잰다.
-    const ImVec2 o0 = toScreen(0.0f, 0.5f), o1 = toScreen(1.0f, 0.5f);
-    const float pxPerUnit = o1.x - o0.x;
-
-    struct Look { unsigned fill, edge; };
-    const Look looks[3] = {
-        { IM_COL32(170, 150, 130, 230), IM_COL32(210, 195, 175, 255) },  // 소행성 — 돌 색
-        { IM_COL32( 90, 160, 220, 235), IM_COL32(150, 205, 255, 255) },  // 행성 — 푸른빛
-        { IM_COL32(255, 225, 130, 245), IM_COL32(255, 250, 210, 255) },  // 별 — 노란빛
-    };
-
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    for (int i = 0; i < app.bodyListCount; ++i) {
-        const BodyView& b = app.bodyList[i];
-        const int g = (b.grade < 0) ? 0 : (b.grade > 2 ? 2 : b.grade);
-        const ImVec2 c = toScreen(b.x, b.y);
-        if (c.x < -40.f || c.y < -40.f || c.x > viewW + 40.f || c.y > viewH + 40.f) continue;
-        // 실제 반지름이 한 픽셀도 안 되는 천체가 대부분이다 — 그대로 그리면 안 보이므로
-        // 등급마다 최소 크기를 준다. 커진 천체는 실제 크기를 따라간다.
-        // 1.6 px 로 뒀더니 1600×900 원본에서도 가스 알갱이와 구분되지 않았다(2026-08-14 실측).
-        const float minPx = 3.0f + 2.0f * g;
-        float px = b.radius * pxPerUnit;
-        if (px < minPx) px = minPx;
-        if (px > 200.f) px = 200.f;
-        dl->AddCircleFilled(c, px, looks[g].fill, 20);
-        dl->AddCircle(c, px, looks[g].edge, 20, 1.2f);
-        // 별은 주변을 밝히는 것이 눈에 띄어야 한다
-        if (g == 2) dl->AddCircle(c, px * 2.2f, IM_COL32(255, 235, 160, 60), 24, 2.0f);
-    }
 }
 
 void DrawHud(const App& app) {
@@ -181,25 +128,6 @@ void DrawHud(const App& app) {
             ImGui::TextDisabled("최대 개수를 %d 이하로 낮추면 켜집니다",
                                 (int)(0.764 * (double)app.sim.gridSize() * app.sim.gridSize()));
         }
-    }
-
-    // 천체 현황 — 이 장면의 결과 그 자체라 눈에 잘 띄어야 한다.
-    if (app.cfg.bodiesEnabled) {
-        const BodyStats bs = app.sim.bodyStats();
-        ImGui::Separator();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.82f, 0.75f, 0.66f, 1.0f));
-        ImGui::Text("소행성 %d", bs.asteroids);
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.70f, 0.92f, 1.0f));
-        ImGui::Text("· 행성 %d", bs.planets);
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 0.88f, 0.52f, 1.0f));
-        ImGui::Text("· 별 %d", bs.stars);
-        ImGui::PopStyleColor();
-        ImGui::TextDisabled("가장 큰 것 %.0f 알갱이 · 합체 %d · 파괴 %d",
-                            bs.heaviest, bs.merges, bs.shatters);
     }
 
     if (!app.running) {

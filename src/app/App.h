@@ -89,10 +89,6 @@ struct App {
     // 녹화하거나 그림만 보고 싶을 때 쓴다.
     bool  uiHidden = false;
 
-    // 시뮬레이션 위에 덧그리는 것들 — 천체 동그라미, 블랙홀의 세 원과 라벨.
-    // 계산 결과가 아니라 「여기서 무슨 일이 일어나는지」 알려 주려고 얹는 그림이라,
-    // 순수한 화면만 보고 싶을 때 끌 수 있어야 한다.
-    bool  showOverlay = true;
 
     // 「보기」가 고르는 표현 방식. 나머지 색 설정(컬러맵·온도 추적)은 여기에 맞춰 자동으로 정한다.
     enum class Look { Density, Temperature };
@@ -109,11 +105,6 @@ struct App {
     // 「한 번에 놓을 개수」 슬라이더가 끌리는 동안 들고 있는 값(만 단위).
     int   shapeCountSlider = -1;
 
-    // 화면에 그릴 천체 목록. 프레임마다 코어에서 한 번 가져온다 —
-    // 그리는 쪽이 직접 GPU 를 읽으면 매 프레임 여러 번 동기화가 걸린다.
-    static constexpr int MAX_DRAW_BODIES = 2048;
-    BodyView bodyList[MAX_DRAW_BODIES];
-    int      bodyListCount = 0;
 
     void init();
     // 설정 보드에서 바뀐 값을 코어에 반영한다. 파티클 수·격자·경계가 바뀌면 코어가 재할당한다.

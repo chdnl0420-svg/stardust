@@ -141,9 +141,6 @@ std::string ControlBridge::statusBody(const App& app) const {
     sim.measureCentroid(centroidX, centroidY);
     const double meanTemp = sim.measureMeanTemperature();
 
-    // 천체 현황. App::tick 이 프레임마다 갱신해 둔 값을 그대로 읽는다.
-    const BodyStats bs = sim.bodyStats();
-
     char buf[1850];
     snprintf(buf, sizeof(buf),
         // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
@@ -159,7 +156,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 표시 설정은 set 으로 바꿀 수 있는데 상태에는 없어서 되읽을 방법이 없었다
         // (round-06 QA-2 — 컬러맵·밝기·대비·HUD·줌팬 4항목이 자동 검증 불가로 남았다).
         "renderMode=%s\ncolorBy=%s\ncolormap=%s\n"
-        "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\noverlay=%d\n"
+        "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\n"
         "contact=%d\ncontactStiffness=%.0f\ncontactDamping=%.3f\n"
         "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
         "recording=%d\nrecordedFrames=%d\n"
@@ -169,9 +166,6 @@ std::string ControlBridge::statusBody(const App& app) const {
         "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\npendingSteps=%d\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
-        // 천체 만들기 장면의 결과. 꺼져 있으면 전부 0 이다.
-        "bodies=%d\nasteroids=%d\nplanets=%d\nstars=%d\n"
-        "heaviestBody=%.0f\nbodyMerges=%d\nbodyShatters=%d\n"
         "vramFreeMB=%.0f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
@@ -190,7 +184,6 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.view.cmap == ColorMap::Gray ? "gray"
             : app.view.cmap == ColorMap::Thermal ? "thermal" : "astro",
         app.view.brightness, app.view.gamma, app.view.showHud ? 1 : 0,
-        app.showOverlay ? 1 : 0,
         app.cfg.contactEnabled ? 1 : 0, app.cfg.contactStiffness, app.cfg.contactDamping,
         app.zoom, app.panX, app.panY,
         app.recording ? 1 : 0, app.recordedFrames,
@@ -198,8 +191,6 @@ std::string ControlBridge::statusBody(const App& app) const {
         t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame, pendingSteps_,
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
-        bs.count, bs.asteroids, bs.planets, bs.stars,
-        bs.heaviest, bs.merges, bs.shatters,
         Sim::deviceFreeBytes() / 1048576.0);
     return buf;
 }
@@ -321,7 +312,6 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "brightness"))     app.view.brightness    = clampF(getFloat(kv, "brightness", app.view.brightness), 0.05f, 8.0f, app.view.brightness);
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
-        if (has(kv, "overlay"))        app.showOverlay        = getInt(kv, "overlay", 1) != 0;
         if (has(kv, "contact"))        app.cfg.contactEnabled = getInt(kv, "contact", 0) != 0;
         if (has(kv, "contactStiffness"))
             app.cfg.contactStiffness = clampF(getFloat(kv, "contactStiffness", app.cfg.contactStiffness),

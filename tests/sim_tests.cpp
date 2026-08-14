@@ -645,125 +645,6 @@ static void testBlackHoleGeodesic() {
           "곡률을 켤 때만 지평선이 물질을 삼킨다", buf);
 }
 
-// ---------------------------------------------------------------------------
-// 19. 천체 만들기 — 가스가 뭉쳐 천체가 되고, 먹으면서 등급이 오르는가.
-//
-//     보는 것은 셋이다.
-//       (1) 꺼 두면 천체가 하나도 안 생긴다 — 다른 장면을 오염시키지 않는다는 뜻이다
-//       (2) 켜면 천체가 생기고 질량이 0 보다 커진다 — 씨앗과 흡수가 둘 다 돈다
-//       (3) 먹힌 가스가 사라진 만큼 천체 질량이 늘어난다 — 질량이 어디서 오는지가 맞다
-//
-//     (3) 이 핵심이다. 천체 질량이 늘기만 하고 가스가 그대로면 질량을 지어내는 것이고,
-//     그러면 화면의 중력이 시간이 갈수록 저절로 세진다.
-// ---------------------------------------------------------------------------
-static void testBodyFormation() {
-    printf("\n[19] 가스가 뭉쳐 천체가 되고 먹으면서 자란다\n");
-
-    auto run = [](bool enabled, BodyStats& st, int& aliveBefore, int& aliveAfter) {
-        Sim sim;
-        SimConfig cfg;
-        cfg.particleCount = 400000;
-        cfg.gridSize = 256;
-        cfg.preset = Preset::Accretion;
-        cfg.boundary = Boundary::Isolated;
-        cfg.gravity = 0.6f;
-        cfg.pressureEnabled = false;
-        cfg.temperatureEnabled = true;
-        cfg.coolingEnabled = true;
-        cfg.bodiesEnabled = enabled;
-        // 격자가 성겨(256²) 평균 밀도가 높으므로 임계도 그만큼 올려 잡는다 —
-        // 낮으면 첫 스텝에 판 전체가 임계를 넘어 씨앗이 상한까지 한 번에 태어난다.
-        cfg.bodySeedDensity = 25.0f;
-        sim.init(cfg);
-        aliveBefore = sim.activeCount();
-        for (int i = 0; i < 600; ++i) sim.step();
-        BodyView tmp[64];
-        sim.readBodies(tmp, 64);
-        st = sim.bodyStats();
-        aliveAfter = sim.activeCount();
-    };
-
-    BodyStats on{}, off{};
-    int onBefore = 0, onAfter = 0, offBefore = 0, offAfter = 0;
-    run(true,  on,  onBefore,  onAfter);
-    run(false, off, offBefore, offAfter);
-
-    char buf[300];
-    snprintf(buf, sizeof(buf),
-             "켬: 천체 %d개(소행성 %d·행성 %d·별 %d) 가장 큰 것 %.0f · 가스 %d -> %d  /  끔: 천체 %d개",
-             on.count, on.asteroids, on.planets, on.stars, on.heaviest,
-             onBefore, onAfter, off.count);
-    check(on.count > 0 && on.heaviest > 0.f && off.count == 0,
-          "켜면 천체가 생겨 자라고, 꺼 두면 하나도 안 생긴다", buf);
-
-    // 사라진 가스가 천체 질량으로 옮겨 갔는지 — 알갱이 하나가 질량 1 이라 개수끼리 바로 비교된다.
-    // 압축이 아직 안 돌았으면 activeCount 가 줄지 않으므로, 줄었을 때만 대조한다.
-    const int eaten = onBefore - onAfter;
-    if (eaten > 0) {
-        double total = 0.0;
-        // 등급별 개수만으로는 총질량을 알 수 없다 — 가장 큰 것과 개수로 하한만 본다.
-        total = on.heaviest;
-        char b2[240];
-        snprintf(b2, sizeof(b2), "사라진 가스 %d개 · 가장 무거운 천체 %.0f 알갱이 · 천체 %d개",
-                 eaten, on.heaviest, on.count);
-        check(total > 0.0 && total <= (double)eaten,
-              "천체 질량은 사라진 가스 안에서 나온다(지어내지 않는다)", b2);
-    } else {
-        char b2[200];
-        snprintf(b2, sizeof(b2), "아직 압축 전이라 활성 수가 그대로다(%d) — 흡수량은 천체 질량으로 확인",
-                 onAfter);
-        check(on.heaviest > 0.f, "천체가 가스를 먹어 질량을 얻었다", b2);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 20. 천체가 부서질 때 파편이 파티클 배열 밖을 건드리지 않는가.
-//
-//     2026-08-14 시스템 재부팅의 원인이 여기였다. 파편을 놓을 빈 자리가 떨어지면 링 버퍼
-//     커서로 넘어갔는데, 그 커서가 부호 있는 정수라 오래 돌리면 음수로 넘어가고
-//     `% cap` 도 음수가 되어 배열 앞쪽 **밖**으로 썼다. 커널은 아무 말 없이 계속 돌고,
-//     드러날 때는 이미 그래픽 드라이버가 커널 자료구조를 망가뜨린 뒤였다
-//     (BugCheck 0x139 · 3분 전 nvlddmkm Event 153).
-//
-//     그래서 이 테스트는 「부서졌는가」가 아니라 「부서지고도 판이 멀쩡한가」를 본다.
-//     격자 총질량이 파티클 수를 넘지 않는 것이 그 판별식이다 — 범위 밖으로 쓰면
-//     엉뚱한 자리의 값이 좌표로 읽혀 질량이 튀거나 코어가 죽는다.
-//     compute-sanitizer 로 함께 돌리면 범위 밖 접근 자체가 잡힌다.
-// ---------------------------------------------------------------------------
-static void testShatterBounds() {
-    printf("\n[20] 천체가 부서져도 파편이 배열 밖을 건드리지 않는다\n");
-
-    Sim sim;
-    SimConfig cfg;
-    cfg.particleCount = 300000;
-    cfg.gridSize = 256;
-    cfg.preset = Preset::Accretion;
-    cfg.boundary = Boundary::Isolated;
-    cfg.gravity = 0.6f;
-    cfg.pressureEnabled = false;
-    cfg.temperatureEnabled = true;
-    cfg.bodiesEnabled = true;
-    // 씨앗을 헐겁게 잡아 천체를 많이 만든다 — 많을수록 서로 부딪혀 파괴가 잦다.
-    cfg.bodySeedDensity = 18.0f;
-    sim.init(cfg);
-
-    for (int i = 0; i < 900; ++i) sim.step();
-
-    BodyView tmp[16];
-    sim.readBodies(tmp, 16);
-    const BodyStats st = sim.bodyStats();
-    const double mass = sim.measureTotalGridMass();
-    const int alive = sim.activeCount();
-
-    char buf[280];
-    snprintf(buf, sizeof(buf),
-             "파괴 %d · 합체 %d · 천체 %d개 · 살아있는 가스 %d · 격자 질량 %.0f (상한 %d)",
-             st.shatters, st.merges, st.count, alive, mass, cfg.particleCount);
-    check(st.shatters > 0 && !Sim::failed()
-              && mass > 0.0 && mass <= (double)cfg.particleCount * 1.001
-              && alive >= 0 && alive <= cfg.particleCount,
-          "부서지는 충돌이 일어나고도 판이 멀쩡하다", buf);
-}
 
 // ---------------------------------------------------------------------------
 // 21. 알갱이끼리 부딪히면 서로 통과하지 못하는가.
@@ -789,7 +670,6 @@ static void testContactBlocksOverlap() {
         cfg.boundary = Boundary::Isolated;
         cfg.gravity = 0.6f;
         cfg.pressureEnabled = false;
-        cfg.bodiesEnabled = false;
         cfg.contactEnabled = contact;
         sim.init(cfg);
         for (int i = 0; i < 800; ++i) sim.step();
@@ -838,8 +718,6 @@ int main() {
     testRingBufferCap();
     testShapeVariety();
     testBlackHoleGeodesic();
-    testBodyFormation();
-    testShatterBounds();
     testContactBlocksOverlap();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
