@@ -72,62 +72,50 @@ void DrawHud(const App& app) {
 
     if (!app.view.showHud) return;
 
-    ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.72f);
+    // 상태줄은 화면 맨 위에 한 줄로 흐리게 깐다.
+    // 늘 보이되 주인공은 우주여야 하므로, 마우스를 올렸을 때만 또렷해진다.
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool near = (io.MousePos.y >= 0.0f && io.MousePos.y < 40.0f);
+        char line[192];
+        char cnt[24];
+        const int n = app.sim.particleCount();
+        if (n >= 10000) snprintf(cnt, sizeof(cnt), "%d만 알", n / 10000);
+        else            snprintf(cnt, sizeof(cnt), "%d 알", n);
+        // 시간이 잘리는 것은 늘 일어나므로 따로 창을 띄우지 않고 이 줄에 붙인다.
+        // 상주하는 경고 창은 「평소엔 우주뿐」을 무너뜨린다.
+        const SimTimings tt = app.sim.timings();
+        const float want = 0.0016f * app.cfg.timeScale;
+        char slow[48] = { 0 };
+        if (tt.dtUsed > 0.0f && tt.dtUsed < want * 0.9f)
+            snprintf(slow, sizeof(slow), " · 시간 %.0f%% 눌림", 100.0f * (1.0f - tt.dtUsed / want));
+        snprintf(line, sizeof(line), "%.1f FPS · %s · %d² · t %.3f%s",
+                 app.fps, cnt, app.sim.gridSize(), app.sim.simTime(), slow);
+        ImGui::GetBackgroundDrawList()->AddText(
+            ImVec2(14.0f, 9.0f),
+            IM_COL32(154, 154, 168, near ? 255 : 115), line);
+    }
+
+    // 아래는 알려야 할 것이 있을 때만 뜨는 알림이다. 평소에는 아무것도 그리지 않는다.
+    // 접촉은 켜졌는데 알갱이가 많아 못 도는 경우만 알린다. 잘 돌 때는 조용하다.
+    const bool contactNote = app.cfg.contactEnabled
+                          && !ContactFitsCount(app.sim.particleCount(), app.sim.gridSize());
+    if (!contactNote && app.running) return;
+
+    ImGui::SetNextWindowPos(ImVec2(12, 34), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.55f);
     ImGui::Begin("##hud", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                  ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
 
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.37f, 0.76f, 0.48f, 1.0f));
-    ImGui::Text("%.1f FPS", app.fps);
-    ImGui::PopStyleColor();
-    ImGui::SameLine();
-    ImGui::TextDisabled("%.2f ms/frame", app.frameMs);
-    ImGui::Separator();
-
-    ImGui::TextDisabled("파티클"); ImGui::SameLine();
-    ImGui::Text("%d", app.sim.particleCount());
-
-    ImGui::TextDisabled("격자");   ImGui::SameLine();
-    ImGui::Text("%d²", app.sim.gridSize()); ImGui::SameLine();
-    ImGui::TextDisabled("· %s", app.cfg.boundary == Boundary::Isolated ? "고립경계" : "주기경계");
-
-    ImGui::TextDisabled("시각");   ImGui::SameLine();
-    ImGui::Text("t = %.3f", app.sim.simTime());
-
-    // 시간 간격이 CFL 한계에 잘렸으면 알린다 — 이 동안은 화면 속 시간이 설정한 배속보다
-    // 천천히 흐른다. 판정은 "요청한 간격보다 실제로 쓴 간격이 작은가"로 한다.
-    // 전에는 분할 횟수(substeps)가 1 보다 큰지를 봤는데, 코어가 분할 상한을 1 로 고정해 둬서
-    // 그 조건은 결코 참이 되지 않았다 — 경고가 한 번도 뜬 적이 없다(round-06 리뷰 P2 #27).
-    SimTimings t = app.sim.timings();
-    const float dtWanted = 0.0016f * app.cfg.timeScale;
-    if (t.dtUsed > 0.0f && t.dtUsed < dtWanted * 0.99f) {
+    if (contactNote) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
-        // HUD 는 입력을 안 받아 마우스를 올려도 설명이 안 뜬다 — 문장 자체를 알아볼 수 있게 쓴다.
-        ImGui::Text("빨라서 시간을 %.0f%% 잘게 쪼개는 중 (최고 속도 %.2f)",
-                    100.0f * (1.0f - t.dtUsed / dtWanted), t.maxSpeed);
+        ImGui::TextUnformatted("알갱이가 너무 많아 충돌을 껐습니다");
         ImGui::PopStyleColor();
-    }
-    if (app.stepsLastFrame > 1)
-        ImGui::TextDisabled("화면 한 장에 %d번 계산 (배속)", app.stepsLastFrame);
-
-    // 접촉이 켜졌는지 — 이 장면에서 알갱이가 실제로 부딪히는지 아닌지는
-    // 화면만 봐서는 헷갈리므로 상태를 적어 준다. 꺼졌으면 왜 꺼졌는지도 함께.
-    if (app.cfg.contactEnabled) {
-        ImGui::Separator();
-        if (ContactFitsCount(app.sim.particleCount(), app.sim.gridSize())) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.37f, 0.76f, 0.48f, 1.0f));
-            ImGui::TextUnformatted("알갱이끼리 부딪히는 중");
-            ImGui::PopStyleColor();
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
-            ImGui::TextUnformatted("알갱이가 너무 많아 충돌을 껐습니다");
-            ImGui::PopStyleColor();
-            ImGui::TextDisabled("최대 개수를 %d 이하로 낮추면 켜집니다",
-                                (int)(0.764 * (double)app.sim.gridSize() * app.sim.gridSize()));
-        }
+        ImGui::TextDisabled("최대 개수를 %d 이하로 낮추면 켜집니다",
+                            (int)(0.764 * (double)app.sim.gridSize() * app.sim.gridSize()));
     }
 
     if (!app.running) {

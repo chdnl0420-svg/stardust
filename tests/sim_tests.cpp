@@ -132,8 +132,8 @@ static void testReconfigure() {
 static void testPresets() {
     printf("\n[5] 프리셋별 초기 배치\n");
     struct P { Preset p; const char* name; };
-    for (P e : { P{Preset::SpiralDisk,"나선팔"}, P{Preset::TidalPair,"조석꼬리"},
-                 P{Preset::HeadOnShock,"충격파"}, P{Preset::CosmicWeb,"구조형성"},
+    for (P e : { P{Preset::SpiralDisk,"나선 은하"}, P{Preset::TidalPair,"은하 충돌"},
+                 P{Preset::CosmicWeb,"구조형성"}, P{Preset::BlackHole,"블랙홀"},
                  P{Preset::Empty,"빈 판"} }) {
         Sim sim;
         SimConfig cfg;
@@ -374,7 +374,7 @@ static void testStarBookkeeping() {
     SimConfig cfg;
     cfg.particleCount = 200000;
     cfg.gridSize = 256;
-    cfg.preset = Preset::HeadOnShock;
+    cfg.preset = Preset::SpiralDisk;
     cfg.pressureEnabled = true;
     cfg.temperatureEnabled = true;
     cfg.coolingEnabled = true;
@@ -666,7 +666,7 @@ static void testContactBlocksOverlap() {
         // 20만 개는 1024² 에서 접촉을 켤 수 있는 한도(약 80만) 안이다.
         cfg.particleCount = 200000;
         cfg.gridSize = 1024;
-        cfg.preset = Preset::Accretion;
+        cfg.preset = Preset::SpiralDisk;
         cfg.boundary = Boundary::Isolated;
         cfg.gravity = 0.6f;
         cfg.pressureEnabled = false;

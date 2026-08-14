@@ -81,6 +81,8 @@ add_executable(nbody WIN32
   # OpenGL2 백엔드를 쓴다. GL3 코어 컨텍스트를 만들려면 wglCreateContextAttribsARB 배선이 필요한데
   # 증분 1 의 목표(창이 뜨고 파티클이 뭉치는 것을 본다)에는 GL 1.1 로 충분하다.
   ${IMGUI_DIR}/backends/imgui_impl_opengl2.cpp
+  # 실행 파일에 아이콘을 박는다. 탐색기·작업표시줄이 이걸 읽는다.
+  packaging/stardust.rc
 )
 target_include_directories(nbody PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src

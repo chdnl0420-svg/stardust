@@ -33,6 +33,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#AppExe}
+SetupIconFile=assets\stardust.ico
 ; 설치 파일이 250 MB 가까이 된다 — 진행 표시가 있어야 멈춘 것으로 오해하지 않는다.
 SetupLogging=yes
 

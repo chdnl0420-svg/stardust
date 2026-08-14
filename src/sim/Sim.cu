@@ -84,6 +84,29 @@ __device__ __forceinline__ int gidx(int x, int y, int G, int periodic) {
 // 초기 배치 — 속도는 여기서 정하지 않는다. 중력을 한 번 푼 뒤 kSetOrbit 이 채운다.
 // (프로토타입에서 속도를 임의로 정했다가 원반이 흩어진 적이 있다 — design.md §9-2)
 // ---------------------------------------------------------------------------
+// 나선 은하 한 점을 찍는다.
+//
+// 중력만으로도 나선팔은 저절로 생기지만, 처음 몇 초 동안은 그냥 둥근 원반이라
+// 「나선 은하」라는 이름과 화면이 어긋난다. 그래서 처음부터 나선으로 깔아 준다.
+//
+// 로그 나선을 쓴다 — 실제 은하의 팔이 그 모양이다. 반지름이 커질수록 각이 로그로 밀리고,
+// 팔 둘을 반 바퀴 어긋나게 둔다. 팔에서 옆으로 흩어지는 정도는 안쪽일수록 크게 잡아
+// 가운데가 뭉툭한 팽대부처럼 보이게 한다.
+__device__ __forceinline__ float2 spiralPoint(float cx, float cy, float R,
+                                              float u1, float u2, float u3) {
+    const float t  = 0.08f + 0.92f * sqrtf(u1);     // 0~1, 바깥일수록 성기게
+    const float r  = R * t;
+    const float arm = (u3 < 0.5f) ? 0.f : 3.14159265f;
+    // 감기는 정도. 3.2 면 팔이 한 바퀴 반쯤 돈다.
+    const float th = arm + 3.2f * logf(t + 0.12f);
+    // 팔 두께 — 안쪽일수록 두껍게 퍼뜨려 가운데가 채워지게 한다.
+    const float spreadA = 0.85f * (1.0f - t) + 0.16f;
+    // rnd 두 개를 섞어 종 모양에 가깝게 만든다(고른 난수 하나면 팔이 각지게 잘린다).
+    const float g = (u2 + rnd01((unsigned)(u1 * 65536.0f) * 7919u + 13u) - 1.0f);
+    const float th2 = th + g * spreadA;
+    return make_float2(cx + r * cosf(th2), cy + r * sinf(th2));
+}
+
 __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
                        float bhGM, float bhRs) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -92,27 +115,19 @@ __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
     float u3 = rnd01(i * 4u + 3u), u4 = rnd01(i * 4u + 4u);
     float2 p, v = make_float2(0.f, 0.f);
     switch (preset) {
-        case 0: {                                   // SpiralDisk
-            float r = sqrtf(u1) * 0.20f, th = u2 * 6.2831853f;
-            p = make_float2(0.5f + r * cosf(th), 0.5f + r * sinf(th));
+        case 0: {                                   // SpiralDisk — 처음부터 나선으로 깐다
+            p = spiralPoint(0.5f, 0.5f, 0.21f, u1, u2, u3);
         } break;
-        case 1: {                                   // TidalPair
-            float side = (u3 > 0.5f) ? 1.f : -1.f;
-            float r = sqrtf(u1) * 0.085f, th = u2 * 6.2831853f;
-            p = make_float2(0.5f + side * 0.16f + r * cosf(th),
-                            0.5f - side * 0.06f + r * sinf(th));
+        case 1: {                                   // TidalPair — 나선 은하 둘이 양옆에
+            const float side = (u4 > 0.5f) ? 1.f : -1.f;
+            // 서로를 마주 보게 조금 어긋나 놓는다. 완전히 나란하면 그냥 지나쳐 버린다.
+            p = spiralPoint(0.5f + side * 0.17f, 0.5f - side * 0.05f, 0.105f, u1, u2, u3);
         } break;
-        case 2: {                                   // HeadOnShock
-            float side = (u3 > 0.5f) ? 1.f : -1.f;
-            float r = sqrtf(u1) * 0.080f, th = u2 * 6.2831853f;
-            p = make_float2(0.5f + side * 0.17f + r * cosf(th), 0.5f + r * sinf(th));
-            v = make_float2(-side * 0.055f, (u4 - 0.5f) * 0.004f);
-        } break;
-        case 3: {                                   // CosmicWeb
+        case 2: {                                   // CosmicWeb
             p = make_float2(u1, u2);
             v = make_float2((u3 - 0.5f) * 0.02f, (u4 - 0.5f) * 0.02f);
         } break;
-        case 4: {                                   // BlackHole — 중심 블랙홀 둘레의 원반
+        case 3: {                                   // BlackHole — 중심 블랙홀 둘레의 원반
             // 최소 안정 궤도(3rs)를 **가로질러** 깐다.
             // 바깥쪽만 깔면 전부 안정해서 그냥 도는 원반이 되고, 이 장면의 핵심인
             // 「어느 선을 넘으면 나선으로 빨려 든다」가 보이지 않는다.
@@ -129,18 +144,6 @@ __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
             const float denom = fmaxf(1.0f - 1.5f * bhRs / r, 0.05f);
             const float vc = sqrtf(fmaxf(bhGM / r / denom, 0.f));
             v = make_float2(-sinf(th) * vc, cosf(th) * vc);
-        } break;
-        case 5: {                                   // Accretion — 넓고 차가운 원반
-            // 은하 장면(0)보다 넓게 깔아 밀도를 낮춘다. 처음부터 빽빽하면 첫 스텝에
-            // 판 전체가 임계를 넘어 천체가 수천 개 동시에 태어나고, 자라는 과정이 안 보인다.
-            float r = sqrtf(u1) * 0.34f, th = u2 * 6.2831853f;
-            p = make_float2(0.5f + r * cosf(th), 0.5f + r * sinf(th));
-            // 궤도를 조금씩 어긋나게 흔든다.
-            // 전부 같은 방향으로 나란히 돌면 이웃끼리의 상대속도가 거의 0 이라 서로 만날 일이
-            // 없고, 만나도 느려서 전부 합쳐진다 — 부서지는 충돌이 t=1.2 까지 두 번뿐이었다
-            // (2026-08-14 실측). 궤도가 제각각이면 타원이 서로 가로질러 빠른 충돌이 생긴다.
-            // 실제 원시 원반도 이렇게 어수선하다.
-            v = make_float2((u3 - 0.5f) * 0.30f, (u4 - 0.5f) * 0.30f);
         } break;
         default:                                    // Empty — 화면 밖에 숨겨 둔다
             p = make_float2(-1.f, -1.f);
@@ -1276,8 +1279,7 @@ void Sim::reset() {
     CK(cudaDeviceSynchronize());
 
     // 회전 프리셋은 중력을 한 번 풀어 그 세기에 맞는 궤도 속도를 넣는다.
-    if (d->cfg.preset == Preset::SpiralDisk || d->cfg.preset == Preset::TidalPair
-        || d->cfg.preset == Preset::Accretion) {
+    if (d->cfg.preset == Preset::SpiralDisk || d->cfg.preset == Preset::TidalPair) {
         kClearF<<<grid1(S * S), BS>>>(d->rho, S * S);
         kScatter<<<grid1(n), BS>>>(d->pos, d->rho, n, G, S, d->periodic() ? 1 : 0);
         d->solveGravity();
@@ -1285,11 +1287,9 @@ void Sim::reset() {
         const float potScale = d->potentialScale();
         kGridAccel<<<g, b>>>(d->pot, d->prs, d->rho, d->accG, G, S, potScale, 0,
                              d->periodic() ? 1 : 0);
-        // 강착 원반은 궤도 속도를 일부러 조금 모자라게 준다. 딱 맞으면 영원히 돌기만 하고
-        // 아무것도 뭉치지 않는다 — 모자라면 안쪽으로 서서히 감기면서 밀도가 오른다.
-        float fudge = 0.97f;
-        if (d->cfg.preset == Preset::TidalPair)      fudge = 0.90f;
-        else if (d->cfg.preset == Preset::Accretion) fudge = 0.88f;
+        // 두 은하가 만나는 장면은 궤도 속도를 조금 모자라게 준다 — 딱 맞으면 각자 돌기만 하고
+        // 서로에게 다가가지 않아 꼬리가 생기지 않는다.
+        const float fudge = (d->cfg.preset == Preset::TidalPair) ? 0.90f : 0.97f;
         kSetOrbit<<<grid1(n), BS>>>(d->accG, d->pos, d->vel, n, G,
                                     d->periodic() ? 1 : 0, (int)d->cfg.preset, fudge);
         CK(cudaDeviceSynchronize());

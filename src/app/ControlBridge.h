@@ -11,7 +11,7 @@
 // 명령:
 //   cmd=status                                   현재 상태를 돌려준다
 //   cmd=set  particleCount=.. gridSize=.. gravity=.. pressure=0|1 ...
-//   cmd=preset  preset=spiral|tidal|shock|web|empty
+//   cmd=preset  preset=spiral|tidal|web|blackhole|empty
 //   cmd=run  running=0|1
 //   cmd=step  count=N                            멈춘 상태에서 N 스텝 진행
 //   cmd=reset

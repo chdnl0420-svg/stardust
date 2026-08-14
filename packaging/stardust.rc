@@ -1,0 +1,35 @@
+// 실행 파일에 박아 넣는 리소스.
+//
+// 탐색기·작업표시줄이 보여 주는 아이콘은 실행 파일 안의 **첫 번째 ICON 리소스**다.
+// 그래서 번호를 1 로 두고, 창 아이콘도 같은 번호를 불러 쓴다(main.cpp).
+1 ICON "assets/stardust.ico"
+
+// 파일 속성과 작업표시줄이 읽는 이름표.
+// 이게 없으면 윈도우가 보여 줄 이름이 없어 창 제목 첫 글자만 덩그러니 뜬다.
+#include <winver.h>
+
+1 VERSIONINFO
+FILEVERSION    0,2,0,0
+PRODUCTVERSION 0,2,0,0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    // 040904B0 = 미국 영어 + 유니코드. 한국어 윈도우에서도 이 블록을 읽는다.
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName",      "JustKim"
+      VALUE "FileDescription",  "Stardust"
+      VALUE "FileVersion",      "0.2.0"
+      VALUE "InternalName",     "Stardust"
+      VALUE "OriginalFilename", "Stardust.exe"
+      VALUE "ProductName",      "Stardust"
+      VALUE "ProductVersion",   "0.2.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

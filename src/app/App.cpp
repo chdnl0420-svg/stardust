@@ -133,9 +133,14 @@ void App::applyToolAt(float u, float v, bool firstClick) {
             break;
         case Tool::AddShape:
             // 형태는 누를 때 한 번만 넣는다. 드래그로 계속 쏟아지면 순식간에 슬롯이 바닥난다.
-            if (firstClick)
+            if (firstClick) {
                 sim.addShape(u, v, brush.shapeKind, brush.shapeRadius,
                              brush.shapeCount, brush.autoOrbit);
+                // 한 번 놓았으면 화면 옮기기로 돌아간다.
+                // 놓기를 켠 채로 두면 화면을 옮기려고 누른 것이 또 한 덩어리를 쏟는다 —
+                // 되돌릴 방법이 없어서 그때마다 장면을 처음부터 다시 시작해야 했다.
+                tool = Tool::Camera;
+            }
             break;
         case Tool::Erase:
             sim.eraseAt(u, v, brush.radius);
@@ -218,32 +223,18 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
         cfg.temperatureEnabled = true;   // 안쪽으로 갈수록 빨라지는 것을 온도로도 볼 수 있게
         return;
     }
-    // 뭉치기는 알갱이끼리 **실제로 부딪히게** 해서 덩어리가 되는 장면이다.
-    // 임계값을 넘으면 천체를 만들어 주던 예전 방식은 걷어냈다 — 뭉치는 것이 물리가 아니라
-    // 규칙이었고, 소행성·행성·별의 경계도 사람이 정한 숫자였다.
-    // 접촉력만 있으면 모이다가 더 못 눌리는 지점에서 저절로 멈추고, 그 덩어리가 곧 소행성이다.
-    cfg.contactEnabled = (preset == Preset::Accretion);
-    if (preset == Preset::Accretion) {
-        cfg.boundary = Boundary::Isolated;
-        cfg.gravity = 0.6f;
-        // 격자 압력은 알갱이끼리의 반발을 격자로 흉내 낸 것이라 접촉과 역할이 겹친다.
-        cfg.pressureEnabled = false;
-        cfg.expansionEnabled = false;
-        cfg.temperatureEnabled = true;
-        cfg.coolingEnabled = true;       // 식어야 뭉친다 — 뜨거운 가스는 스스로 흩어진다
-        cfg.starFormationEnabled = false;
-        return;
-    }
+    // 알갱이끼리 부딪히게 할지는 장면이 정하지 않는다 — 어느 장면에서든 체크박스로 켠다.
+    // 다만 장면을 갈아탈 때 이전 설정이 따라오면 「왜 갑자기 느리지」가 되므로 끈 상태로 시작한다.
+    cfg.contactEnabled = false;
     cfg.coolingEnabled = false;
 
     // 경계 — 은하 장면은 텅 빈 우주에 홀로 떠 있어야 하고(고립),
     //        우주 구조 형성은 반대편으로 이어지는 우주가 표준이다(주기).
     cfg.boundary = (preset == Preset::CosmicWeb) ? Boundary::Periodic : Boundary::Isolated;
 
-    // 압력 — 충격파는 가스가 부딪혀 서는 현상이라 압력이 있어야 나온다.
-    //        나선팔·조석꼬리·구조형성은 무압력 중력계에서 나오는 현상이라 끄는 쪽이 선명하다
+    // 압력 — 나선팔·조석꼬리·구조형성은 전부 무압력 중력계에서 나오는 현상이라 끄는 쪽이 선명하다
     //        (프로토타입 검증에서 확인 — proto/cuda/x5.cu 의 scene 별 pressure 설정).
-    cfg.pressureEnabled = (preset == Preset::HeadOnShock);
+    cfg.pressureEnabled = false;
 
     // 팽창 — 주기 경계에서만 물리적 의미가 있고, 켠 상태와 끈 상태를 비교하는 것이 목적이라
     //        프리셋 전환 시에는 항상 꺼 두고 사용자가 직접 켜게 한다.

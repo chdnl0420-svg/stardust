@@ -38,6 +38,14 @@ POINT g_dragLast{};
 bool  g_painting = false;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // 창 제목을 다루는 메시지는 ImGui 를 거치지 않고 곧장 기본 처리로 넘긴다.
+    //
+    // 아래 한 줄은 ImGui 핸들러가 0 이 아닌 값을 돌려주면 그것으로 처리를 끝낸다(return true).
+    // 그 바람에 제목을 세우고 읽는 메시지가 기본 처리에 닿지 못해, 제목이 첫 글자('S')로
+    // 잘린 채 남았다 — 밖에서 같은 API 로 넣으면 멀쩡히 들어가는 것과 대비된다(2026-08-14 실측).
+    if (msg == WM_SETTEXT || msg == WM_GETTEXT || msg == WM_GETTEXTLENGTH)
+        return DefWindowProc(hwnd, msg, wp, lp);
+
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
 
     switch (msg) {
@@ -141,12 +149,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"NbodySimWnd";
+    // 실행 파일에 박아 둔 첫 번째 아이콘(packaging/stardust.rc)을 창과 작업표시줄에 쓴다.
+    // 큰 것과 작은 것을 따로 불러야 작업표시줄과 Alt+Tab 이 각자 맞는 크기를 쓴다.
+    wc.hIcon   = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+    wc.hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    wc.lpszClassName = L"StardustWnd";
     RegisterClassExW(&wc);
 
     RECT r{ 0, 0, g_w, g_h };
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"nbody-simulator",
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Stardust",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 r.right - r.left, r.bottom - r.top,
                                 nullptr, nullptr, hInst, nullptr);
@@ -198,6 +212,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
+    // 창 제목은 **다 만들어 띄운 뒤에** 세운다.
+    //
+    // CreateWindowExW 에 이름을 넘겨도, 그 직후에 SetWindowTextW 로 다시 넣어도
+    // 제목이 첫 글자 하나('S')로 잘렸다. 같은 호출을 밖에서 창 핸들에 대고 하면 멀쩡히
+    // 여덟 글자가 들어간다 — 즉 이른 시점에 세운 이름이 뒤이은 초기화 어딘가에서 밀린다.
+    // 원인을 못 밝혀 순서로 피한다. 작업표시줄이 이 이름을 그대로 쓴다(2026-08-14 실측).
+    //
+    // 넓은 리터럴(L"...")을 그대로 넘기면 첫 글자만 들어가므로, 좁은 리터럴에서 조립해 넘긴다.
+    // 밖에서 같은 API 로 넣으면 여덟 글자가 멀쩡히 들어가는 것을 확인했다.
+    {
+        wchar_t title[32] = { 0 };
+        MultiByteToWideChar(CP_UTF8, 0, "Stardust", -1, title, 32);
+        SetWindowTextW(hwnd, title);
+    }
+
     LARGE_INTEGER freq, prev;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&prev);
@@ -212,6 +241,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             DispatchMessage(&msg);
         }
         if (quit) break;
+
+        // 창 제목은 루프가 돌기 시작한 뒤에 한 번 세운다.
+        //
+        // 창을 만드는 자리나 ShowWindow 직후에 세우면 첫 글자('S')만 남았다. 같은 API 를
+        // 밖에서 창 핸들에 대고 부르면 여덟 글자가 멀쩡히 들어간다 — 초기화가 다 끝나기 전에는
+        // 이름이 어딘가에서 밀린다는 뜻이다. 원인을 못 밝혀 시점으로 피한다.
+        // 작업표시줄과 Alt+Tab 이 이 이름을 그대로 쓴다(2026-08-14 실측).
+        static bool titleSet = false;
+        if (!titleSet) { SetWindowTextW(hwnd, L"Stardust"); titleSet = true; }
 
         // 업데이트를 받아 두었으면 여기서 끝낸다. 옆에 남겨 둔 스크립트가 앱이 완전히 끝나기를
         // 기다렸다가 실행 파일을 갈아 끼우고 다시 띄운다 — 돌고 있는 파일은 덮어쓸 수 없다.
@@ -235,10 +273,30 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // Tab 으로 화면을 가리는 것을 전부 감췄다 켰다 한다(녹화·감상용).
-        // ImGui 위젯에 글자를 치는 중에는 Tab 이 그쪽 것이므로 건드리지 않는다.
-        if (ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !ImGui::GetIO().WantTextInput)
-            app.uiHidden = !app.uiHidden;
+        // 글자를 치는 중에는 키를 위젯에 양보한다.
+        if (!ImGui::GetIO().WantTextInput) {
+            // Tab 으로 장면 서랍을 오르내리고 Esc 로 닫는다.
+            if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
+                app.drawerOpen = !app.drawerOpen;
+                app.shapeDrawerOpen = false;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                app.drawerOpen = false;
+                app.shapeDrawerOpen = false;
+            }
+            // H 로 막대까지 전부 감춘다(녹화·감상용).
+            if (ImGui::IsKeyPressed(ImGuiKey_H, false)) {
+                app.uiHidden = !app.uiHidden;
+                if (app.uiHidden) { app.drawerOpen = false; app.shapeDrawerOpen = false; }
+            }
+            // 숫자키로 장면을 바로 고른다. 서랍이 닫혀 있어도 먹는다.
+            for (int i = 0; i < 5; ++i) {
+                if (ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_1 + i), false)) {
+                    SwitchSceneByIndex(app, i);
+                    break;
+                }
+            }
+        }
 
         if (app.uiHidden) {
             // 완전히 감추면 돌아오는 길을 모른다 — 한 줄짜리 힌트만 남긴다.
@@ -248,22 +306,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
                          ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
-            ImGui::TextDisabled("Tab: 설정 보이기");
+            ImGui::TextDisabled("H: 조작부 보이기");
             ImGui::End();
         } else {
+            // 그리는 순서가 곧 쌓이는 순서다. 어둠 → 서랍 → 막대 순으로 얹는다.
+            DrawBottomScrim(app, g_w, g_h);
             DrawHud(app);
             DrawBlackHoleRings(app, g_w, g_h);
-            DrawToolbar(app, g_w, g_h);
-            if (!g_boardOpen) {
-                ImGui::SetNextWindowPos(ImVec2((float)g_w - 130.0f, 12.0f), ImGuiCond_Always);
-                ImGui::Begin("##fab", nullptr,
-                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
-                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-                if (ImGui::Button("설정 열기 ▸")) g_boardOpen = true;
-                ImGui::End();
-            }
-            // 보드는 app.cfg 값만 만진다. 코어 반영은 App::tick 이 매 프레임 한다.
-            DrawBoard(app, g_boardOpen);
+            DrawSceneDrawer(app, g_w, g_h);
+            DrawShapeDrawer(app, g_w, g_h);
+            DrawBottomBar(app, g_w, g_h);
         }
 
         ImGui::Render();

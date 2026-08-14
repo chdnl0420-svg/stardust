@@ -1,4 +1,5 @@
 #include "app/ControlBridge.h"
+#include "app/Version.h"
 
 #include <windows.h>
 #include <GL/gl.h>
@@ -68,10 +69,8 @@ const char* presetSlug(Preset p) {
     switch (p) {
         case Preset::SpiralDisk:  return "spiral";
         case Preset::TidalPair:   return "tidal";
-        case Preset::HeadOnShock: return "shock";
         case Preset::CosmicWeb:   return "web";
         case Preset::BlackHole:   return "blackhole";
-        case Preset::Accretion:   return "accretion";
         default:                  return "empty";
     }
 }
@@ -79,10 +78,8 @@ const char* presetSlug(Preset p) {
 bool parsePreset(const std::string& s, Preset& out) {
     if (s == "spiral") { out = Preset::SpiralDisk;  return true; }
     if (s == "tidal")  { out = Preset::TidalPair;   return true; }
-    if (s == "shock")  { out = Preset::HeadOnShock; return true; }
     if (s == "web")    { out = Preset::CosmicWeb;   return true; }
     if (s == "blackhole") { out = Preset::BlackHole; return true; }
-    if (s == "accretion") { out = Preset::Accretion; return true; }
     if (s == "empty")  { out = Preset::Empty;       return true; }
     return false;
 }
@@ -141,7 +138,9 @@ std::string ControlBridge::statusBody(const App& app) const {
     sim.measureCentroid(centroidX, centroidY);
     const double meanTemp = sim.measureMeanTemperature();
 
-    char buf[1850];
+    const UpdateInfo up = app.updater.status();
+
+    char buf[2100];
     snprintf(buf, sizeof(buf),
         // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
         // 늘 1 을 돌려주면 자동 검증이 멈춘 시뮬레이션을 성공으로 읽는다(round-08 리뷰 A13).
@@ -158,6 +157,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         "renderMode=%s\ncolorBy=%s\ncolormap=%s\n"
         "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\n"
         "contact=%d\ncontactStiffness=%.0f\ncontactDamping=%.3f\n"
+        // 자동 업데이트 상태. version 은 지금 도는 빌드, latest 는 저장소의 최신이다.
+        "version=%s\nupdateChecked=%d\nupdateAvailable=%d\nlatestVersion=%s\nupdateError=%s\n"
         "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
         "recording=%d\nrecordedFrames=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
@@ -185,6 +186,8 @@ std::string ControlBridge::statusBody(const App& app) const {
             : app.view.cmap == ColorMap::Thermal ? "thermal" : "astro",
         app.view.brightness, app.view.gamma, app.view.showHud ? 1 : 0,
         app.cfg.contactEnabled ? 1 : 0, app.cfg.contactStiffness, app.cfg.contactDamping,
+        STARDUST_VERSION, up.checked ? 1 : 0, up.available ? 1 : 0,
+        up.latest.c_str(), up.error.c_str(),
         app.zoom, app.panX, app.panY,
         app.recording ? 1 : 0, app.recordedFrames,
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
@@ -313,6 +316,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
         if (has(kv, "contact"))        app.cfg.contactEnabled = getInt(kv, "contact", 0) != 0;
+        if (has(kv, "drawer"))         app.drawerOpen         = getInt(kv, "drawer", 0) != 0;
         if (has(kv, "contactStiffness"))
             app.cfg.contactStiffness = clampF(getFloat(kv, "contactStiffness", app.cfg.contactStiffness),
                                               1.0e3f, 1.0e8f, app.cfg.contactStiffness);
@@ -458,6 +462,18 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     if (cmd == "snapshot") {
         app.snapshotRequested = true;
         writeResponse("ok=1\nqueued=1\n");
+        return false;
+    }
+
+    // 자동 업데이트를 밖에서 눌러 본다. 보드의 「받아서 다시 켜기」와 같은 일을 한다 —
+    // 창을 띄우지 않고도 받아서 갈아 끼우는 흐름 전체를 확인할 수 있어야 한다.
+    if (cmd == "update") {
+        std::string err;
+        const bool ok = app.updater.applyUpdate(err);
+        char b[320];
+        snprintf(b, sizeof(b), "ok=%d\napplied=%d\nerror=%s\n",
+                 ok ? 1 : 0, ok ? 1 : 0, err.c_str());
+        writeResponse(b);
         return false;
     }
 

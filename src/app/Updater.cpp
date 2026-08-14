@@ -210,8 +210,11 @@ bool Updater::applyUpdate(std::string& err) {
     // 그래서 앱이 끝나기를 기다렸다가 바꿔치기하고 다시 띄우는 작은 스크립트를 남긴다.
     // 스크립트는 마지막에 스스로를 지운다.
     {
+        // **바이너리로 연다.** 텍스트 모드에 ccs=UTF-8 을 주면 파일 맨 앞에 BOM 이 붙는데,
+        // 배치 파일은 그 세 바이트를 첫 명령의 일부로 읽어 첫 줄이 통째로 깨진다.
+        // chcp 65001 을 첫머리에 두었으므로 BOM 없이 UTF-8 바이트를 그대로 써도 한글 경로가 산다.
         FILE* f = nullptr;
-        if (_wfopen_s(&f, bat.c_str(), L"w, ccs=UTF-8") != 0 || !f) {
+        if (_wfopen_s(&f, bat.c_str(), L"wb") != 0 || !f) {
             DeleteFileW(tmp.c_str());
             err = "스크립트를 만들지 못했습니다";
             return false;
