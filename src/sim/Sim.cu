@@ -120,9 +120,11 @@ __device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s
     // 반지름 — 표면 밀도가 exp(-r/h) 라도, **그 반지름에 있는 별의 수**는 원둘레가 곱해져
     // r·exp(-r/h) 다. 지수분포를 그대로 쓰면 중심에 과하게 몰려 팔이 안 보인다(실측).
     // r·exp(-r/h) 는 지수 둘의 합이라, 균등난수 두 개의 로그를 더하면 그 분포가 나온다.
-    const float h = R * 0.28f;                       // 스케일 길이
+    // 스케일 길이. 짧게 잡으면 알갱이가 중심에 몰려 정작 팔이 보이는 반지름대가 비고,
+    // 화면에는 밝은 점 하나에 흐릿한 테두리만 남는다(2026-08-14 실측).
+    const float h = R * 0.42f;
     float r = -h * (__logf(fmaxf(u1, 1e-6f)) + __logf(fmaxf(u4, 1e-6f)));
-    if (r > R * 1.8f) r = R * 1.8f;                  // 아주 먼 꼬리는 자른다
+    if (r > R * 1.6f) r = R * 1.6f;                  // 아주 먼 꼬리는 자른다
     r = fmaxf(r, R * 0.015f);
 
     const float tanI = 0.325f;                       // tan(18°)
@@ -131,8 +133,11 @@ __device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s
     const float th0 = u2 * 6.2831853f;
     // 팔의 진하기. 1 에 가까울수록 팔과 그 사이의 대비가 크다.
     // 안쪽은 팽대부가 덮으므로 팔이 시작되는 자리부터 진해지고, 아주 바깥에서 다시 흐려진다.
+    // 팔이 가장 진한 반지름을 바깥으로 옮긴다 — 안쪽은 팽대부가 덮어 팔이 보이지 않는다.
+    // A 는 1 을 넘으면 안 된다. 변환의 야코비안이 1 - A·cos 이라, 1 이 되는 순간 각이
+    // 접혀 알갱이가 한 줄에 겹쳐 쌓인다.
     const float rn = r / R;
-    const float A = 0.95f * __expf(-(rn - 0.35f) * (rn - 0.35f) / 0.45f);
+    const float A = 0.94f * __expf(-(rn - 0.55f) * (rn - 0.55f) / 0.42f);
     const float th = th0 - (A * 0.5f) * __sinf(2.0f * (th0 - psi));
 
     const float sigma = thickness * (0.6f + 0.9f * r / R);
