@@ -64,6 +64,9 @@ static void testGravityResponds() {
         cfg.gravity = gravity;
         cfg.pressureEnabled = false;
         cfg.preset = Preset::SpiralDisk;
+        // 보는 것은 중력이 뭉치게 하는가 하나뿐이다. 가운데 별 무리는 중력과 무관하게
+        // 처음부터 빽빽해서 초기 밀도를 지배해 버리므로 여기서는 깔지 않는다.
+        cfg.bulgeFraction = 0.0f;
         sim.init(cfg);
         for (int i = 0; i < 200; ++i) sim.step();
         return sim.measureMaxDensity();

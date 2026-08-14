@@ -599,8 +599,18 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
         // 톱니 — 시안에 없던 나머지 값들을 여기 모았다. 자주 만지지 않는 것들이라
         // 막대에 상주시키면 「평소엔 우주뿐」이 무너진다.
         if (ToolButton("settings", 4, false)) ImGui::OpenPopup("##setpop");
-        Tip("나머지 설정 — 최대 개수, 알갱이끼리 부딪힘");
+        Tip("나머지 설정 — 최대 개수, 알갱이끼리 부딪힘, 보이지 않는 무게");
+        // 팝업은 우주 위에 뜨므로 배경이 비치면 글자가 묻힌다. 불투명하게 깔고 여백을 준다.
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.055f, 0.05f, 0.075f, 0.985f));
+        ImGui::PushStyleColor(ImGuiCol_Border,  ImVec4(1.0f, 0.69f, 0.40f, 0.35f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(8, 10));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 10.0f);
         if (ImGui::BeginPopup("##setpop")) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.545f, 0.525f, 0.612f, 1.0f));
+            ImGui::TextUnformatted("알갱이");
+            ImGui::PopStyleColor();
             int maxMan = app.cfg.particleCount / 10000; if (maxMan < 1) maxMan = 1;
             int hardMan = app.hardMaxParticles / 10000; if (hardMan < 1) hardMan = 1;
             if (maxMan > hardMan) maxMan = hardMan;
@@ -617,7 +627,12 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
                 ImGui::PopStyleColor();
                 if (ImGui::SmallButton("확인")) app.guardCappedTo = 0;
             }
+            ImGui::Spacing();
             ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.545f, 0.525f, 0.612f, 1.0f));
+            ImGui::TextUnformatted("물리");
+            ImGui::PopStyleColor();
             if (ImGui::Checkbox("알갱이끼리 부딪힘", &app.cfg.contactEnabled))
                 ApplyAutoGrid(app.cfg);
             ImGui::Checkbox("보이지 않는 무게", &app.cfg.haloEnabled);
@@ -634,7 +649,9 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
                 ImGui::TextWrapped("알갱이가 너무 많아 지금은 꺼져 있습니다");
                 ImGui::PopStyleColor();
             }
+            ImGui::Spacing();
             ImGui::Separator();
+            ImGui::Spacing();
             const UpdateInfo up = app.updater.status();
             if (up.available) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.85f, 0.62f, 1.0f));
@@ -658,6 +675,8 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
             }
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar(4);
+        ImGui::PopStyleColor(2);
 
         ImGui::SameLine();
         {

@@ -92,6 +92,17 @@ __device__ __forceinline__ int gidx(int x, int y, int G, int periodic) {
 // 로그 나선을 쓴다 — 실제 은하의 팔이 그 모양이다. 반지름이 커질수록 각이 로그로 밀리고,
 // 팔 둘을 반 바퀴 어긋나게 둔다. 팔에서 옆으로 흩어지는 정도는 안쪽일수록 크게 잡아
 // 가운데가 뭉툭한 팽대부처럼 보이게 한다.
+// 은하 한가운데의 별 무리를 한 점 찍는다.
+//
+// 가운데로 갈수록 빽빽하게 — r = R·u² 로 뽑으면 면적당 개수가 중심에서 크게 오른다.
+// 실제 팽대부의 밀도 분포에 가깝고, 무엇보다 화면에서 「가운데가 밝은 은하」로 보인다.
+__device__ __forceinline__ float2 bulgePoint(float cx, float cy, float R,
+                                             float u1, float u2) {
+    const float r  = R * u1 * u1;
+    const float th = u2 * 6.2831853f;
+    return make_float2(cx + r * cosf(th), cy + r * sinf(th));
+}
+
 __device__ __forceinline__ float2 spiralPoint(float cx, float cy, float R,
                                               float u1, float u2, float u3) {
     const float t  = 0.08f + 0.92f * sqrtf(u1);     // 0~1, 바깥일수록 성기게
@@ -108,20 +119,25 @@ __device__ __forceinline__ float2 spiralPoint(float cx, float cy, float R,
 }
 
 __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
-                       float bhGM, float bhRs) {
+                       float bhGM, float bhRs, float bulgeFrac, float bulgeR) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float u1 = rnd01(i * 4u + 1u), u2 = rnd01(i * 4u + 2u);
     float u3 = rnd01(i * 4u + 3u), u4 = rnd01(i * 4u + 4u);
     float2 p, v = make_float2(0.f, 0.f);
     switch (preset) {
-        case 0: {                                   // SpiralDisk — 처음부터 나선으로 깐다
-            p = spiralPoint(0.5f, 0.5f, 0.21f, u1, u2, u3);
+        case 0: {                                   // SpiralDisk — 팽대부 + 나선 원반
+            // 일부는 가운데 별 무리로, 나머지는 나선팔로. 은하는 이 둘이 함께 있는 모습이다.
+            if (u4 < bulgeFrac) p = bulgePoint(0.5f, 0.5f, bulgeR, u1, u2);
+            else                p = spiralPoint(0.5f, 0.5f, 0.21f, u1, u2, u3);
         } break;
         case 1: {                                   // TidalPair — 나선 은하 둘이 양옆에
-            const float side = (u4 > 0.5f) ? 1.f : -1.f;
+            // 어느 은하에 속하는지는 다른 난수로 가른다 — u4 는 팽대부 판정에 쓴다.
+            const float side = (rnd01((unsigned)i * 4u + 9u) > 0.5f) ? 1.f : -1.f;
             // 서로를 마주 보게 조금 어긋나 놓는다. 완전히 나란하면 그냥 지나쳐 버린다.
-            p = spiralPoint(0.5f + side * 0.17f, 0.5f - side * 0.05f, 0.105f, u1, u2, u3);
+            const float gx = 0.5f + side * 0.17f, gy = 0.5f - side * 0.05f;
+            if (u4 < bulgeFrac) p = bulgePoint(gx, gy, bulgeR * 0.5f, u1, u2);
+            else                p = spiralPoint(gx, gy, 0.105f, u1, u2, u3);
         } break;
         case 2: {                                   // CosmicWeb
             p = make_float2(u1, u2);
@@ -165,7 +181,7 @@ __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
 // 팔이 생기고 유지된다. 너무 작으면 부서지고, 너무 크면 아무 무늬도 안 생긴 채 퍼진다.
 __global__ void kSetOrbit(const float2* accG, const float2* pos, float2* vel,
                           int n, int G, int periodic, int preset, float fudge,
-                          float dispersion, float haloV2, float haloCore2) {
+                          float dispersion, float haloV2, float haloCore2, float bulgeR) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float2 p = pos[i];
@@ -202,8 +218,16 @@ __global__ void kSetOrbit(const float2* accG, const float2* pos, float2* vel,
     // 난수 둘을 더해 종 모양에 가깝게 만든다(고른 난수 하나면 가장자리 값이 지나치게 흔하다).
     const float g1 = rnd01((unsigned)i * 11u + 101u) + rnd01((unsigned)i * 11u + 103u) - 1.f;
     const float g2 = rnd01((unsigned)i * 11u + 107u) + rnd01((unsigned)i * 11u + 109u) - 1.f;
-    vel[i] = make_float2(-dy / r * v + g1 * v * dispersion + base.x,
-                          dx / r * v + g2 * v * dispersion + base.y);
+
+    // 가운데 별 무리는 나란히 돌지 않고 제각각 움직인다 — 회전이 아니라 흩어짐이 그 무리를
+    // 지탱한다. 중심에 가까울수록 흩어짐을 키워 그 성질을 낸다.
+    const float bulgeMix = (bulgeR > 0.f) ? expf(-(r * r) / (bulgeR * bulgeR)) : 0.f;
+    const float disp = dispersion + 0.85f * bulgeMix;
+    // 무리 안에서는 도는 성분도 줄인다(0 으로 두면 그대로 중심에 떨어진다).
+    const float spin = 1.0f - 0.55f * bulgeMix;
+
+    vel[i] = make_float2(-dy / r * v * spin + g1 * v * disp + base.x,
+                          dx / r * v * spin + g2 * v * disp + base.y);
 }
 
 __global__ void kClearF(float* g, int n) {
@@ -1371,7 +1395,8 @@ void Sim::reset() {
     const float bhGM = d->bh.active
                      ? d->cfg.gravity * (d->bh.mass / (float)(n > 0 ? n : 1)) : 0.f;
     kPlace<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, n, (int)d->cfg.preset,
-                             bhGM, d->bh.rs);
+                             bhGM, d->bh.rs,
+                             d->cfg.bulgeFraction, d->cfg.bulgeRadius);
     // 빈 판은 살아 있는 파티클이 0 이고 전 슬롯이 비어 있다 — 마우스로 채워 나간다.
     d->activeN = (d->cfg.preset == Preset::Empty) ? 0 : n;
     // 새 장면이므로 형태를 넣을 자리도 처음으로 되돌린다.
@@ -1398,7 +1423,8 @@ void Sim::reset() {
                                     d->periodic() ? 1 : 0, (int)d->cfg.preset, fudge,
                                     d->cfg.orbitDispersion,
                                     d->cfg.haloEnabled ? d->cfg.haloSpeed * d->cfg.haloSpeed : 0.f,
-                                    d->cfg.haloCore * d->cfg.haloCore);
+                                    d->cfg.haloCore * d->cfg.haloCore,
+                                    d->cfg.bulgeRadius);
         CK(cudaDeviceSynchronize());
     }
 }
