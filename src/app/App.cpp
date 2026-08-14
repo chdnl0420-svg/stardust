@@ -2,13 +2,7 @@
 
 void App::init() {
     cfg.particleCount = 1000000;
-
-    // 격자는 1024 로 시작한다.
-    // 소프트닝은 「셀 몇 개」 단위라 격자를 올리면 셀이 작아져 가까운 거리의 힘이 그만큼 세진다 —
-    // 2048 로 시작하면 처음 켜자마자 파티클이 초속 80까지 튀어 원반이 부풀고, 안전장치가
-    // 시간 간격을 100% 가까이 잘라 화면이 거의 멈춘 것처럼 보인다(2026-08-13 실측).
-    // 1024 는 그 문제가 없고 더 빠르다. 세밀하게 보고 싶으면 「고급 설정」에서 올린다.
-    cfg.gridSize = 1024;
+    ApplyAutoGrid(cfg);     // 격자와 소프트닝은 알갱이 수를 보고 정한다
 
     // 첫 장면도 **장면 버튼을 누른 것과 똑같이** 맞춘다.
     // 전에는 preset 만 정하고 나머지는 SimConfig 기본값에 맡겼는데, 그 기본값은 압력이 켜져 있다.
@@ -47,7 +41,7 @@ void App::tick() {
         if (cfg.timeScale > 1.0f) {
             reps = (int)(cfg.timeScale + 0.5f);
             if (reps < 1) reps = 1;
-            if (reps > 8) reps = 8;
+            if (reps > 16) reps = 16;
         }
         for (int i = 0; i < reps; ++i) sim.step();
         // 코어가 실패 상태면 step 은 아무것도 안 하고 돌아온다 — 그때까지 돈 것으로 세면
@@ -93,6 +87,20 @@ void App::applyToolAt(float u, float v, bool firstClick) {
         default:
             break;
     }
+}
+
+void ApplyAutoGrid(SimConfig& cfg) {
+    // 격자는 알갱이 수에 맞춰 고른다.
+    //
+    // 칸당 알갱이가 너무 많으면 밀도장이 뭉개져 화면이 뿌옇게 보인다 — 3000만 개를 1024² 에
+    // 뿌리면 칸당 28개라 구조가 죄다 번진다(2026-08-14 실측). 칸당 대여섯 개가 되도록 올린다.
+    // 4096 은 고립 경계에서 패딩이 8192² 라 VRAM 을 몇 GB 더 먹으므로 여기서는 쓰지 않는다.
+    cfg.gridSize = (cfg.particleCount >= 5000000) ? 2048 : 1024;
+
+    // 소프트닝은 「칸 몇 개」 단위라, 격자를 올리면 칸이 작아진 만큼 실제 길이가 짧아진다.
+    // 그대로 두면 가까운 거리의 힘이 두 배가 되어 처음 켜자마자 알갱이가 튀어 나간다
+    // (2026-08-13 실측: 초속 80까지 올라 원반이 부풀었다). 격자에 비례해 올려 길이를 지킨다.
+    cfg.softeningCells = 3.0f * ((float)cfg.gridSize / 1024.0f);
 }
 
 void ApplyLook(App& app) {

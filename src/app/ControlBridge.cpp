@@ -159,7 +159,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 표시 설정은 set 으로 바꿀 수 있는데 상태에는 없어서 되읽을 방법이 없었다
         // (round-06 QA-2 — 컬러맵·밝기·대비·HUD·줌팬 4항목이 자동 검증 불가로 남았다).
         "renderMode=%s\ncolorBy=%s\ncolormap=%s\n"
-        "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\n"
+        "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\noverlay=%d\n"
         "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
         "recording=%d\nrecordedFrames=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
@@ -189,6 +189,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.view.cmap == ColorMap::Gray ? "gray"
             : app.view.cmap == ColorMap::Thermal ? "thermal" : "astro",
         app.view.brightness, app.view.gamma, app.view.showHud ? 1 : 0,
+        app.showOverlay ? 1 : 0,
         app.zoom, app.panX, app.panY,
         app.recording ? 1 : 0, app.recordedFrames,
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
@@ -279,8 +280,11 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     if (cmd == "set") {
         if (has(kv, "particleCount")) {
             int n = getInt(kv, "particleCount", app.cfg.particleCount);
-            if (n > 0) app.cfg.particleCount = n;
+            // 격자·소프트닝도 함께 맞춘다. 보드의 개수 슬라이더와 같은 규칙이어야
+            // 밖에서 바꾼 뒤의 화면이 안에서 바꾼 것과 달라지지 않는다.
+            if (n > 0) { app.cfg.particleCount = n; ApplyAutoGrid(app.cfg); }
         }
+        // 격자를 직접 지정하면 자동 선택을 덮어쓴다(그 뒤 개수를 바꾸면 다시 자동으로 돌아간다).
         if (has(kv, "gridSize")) {
             int g = getInt(kv, "gridSize", app.cfg.gridSize);
             // 격자는 2의 거듭제곱만 쓴다(주기 wrap 을 비트 마스크로 처리하기 때문).
@@ -312,6 +316,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "brightness"))     app.view.brightness    = clampF(getFloat(kv, "brightness", app.view.brightness), 0.05f, 8.0f, app.view.brightness);
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
+        if (has(kv, "overlay"))        app.showOverlay        = getInt(kv, "overlay", 1) != 0;
         if (has(kv, "renderMode"))
             app.view.mode = (kv["renderMode"] == "points") ? RenderMode::Points
                                                            : RenderMode::DensityField;

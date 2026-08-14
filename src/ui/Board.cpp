@@ -167,10 +167,11 @@ void DrawBoard(App& app, bool& boardOpen) {
     if (ImGui::Button("처음부터", ImVec2(half, 0))) { app.applyConfig(); app.sim.reset(); }
     Help("지금 장면을 처음 상태로 되돌립니다.");
     ImGui::SetNextItemWidth(full);
-    ImGui::SliderFloat("##speed", &app.cfg.timeScale, 0.1f, 4.0f, "빠르기 %.1f 배");
+    ImGui::SliderFloat("##speed", &app.cfg.timeScale, 0.1f, 10.0f, "빠르기 %.1f 배");
     // 1배를 넘는 배속은 한 화면에 여러 번 계산해 내므로 정수만 뜻이 있다.
     if (app.cfg.timeScale > 1.0f) app.cfg.timeScale = (float)(int)(app.cfg.timeScale + 0.5f);
-    Help("1보다 내리면 느리게, 올리면 빠르게 흐릅니다. 올리면 그만큼 무거워집니다.");
+    Help("1보다 내리면 느리게, 올리면 빠르게 흐릅니다.\n"
+         "올린 배수만큼 한 화면에 여러 번 계산하므로 그만큼 프레임이 무거워집니다.");
 
     // ---------------- 보기 ----------------
     Title("보기");
@@ -191,6 +192,10 @@ void DrawBoard(App& app, bool& boardOpen) {
          "밀도와 온도는 각자 따로 기억합니다.");
     if (LogRow("gam", &app.view.gamma, 0.4f, 4.0f, "희미한 것 %.2f")) RememberLook(app);
     Help("올리면 옅은 것까지 드러나고, 내리면 진한 곳만 남아 또렷해집니다.");
+    ImGui::Checkbox("덧그림", &app.showOverlay);
+    Help("계산 결과 위에 얹어 그리는 그림입니다.\n"
+         "천체 동그라미, 블랙홀의 지평선·광자 구면·최소 안정 궤도 원과 이름표.\n\n"
+         "끄면 계산된 화면만 남습니다.");
 
     // ---------------- 녹화 ----------------
     Title("녹화");
@@ -222,8 +227,10 @@ void DrawBoard(App& app, bool& boardOpen) {
     int maxMan = app.cfg.particleCount / 10000;
     if (maxMan < 1) maxMan = 1;
     // 3000만이 상한이다 — 그 위로는 이 그래픽카드에서 안정적으로 돌지 않는다.
-    if (CountRow("cap", &maxMan, 1, 3000, &app.particleSlider))
+    if (CountRow("cap", &maxMan, 1, 3000, &app.particleSlider)) {
         app.cfg.particleCount = maxMan * 10000;
+        ApplyAutoGrid(app.cfg);   // 개수가 바뀌면 격자도 거기에 맞춘다
+    }
     Help("화면에 둘 수 있는 알갱이의 최대 개수입니다. 이 수를 넘지 않도록 먼저 놓은 것부터 "
          "자동으로 밀려납니다.\n\n1000만까지가 넉넉하고, 그 위로는 느려집니다.");
     if (app.sim.particleCount() < app.cfg.particleCount) {

@@ -6,7 +6,7 @@
 // 숫자로만 알려주면 어디서 무슨 일이 벌어지는지 볼 수 없다 — 파티클이 어느 원을 넘을 때
 // 나선으로 꺾이는지가 이 장면의 핵심이다.
 void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
-    if (!app.cfg.blackHoleEnabled || app.uiHidden) return;
+    if (!app.cfg.blackHoleEnabled || app.uiHidden || !app.showOverlay) return;
     if (viewW <= 0 || viewH <= 0) return;
 
     // 시뮬 좌표 -> 화면 픽셀. 렌더 셰이더(kShade·kSplatPoints)와 같은 변환이라야 자리가 맞는다.
@@ -57,7 +57,7 @@ void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
 // 밀도 격자에 얹혀 있기는 하지만, 천체 하나가 격자 한두 칸이라 밀도 그림만으로는
 // 「저 점이 별인지 그냥 빽빽한 가스인지」 구분할 수 없다. 등급을 색으로 갈라 준다.
 void DrawBodies(const App& app, int viewW, int viewH) {
-    if (!app.cfg.bodiesEnabled || app.bodyListCount <= 0) return;
+    if (!app.cfg.bodiesEnabled || app.bodyListCount <= 0 || !app.showOverlay) return;
     if (viewW <= 0 || viewH <= 0) return;
 
     const float aspect = (float)viewW / (float)viewH;

@@ -72,6 +72,11 @@ struct App {
     // 녹화하거나 그림만 보고 싶을 때 쓴다.
     bool  uiHidden = false;
 
+    // 시뮬레이션 위에 덧그리는 것들 — 천체 동그라미, 블랙홀의 세 원과 라벨.
+    // 계산 결과가 아니라 「여기서 무슨 일이 일어나는지」 알려 주려고 얹는 그림이라,
+    // 순수한 화면만 보고 싶을 때 끌 수 있어야 한다.
+    bool  showOverlay = true;
+
     // 「보기」가 고르는 표현 방식. 나머지 색 설정(컬러맵·온도 추적)은 여기에 맞춰 자동으로 정한다.
     enum class Look { Density, Temperature };
     Look  look = Look::Density;
@@ -109,6 +114,9 @@ struct App {
 // 설정 보드와 MCP 제어 채널이 같은 규칙을 써야 하므로 한 곳에 둔다.
 // 고른 뒤 개별 토글로 덮어쓸 수 있다.
 void ApplyPresetDefaults(SimConfig& cfg, Preset preset);
+
+// 알갱이 수에 맞는 격자 해상도와 소프트닝을 정한다. 최대 개수를 바꿀 때마다 부른다.
+void ApplyAutoGrid(SimConfig& cfg);
 
 // 「보기」에서 고른 표현 방식에 맞춰 색과 온도 설정을 함께 맞춘다.
 // 사용자가 만지는 것은 밀도/온도 둘 중 하나뿐이고, 컬러맵·색 기준·온도 추적은 여기서 정한다.
