@@ -160,6 +160,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         // (round-06 QA-2 — 컬러맵·밝기·대비·HUD·줌팬 4항목이 자동 검증 불가로 남았다).
         "renderMode=%s\ncolorBy=%s\ncolormap=%s\n"
         "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\noverlay=%d\n"
+        "contact=%d\ncontactStiffness=%.0f\ncontactDamping=%.3f\n"
         "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
         "recording=%d\nrecordedFrames=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
@@ -190,6 +191,7 @@ std::string ControlBridge::statusBody(const App& app) const {
             : app.view.cmap == ColorMap::Thermal ? "thermal" : "astro",
         app.view.brightness, app.view.gamma, app.view.showHud ? 1 : 0,
         app.showOverlay ? 1 : 0,
+        app.cfg.contactEnabled ? 1 : 0, app.cfg.contactStiffness, app.cfg.contactDamping,
         app.zoom, app.panX, app.panY,
         app.recording ? 1 : 0, app.recordedFrames,
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
@@ -280,6 +282,9 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     if (cmd == "set") {
         if (has(kv, "particleCount")) {
             int n = getInt(kv, "particleCount", app.cfg.particleCount);
+            // 보드 슬라이더와 같은 상한을 건다. 여기만 뚫려 있으면 밖에서 보낸 명령 하나로
+            // 그래픽카드가 감당 못 하는 설정에 들어갈 수 있다.
+            if (n > app.hardMaxParticles) n = app.hardMaxParticles;
             // 격자·소프트닝도 함께 맞춘다. 보드의 개수 슬라이더와 같은 규칙이어야
             // 밖에서 바꾼 뒤의 화면이 안에서 바꾼 것과 달라지지 않는다.
             if (n > 0) { app.cfg.particleCount = n; ApplyAutoGrid(app.cfg); }
@@ -317,6 +322,13 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
         if (has(kv, "overlay"))        app.showOverlay        = getInt(kv, "overlay", 1) != 0;
+        if (has(kv, "contact"))        app.cfg.contactEnabled = getInt(kv, "contact", 0) != 0;
+        if (has(kv, "contactStiffness"))
+            app.cfg.contactStiffness = clampF(getFloat(kv, "contactStiffness", app.cfg.contactStiffness),
+                                              1.0e3f, 1.0e8f, app.cfg.contactStiffness);
+        if (has(kv, "contactDamping"))
+            app.cfg.contactDamping = clampF(getFloat(kv, "contactDamping", app.cfg.contactDamping),
+                                            0.0f, 1.0f, app.cfg.contactDamping);
         if (has(kv, "renderMode"))
             app.view.mode = (kv["renderMode"] == "points") ? RenderMode::Points
                                                            : RenderMode::DensityField;
@@ -352,6 +364,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         }
         // 설정 보드와 같은 규칙을 쓴다 — 경계·압력·팽창을 함께 바꾼다
         ApplyPresetDefaults(app.cfg, p);
+        ApplyAutoGrid(app.cfg);   // 보드의 장면 버튼과 같은 순서여야 한다
         app.applyConfig();
         app.sim.reset();
         app.running = true;

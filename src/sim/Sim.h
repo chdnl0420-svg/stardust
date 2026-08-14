@@ -52,6 +52,20 @@ struct SimConfig {
     bool  expansionEnabled     = false;  // 주기 경계에서만 물리적 의미가 있다
     float hubble               = 0.3f;
 
+    // ── 알갱이끼리의 접촉 (강체) ──────────────────────────────────────────
+    // 격자로 계산하는 중력만으로는 알갱이가 서로 그냥 통과한다. 격자 한 칸보다 작은 것은
+    // 없는 것과 같아서, 같은 칸에 있는 둘은 서로에게 아무 힘도 주지 않기 때문이다.
+    // 그래서 아무리 모여도 압축되기만 하고 덩어리가 되지 않는다.
+    //
+    // 겹치면 밀어내고 부딪히면 에너지를 잃게 하면, 모이다가 더 못 눌리는 지점에서 멈춘다.
+    // 그 멈춘 덩어리가 소행성이고, 더 모이면 더 큰 덩어리다 — 임계값도 등급 규칙도 필요 없다.
+    //
+    // 반지름은 격자 칸의 절반으로 고정한다. 지름이 정확히 한 칸이라 이웃 3×3 칸만 보면
+    // 부딪힐 상대를 전부 찾을 수 있고, 중력 격자를 그대로 이웃 찾기에 쓸 수 있다.
+    bool  contactEnabled   = false;
+    float contactStiffness = 1.0e6f;  // 겹친 만큼 밀어내는 세기
+    float contactDamping   = 0.35f;   // 부딪힐 때 잃는 정도(0 완전 탄성 ~ 1 완전 비탄성)
+
     // ── 블랙홀 (BlackHole 장면에서만 쓴다) ────────────────────────────────
     // 뉴턴 중력 대신 휘어진 시공간의 최단경로(측지선)를 따라가게 한다.
     // 슈바르츠실트 해의 적도면 운동을 그대로 적분하므로 아래 셋이 저절로 나온다.
@@ -138,6 +152,8 @@ public:
     static bool        deviceAvailable();
     static std::string deviceName();
     static size_t      deviceFreeBytes();
+    // 이 카드의 멀티프로세서 수. 감당할 수 있는 알갱이 수를 어림하는 데 쓴다(못 읽으면 0).
+    static int         deviceMultiProcessors();
 
     // 이 설정으로 잡아야 할 VRAM 바이트 수. 할당하기 전에 가용량과 비교하는 데 쓴다.
     static size_t      estimateBytes(int particleCount, int gridSize, Boundary boundary);

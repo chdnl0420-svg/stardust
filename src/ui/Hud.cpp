@@ -166,6 +166,23 @@ void DrawHud(const App& app) {
     if (app.stepsLastFrame > 1)
         ImGui::TextDisabled("화면 한 장에 %d번 계산 (배속)", app.stepsLastFrame);
 
+    // 접촉이 켜졌는지 — 이 장면에서 알갱이가 실제로 부딪히는지 아닌지는
+    // 화면만 봐서는 헷갈리므로 상태를 적어 준다. 꺼졌으면 왜 꺼졌는지도 함께.
+    if (app.cfg.contactEnabled) {
+        ImGui::Separator();
+        if (ContactFitsCount(app.sim.particleCount(), app.sim.gridSize())) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.37f, 0.76f, 0.48f, 1.0f));
+            ImGui::TextUnformatted("알갱이끼리 부딪히는 중");
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
+            ImGui::TextUnformatted("알갱이가 너무 많아 충돌을 껐습니다");
+            ImGui::PopStyleColor();
+            ImGui::TextDisabled("최대 개수를 %d 이하로 낮추면 켜집니다",
+                                (int)(0.764 * (double)app.sim.gridSize() * app.sim.gridSize()));
+        }
+    }
+
     // 천체 현황 — 이 장면의 결과 그 자체라 눈에 잘 띄어야 한다.
     if (app.cfg.bodiesEnabled) {
         const BodyStats bs = app.sim.bodyStats();

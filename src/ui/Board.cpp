@@ -105,12 +105,13 @@ void DrawBoard(App& app, bool& boardOpen) {
           "화면의 세 원은 왼쪽부터 지평선(들어가면 못 나옴) · 광자 구면(원궤도 속도가 광속이 되는 곳) · "
           "최소 안정 궤도입니다. 마지막 원 안쪽에는 안정된 궤도가 아예 없어서 나선을 그리며 빨려 듭니다.\n\n"
           "이 셋은 따로 넣은 규칙이 아니라 곡률 항 하나에서 저절로 나옵니다." },
-        { Preset::Accretion,   "천체 만들기",
-          "가스가 뭉쳐 천체가 되고, 그 천체가 주변 가스를 먹으며 자랍니다. "
-          "많이 먹을수록 소행성에서 행성으로, 행성에서 별로 커집니다.\n\n"
-          "천체끼리 부딪히면 속도로 갈립니다. 느리면 서로의 중력이 붙잡아 합쳐지고, "
-          "빠르면 뿌리치고 부서져 가스로 되돌아갑니다. 흩어진 파편은 다시 뭉쳐 새 천체가 됩니다.\n\n"
-          "부서질지 합쳐질지는 탈출 속도 하나로 정해집니다 — 따로 넣은 규칙이 아닙니다." },
+        { Preset::Accretion,   "뭉치기",
+          "여기서는 알갱이가 서로 통과하지 않습니다. 겹치면 밀어내고 부딪히면 에너지를 잃습니다.\n\n"
+          "그래서 모이다가 더 이상 눌리지 않는 지점에서 멈춥니다. 그 멈춘 덩어리가 소행성이고, "
+          "더 모이면 더 큰 덩어리가 됩니다. 크기의 층이 저절로 생깁니다.\n\n"
+          "임계값도 등급 규칙도 없습니다. 미는 힘 하나뿐입니다.\n\n"
+          "알갱이가 판을 너무 많이 채우면 움직일 공간이 없어 자동으로 꺼집니다 — "
+          "그때는 최대 개수를 낮추세요." },
         { Preset::Empty,       "빈 우주",     "아무것도 없습니다. 아래 모양을 골라 화면을 클릭해 채우세요." },
     };
     for (int i = 0; i < 7; ++i) {
@@ -118,6 +119,7 @@ void DrawBoard(App& app, bool& boardOpen) {
         if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.17f, 0.44f, 0.62f, 1.0f));
         if (ImGui::Button(scenes[i].name, ImVec2(half, 0))) {
             ApplyPresetDefaults(app.cfg, scenes[i].p);
+            ApplyAutoGrid(app.cfg);  // 격자는 그 장면이 접촉을 쓰는지까지 보고 정한다
             app.applyConfig();      // 코어에 넘긴 뒤에 배치를 다시 만든다(순서가 중요)
             app.sim.reset();
             app.running = true;
@@ -226,13 +228,26 @@ void DrawBoard(App& app, bool& boardOpen) {
     Title("최대 개수");
     int maxMan = app.cfg.particleCount / 10000;
     if (maxMan < 1) maxMan = 1;
-    // 3000만이 상한이다 — 그 위로는 이 그래픽카드에서 안정적으로 돌지 않는다.
-    if (CountRow("cap", &maxMan, 1, 3000, &app.particleSlider)) {
+    // 상한은 앱을 켤 때 이 그래픽카드를 보고 정해 둔 값이다.
+    // 그 위로 올릴 수 있게 두면 카드가 감당 못 하는 설정을 사용자가 고를 수 있게 된다.
+    int hardMan = app.hardMaxParticles / 10000;
+    if (hardMan < 1) hardMan = 1;
+    if (maxMan > hardMan) maxMan = hardMan;
+    if (CountRow("cap", &maxMan, 1, hardMan, &app.particleSlider)) {
         app.cfg.particleCount = maxMan * 10000;
         ApplyAutoGrid(app.cfg);   // 개수가 바뀌면 격자도 거기에 맞춘다
     }
     Help("화면에 둘 수 있는 알갱이의 최대 개수입니다. 이 수를 넘지 않도록 먼저 놓은 것부터 "
-         "자동으로 밀려납니다.\n\n1000만까지가 넉넉하고, 그 위로는 느려집니다.");
+         "자동으로 밀려납니다.\n\n"
+         "상한은 이 그래픽카드가 감당할 수 있는 선까지만 열립니다. "
+         "그 안에서도 화면이 계속 버거우면 앱이 스스로 더 낮춥니다.");
+    ImGui::TextDisabled("이 그래픽카드 상한 %d만", hardMan);
+    if (app.guardCappedTo > 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
+        ImGui::TextWrapped("너무 버거워서 %d 개로 낮췄습니다", app.guardCappedTo);
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("확인")) app.guardCappedTo = 0;
+    }
     if (app.sim.particleCount() < app.cfg.particleCount) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
         ImGui::TextWrapped("메모리가 모자라 %d 개로 줄임", app.sim.particleCount());

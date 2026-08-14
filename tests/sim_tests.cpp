@@ -765,6 +765,53 @@ static void testShatterBounds() {
           "부서지는 충돌이 일어나고도 판이 멀쩡하다", buf);
 }
 
+// ---------------------------------------------------------------------------
+// 21. 알갱이끼리 부딪히면 서로 통과하지 못하는가.
+//
+//     격자로만 중력을 풀면 알갱이가 서로 그냥 지나간다 — 격자 한 칸보다 작은 것은
+//     없는 것과 같아서, 같은 칸에 있는 둘은 서로에게 아무 힘도 주지 않기 때문이다.
+//     그래서 뭉치면 뭉칠수록 한 칸에 무한정 쌓이고 밀도가 끝없이 올라간다.
+//
+//     접촉을 켜면 알갱이 반지름이 칸의 절반이라 한 칸에 한 개 남짓밖에 못 들어간다.
+//     **최대 밀도가 그 선에서 멈추는 것**이 「서로 통과하지 않는다」의 판별식이다.
+//     같은 초기 조건을 켜고 끄고 두 번 돌려 견준다.
+// ---------------------------------------------------------------------------
+static void testContactBlocksOverlap() {
+    printf("\n[21] 알갱이끼리 부딪혀 서로 통과하지 못한다\n");
+
+    auto run = [](bool contact, double& maxDensity, double& mass) {
+        Sim sim;
+        SimConfig cfg;
+        // 20만 개는 1024² 에서 접촉을 켤 수 있는 한도(약 80만) 안이다.
+        cfg.particleCount = 200000;
+        cfg.gridSize = 1024;
+        cfg.preset = Preset::Accretion;
+        cfg.boundary = Boundary::Isolated;
+        cfg.gravity = 0.6f;
+        cfg.pressureEnabled = false;
+        cfg.bodiesEnabled = false;
+        cfg.contactEnabled = contact;
+        sim.init(cfg);
+        for (int i = 0; i < 800; ++i) sim.step();
+        maxDensity = sim.measureMaxDensity();
+        mass = sim.measureTotalGridMass();
+    };
+
+    double dOn = 0, dOff = 0, mOn = 0, mOff = 0;
+    run(true,  dOn,  mOn);
+    run(false, dOff, mOff);
+
+    char buf[280];
+    snprintf(buf, sizeof(buf),
+             "접촉 켬: 최대 밀도 %.1f (질량 %.0f) · 끔: %.1f (질량 %.0f) — %.1f배 차이",
+             dOn, mOn, dOff, mOff, (dOn > 0.0) ? dOff / dOn : 0.0);
+    // 접촉이 켜지면 한 칸에 한 개 남짓만 들어가므로 최대 밀도가 낮게 묶인다.
+    // 질량이 함께 보존되는지도 본다 — 밀어내다 알갱이를 판 밖으로 날려 버리면 안 된다.
+    check(dOn < dOff * 0.5 && dOn > 0.0
+              && mOn > 200000.0 * 0.98 && mOn <= 200000.0 * 1.001,
+          "겹치지 못해 최대 밀도가 낮게 묶이고 질량은 보존된다", buf);
+}
+
 int main() {
     printf("=== nbody-simulator 코어 회귀 테스트 ===\n");
     if (!Sim::deviceAvailable()) {
@@ -793,6 +840,7 @@ int main() {
     testBlackHoleGeodesic();
     testBodyFormation();
     testShatterBounds();
+    testContactBlocksOverlap();
 
     printf("\n=== 결과: %d PASS / %d FAIL ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

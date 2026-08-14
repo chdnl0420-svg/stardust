@@ -337,13 +337,17 @@ __device__ __forceinline__ float2 sampleAcc(const float2* accG, float2 p, int G,
 __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* temp,
                            int n, int G, float dt, int periodic, int trackTemp,
                            int cooling, float coolRate, float hubble,
-                           int blackHole, float bhGM, float bhRs) {
+                           int blackHole, float bhGM, float bhRs,
+                           const float2* accContact) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float2 p = pos[i];
     if (p.x < 0.f) return;
     float2 v = vel[i];
     float2 a = sampleAcc(accG, p, G, periodic);
+    // 알갱이끼리 부딪혀 생긴 가속도를 격자 중력 위에 얹는다.
+    // 격자는 멀리 있는 것끼리의 힘을, 이쪽은 맞닿은 것끼리의 힘을 맡는다.
+    if (accContact) { a.x += accContact[i].x; a.y += accContact[i].y; }
 
     // 블랙홀 — 뉴턴 중력이 아니라 휘어진 시공간의 최단경로(측지선)를 따라간다.
     //
@@ -393,6 +397,17 @@ __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* 
     }
 
     p.x += v.x * dt; p.y += v.y * dt;
+    // 값이 무너진 알갱이는 판에서 뺀다.
+    //
+    // NaN 은 어떤 비교와도 거짓이라 아래 경계 처리를 그대로 통과한다. 한 번 생기면
+    // 다음 스텝에 격자로 번지고, 그 격자로 푼 중력이 다시 모든 알갱이를 물들여
+    // 판 전체가 못 쓰게 된다. 여기서 끊는 것이 가장 싸다.
+    if (!isfinite(p.x) || !isfinite(p.y) || !isfinite(v.x) || !isfinite(v.y)) {
+        pos[i] = make_float2(-1.f, -1.f);
+        vel[i] = make_float2(0.f, 0.f);
+        return;
+    }
+
     if (periodic) {
         p.x -= floorf(p.x); p.y -= floorf(p.y);
     } else {
@@ -403,6 +418,88 @@ __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* 
         if (p.y > 0.998f) { p.y = 0.998f; v.y = -fabsf(v.y) * 0.25f; }
     }
     pos[i] = p; vel[i] = v;
+}
+
+// ---------------------------------------------------------------------------
+// 알갱이끼리의 접촉 (강체)
+// ---------------------------------------------------------------------------
+
+// 셀 순서로 정렬된 키에서 각 칸의 [시작, 끝) 구간을 뽑는다.
+// 이게 있어야 「내 칸과 이웃 칸에 누가 있나」를 한 번에 훑을 수 있다.
+// 빈 칸은 시작과 끝이 둘 다 0 이라 루프가 돌지 않는다.
+__global__ void kBuildCellRange(const unsigned* sortedKeys, int n,
+                                int* cellStart, int* cellEnd) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const unsigned k = sortedKeys[i];
+    if (i == 0) {
+        cellStart[k] = 0;
+    } else {
+        const unsigned kp = sortedKeys[i - 1];
+        if (k != kp) { cellStart[k] = i; cellEnd[kp] = i; }
+    }
+    if (i == n - 1) cellEnd[k] = n;
+}
+
+// 겹친 알갱이를 밀어낸다.
+//
+//   힘 = 강성 × 겹친 깊이  −  감쇠 × 서로 다가오는 속도
+//
+// 앞항이 반발이고 뒷항이 에너지 손실이다. 뒷항이 없으면 완전 탄성이라 영원히 튕기기만 하고
+// 절대 뭉치지 않는다. 힘이 음수가 되면 0 으로 자른다 — 접촉은 밀기만 하지 당기지 않는다.
+// 당기게 두면 스쳐 지나가던 알갱이가 서로를 붙잡아 실 같은 인공 구조가 생긴다.
+//
+// 한 칸에서 볼 상대 수에 상한을 둔다. 붕괴가 한창일 때는 한 칸에 수백 개가 몰릴 수 있는데,
+// 그러면 이 커널만 제곱으로 무거워져 프레임이 통째로 멎는다. 상한을 넘는 상대는 이번 스텝에
+// 보지 않을 뿐이고, 다음 스텝에 순서가 바뀌면 다시 걸린다.
+__global__ void kContact(const float2* pos, const float2* vel, float2* accOut,
+                         const int* cellStart, const int* cellEnd,
+                         int n, int G, int periodic,
+                         float radius, float stiffness, float damping) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    float2 a = make_float2(0.f, 0.f);
+    const float2 p = pos[i];
+    if (p.x < 0.f) { accOut[i] = a; return; }
+
+    const float2 v  = vel[i];
+    const float  d0 = 2.f * radius;
+    const float  d02 = d0 * d0;
+    // 임계 감쇠의 몇 배인가로 준다 — 강성을 바꿔도 튕기는 성질이 그대로 유지된다.
+    const float  cDamp = 2.f * damping * sqrtf(stiffness);
+
+    const int cx = (int)(p.x * G), cy = (int)(p.y * G);
+    constexpr int PER_CELL_LIMIT = 48;
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int c = gidx(cx + dx, cy + dy, G, periodic);
+            const int s = cellStart[c];
+            int e = cellEnd[c];
+            if (e - s > PER_CELL_LIMIT) e = s + PER_CELL_LIMIT;
+            for (int j = s; j < e; ++j) {
+                if (j == i) continue;
+                const float2 q = pos[j];
+                if (q.x < 0.f) continue;
+                float ex = p.x - q.x, ey = p.y - q.y;
+                if (periodic) {   // 반대편으로 감아 가까운 쪽을 본다
+                    if (ex >  0.5f) ex -= 1.f; else if (ex < -0.5f) ex += 1.f;
+                    if (ey >  0.5f) ey -= 1.f; else if (ey < -0.5f) ey += 1.f;
+                }
+                const float dd = ex * ex + ey * ey;
+                if (dd >= d02 || dd < 1e-16f) continue;
+                const float d  = sqrtf(dd);
+                const float nx = ex / d, ny = ey / d;
+                const float2 vj = vel[j];
+                const float vn = (v.x - vj.x) * nx + (v.y - vj.y) * ny;
+                float f = stiffness * (d0 - d) - cDamp * vn;
+                if (f < 0.f) f = 0.f;
+                a.x += f * nx;  a.y += f * ny;
+            }
+        }
+    }
+    accOut[i] = a;
 }
 
 __global__ void kCellKey(const float2* pos, unsigned* key, unsigned* val, int n, int G) {
@@ -772,7 +869,10 @@ __global__ void kAccrete(float2* pos, const float2* vel, const int* cellMap,
 
     const int ix = (int)floorf(p.x * G), iy = (int)floorf(p.y * G);
     const int b  = cellMap[gidx(ix, iy, G, periodic)];
-    if (b < 0 || bState[b] != BODY_ALIVE) return;
+    // **위쪽 범위도 반드시 본다.** 아래로만 막아 두면, 지도에 실린 값이 어떤 이유로든
+    // 천체 슬롯 수를 넘는 순간 아래 atomicAdd 가 남의 메모리에 쓴다. 커널은 아무 말 없이
+    // 계속 돌고, 드러날 때는 이미 드라이버가 커널 자료구조를 망가뜨린 뒤다.
+    if (b < 0 || b >= MAX_BODIES || bState[b] != BODY_ALIVE) return;
 
     const float2 bp = bPos[b];
     const float  dx = p.x - bp.x, dy = p.y - bp.y;
@@ -1114,6 +1214,10 @@ struct Sim::Impl {
     int    *bodyCell = nullptr;    // G×G — 각 칸을 차지한 천체 번호(-1 이면 없음)
     int    *bCounters = nullptr;   // [0] 먹힌 파티클 · [1] 합체 · [2] 파괴 · [3] 화면 복사 개수
     float  *bPack = nullptr;       // 화면용 (x, y, 질량, 반지름, 등급) × MAX_BODIES
+    // 알갱이끼리의 접촉 — 이웃 찾기용 칸 구간과, 그 결과로 나온 알갱이별 가속도
+    int    *cellStart = nullptr, *cellEnd = nullptr;   // 각 G×G
+    float2 *accP = nullptr;                            // 알갱이별 접촉 가속도
+
     // 먹혀서 비워진 파티클 자리 목록. 천체가 부서지면 파편을 여기에 되돌린다.
     int    *freeSlots = nullptr, *freeCount = nullptr;
     int    freeCap = 0;
@@ -1172,6 +1276,10 @@ struct Sim::Impl {
     void  clearBodies();
     // 씨앗 → 흡수 → 충돌 → 파편 → 이동 을 한 번 돈다.
     void  stepBodies(float dt);
+    // 알갱이 하나의 반지름(격자 칸의 절반).
+    float contactRadius() const;
+    // 알갱이가 판에서 움직일 공간이 남아 있는가.
+    bool  contactFits() const;
     // 먹혀서 생긴 빈 자리가 많이 쌓였으면 살아 있는 파티클을 앞으로 모은다.
     void  compactParticles();
 };
@@ -1182,6 +1290,7 @@ void Sim::Impl::releaseParticles() {
     cudaFree(key); cudaFree(keyOut); cudaFree(val); cudaFree(valOut);
     cudaFree(sortTmp); cudaFree(spdTmp); cudaFree(spdOut);
     cudaFree(alive); cudaFree(selIdx); cudaFree(selNum); cudaFree(selTmp);
+    cudaFree(accP); accP = nullptr;
     cudaFree(isStar); cudaFree(isStar2); cudaFree(starCnt);
     isStar = nullptr; isStar2 = nullptr; starCnt = nullptr; starN = 0;
     cudaFree(bPos); cudaFree(bVel); cudaFree(bMom); cudaFree(bMass); cudaFree(bGain);
@@ -1205,6 +1314,8 @@ void Sim::Impl::releaseGrid() {
     cudaFree(accG); cudaFree(green); cudaFree(rhoSpec); cudaFree(greenSpec);
     cudaFree(redTmp); cudaFree(redOut); cudaFree(cntOut);
     cudaFree(bodyCell); bodyCell = nullptr;   // G×G 라 격자와 함께 산다
+    cudaFree(cellStart); cudaFree(cellEnd);
+    cellStart = cellEnd = nullptr;
     rho = pot = prs = rhoCrop = green = nullptr; accG = nullptr;
     fieldNum = fieldOut = nullptr;
     rhoSpec = greenSpec = nullptr; redTmp = nullptr; redOut = nullptr; cntOut = nullptr;
@@ -1318,7 +1429,21 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&bPack,  sizeof(float)  * MAX_BODIES * 5));
     CK(cudaMalloc(&bNum,   sizeof(int)));
     CK(cudaMalloc(&bCounters, sizeof(int) * 4));
+    // 지도와 구간표는 잡자마자 반드시 채운다.
+    //
+    // cudaMalloc 이 준 메모리에는 이전에 쓰던 쓰레기가 그대로 들어 있다. 그 값이 한 번이라도
+    // 배열 인덱스로 쓰이면 그 자리에서 남의 메모리를 건드리고, 그때부터 무엇이 망가졌는지
+    // 알 길이 없어진다. 「지금 경로에서는 반드시 먼저 채워진다」는 것에 기대지 않는다 —
+    // 나중에 호출 순서가 한 줄만 바뀌어도 그 전제가 조용히 무너진다.
     CK(cudaMalloc(&bodyCell, sizeof(int) * allocG * allocG));
+    kFillInt<<<grid1(allocG * allocG), BS>>>(bodyCell, allocG * allocG, -1);
+    // 접촉용 — 칸 구간표(격자 크기)와 알갱이별 접촉 가속도
+    CK(cudaMalloc(&cellStart, sizeof(int) * allocG * allocG));
+    CK(cudaMalloc(&cellEnd,   sizeof(int) * allocG * allocG));
+    CK(cudaMemset(cellStart, 0, sizeof(int) * allocG * allocG));
+    CK(cudaMemset(cellEnd,   0, sizeof(int) * allocG * allocG));
+    CK(cudaMalloc(&accP, sizeof(float2) * n));
+    CK(cudaMemset(accP, 0, sizeof(float2) * n));
     // 빈 자리 목록은 파티클 수만큼 잡을 필요가 없다 — 한 스텝에 부서질 수 있는 양의 몇 배면
     // 충분하고, 넘치는 만큼은 그냥 기록하지 않는다(다음 압축이 정리한다).
     freeCap = (n < 65536) ? n : 65536;
@@ -1405,7 +1530,22 @@ void Sim::Impl::integrateOnce(float dt) {
                                       cfg.temperatureEnabled ? 1 : 0,
                                       cfg.coolingEnabled ? 1 : 0, cfg.coolingRate, hub,
                                       cfg.blackHoleEnabled ? 1 : 0,
-                                      cfg.blackHoleGM, cfg.blackHoleRs);
+                                      cfg.blackHoleGM, cfg.blackHoleRs,
+                                      (cfg.contactEnabled && contactFits()) ? accP : nullptr);
+}
+
+// 알갱이 하나의 반지름. 지름이 격자 칸 하나가 되게 잡는다 —
+// 그래야 이웃 3×3 칸만 봐도 부딪힐 상대를 빠뜨리지 않는다.
+float Sim::Impl::contactRadius() const {
+    return 0.5f / (float)(allocG > 0 ? allocG : 1);
+}
+
+// 접촉을 켤 수 있는가. 알갱이가 판을 너무 많이 채우면 움직일 공간이 없어
+// 서로 밀어내기만 하다 판이 굳는다. 판의 60% 를 상한으로 둔다.
+bool Sim::Impl::contactFits() const {
+    const double r = contactRadius();
+    const double area = (double)allocN * 3.14159265 * r * r;
+    return area <= 0.60;
 }
 
 void Sim::Impl::clearBodies() {
@@ -1548,6 +1688,12 @@ std::string Sim::deviceName() {
 bool Sim::failed() { return g_failed; }
 std::string Sim::failMessage() { return g_failMsg; }
 
+int Sim::deviceMultiProcessors() {
+    cudaDeviceProp p{};
+    if (cudaGetDeviceProperties(&p, 0) != cudaSuccess) return 0;
+    return p.multiProcessorCount;
+}
+
 size_t Sim::deviceFreeBytes() {
     size_t f = 0, t = 0;
     if (cudaMemGetInfo(&f, &t) != cudaSuccess) return 0;
@@ -1568,6 +1714,7 @@ constexpr size_t kBytesPerParticle = 4 * sizeof(float2)          // pos, vel, po
                                    + 1                           // alive
                                    + sizeof(int)                 // selIdx
                                    + 2                           // isStar, isStar2
+                                   + sizeof(float2)              // accP (접촉 가속도)
                                    + 24;                         // CUB 임시버퍼 여유
 
 // 격자가 차지하는 바이트. 고립 경계는 패딩 때문에 폭이 두 배(면적 네 배)가 된다.
@@ -1585,7 +1732,8 @@ size_t gridBytesFor(int G, Boundary b) {
     bytes += spec;
     // 천체가 어느 칸을 차지했는지 적는 지도(G×G int). 천체 자체의 버퍼는 개수 상한이
     // 고정이라 100 KB 남짓이고 여기 섞을 만큼 크지 않다.
-    bytes += (size_t)G * G * sizeof(int);
+    // 접촉용 칸 구간표(시작·끝)도 같은 크기로 둘 더 붙는다.
+    bytes += (size_t)G * G * sizeof(int) * 3;
     return bytes;
 }
 } // namespace
@@ -1728,9 +1876,16 @@ void Sim::step() {
     // 맨 앞으로 몰리고, "살아 있는 것은 항상 [0, activeN)" 이라는 불변식이 깨진다.
     // 그러면 렌더가 빈 슬롯을 그리고 다음 형태 추가가 살아 있는 파티클을 덮어쓴다
     // (round-08 리뷰 A6).
+    // 알갱이끼리 부딪히게 하려면 「내 칸에 누가 있나」를 알아야 하고, 그 표는 정렬해야 나온다.
+    // 그래서 접촉이 켜진 동안에는 성능이 아니라 **정확성을 위해** 매 스텝 정렬한다.
+    const bool contactOn = d->cfg.contactEnabled && d->contactFits();
+
     float tSort = 0.f;
     const int na = d->activeN;
-    if (na > 0 && d->cfg.sortInterval > 0 && (d->steps % d->cfg.sortInterval) == 0) {
+    const bool wantSort = na > 0
+                       && (contactOn
+                           || (d->cfg.sortInterval > 0 && (d->steps % d->cfg.sortInterval) == 0));
+    if (wantSort) {
         kCellKey<<<grid1(na), BS>>>(d->pos, d->key, d->val, na, G);
         size_t bytes = d->sortTmpBytes;
         // 정렬이 실패하면 valOut 이 미정의 상태다. 그걸로 파티클 배열을 인덱싱하면
@@ -1746,6 +1901,13 @@ void Sim::step() {
         if (na < n) {
             kHideRange<<<grid1(n - na), BS>>>(d->pos, na, n - na);
             CK(cudaMemset(d->isStar + na, 0, sizeof(unsigned char) * (n - na)));
+        }
+
+        // 방금 정렬한 순서로 칸마다 [시작, 끝) 구간을 만든다. 접촉이 이 표를 읽는다.
+        if (contactOn) {
+            CK(cudaMemset(d->cellStart, 0, sizeof(int) * G * G));
+            CK(cudaMemset(d->cellEnd,   0, sizeof(int) * G * G));
+            kBuildCellRange<<<grid1(na), BS>>>(d->keyOut, na, d->cellStart, d->cellEnd);
         }
     }
 
@@ -1794,6 +1956,13 @@ void Sim::step() {
     kGridAccel<<<gG, b>>>(d->pot, d->prs, d->rho, d->accG, G, S, potScale,
                           d->cfg.pressureEnabled ? 1 : 0, per);
 
+    // (5-b) 맞닿은 알갱이끼리 밀어낸다. 격자는 멀리 있는 것끼리의 힘을 맡고,
+    //       이쪽은 서로 겹친 것끼리의 힘을 맡는다. 둘을 더한 것이 그 알갱이가 받는 힘 전부다.
+    if (contactOn && na > 0)
+        kContact<<<grid1(na), BS>>>(d->pos, d->vel, d->accP, d->cellStart, d->cellEnd,
+                                    na, G, per, d->contactRadius(),
+                                    d->cfg.contactStiffness, d->cfg.contactDamping);
+
     // (6) CFL 클램프 — 한 스텝에 파티클이 격자 한 칸보다 많이 움직이면 적분이 무너진다.
     //     실측(implement-note.md 3번): 중력을 세게 하면 오히려 덜 뭉쳤는데,
     //     파티클이 튕겨 나가 판 가장자리에 쌓인 것이었다.
@@ -1826,6 +1995,14 @@ void Sim::step() {
     // 느리게 하는 쪽은 안정성과 충돌하지 않으므로(dt 를 줄이는 것은 언제나 안전하다) 한계 자체를 낮춘다.
     float dtLimit = dtWanted;
     if (vmax > 1e-6f) dtLimit = CFL * cell / vmax * slow;
+
+    // 접촉이 켜지면 알갱이 사이의 용수철이 또 하나의 시간 제한을 건다.
+    // 용수철이 한 번 튕기는 시간보다 성기게 적분하면 알갱이가 서로를 뚫고 지나가거나
+    // 반대로 튕겨 나가 발산한다. 진동 주기의 15% 안에서 돌게 묶는다.
+    if (contactOn) {
+        const float dtSpring = 0.15f * 6.2831853f / sqrtf(fmaxf(d->cfg.contactStiffness, 1.f));
+        if (dtLimit > dtSpring) dtLimit = dtSpring;
+    }
 
     // 한 프레임에 몇 번까지 나눠 돌지. 1 이면 "쪼개지 않고 시간 간격만 자른다".
     //
