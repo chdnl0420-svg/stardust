@@ -129,16 +129,28 @@ __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* 
                             : cmapAstro(t);
     }
 
-    // 알갱이 하나를 몇 픽셀로 찍을지.
+    // 알갱이 하나를 몇 픽셀로 찍을지 — **여기에 단단한 상한이 없으면 카드가 무너진다.**
     //
-    // 확대할수록 키운다. 멀리서 볼 때는 한 알이 한 점이라 은하 전체의 모양이 보이고,
-    // 다가가면 알 하나하나가 부드러운 원반으로 커져 또렷해진다. 배율을 그대로 곱하면
-    // 조금만 확대해도 화면이 뭉개지므로 제곱근으로 눌러 천천히 자라게 하고,
-    // 위로 여섯 배까지만 키운다 — 한 알에 수백 픽셀을 칠하면 그리기가 계산보다 무거워진다.
-    const float grow = fminf(sqrtf(fmaxf(zoom, 1.0f)), 6.0f);
-    const float rr = sizePx * grow * 0.5f;          // 알의 반지름(픽셀)
-    const int rad = min((int)rr, 12);
-    if (rad <= 0) {
+    // 2026-08-14 실측. 반지름을 12 까지 허용했더니 알 하나가 최대 625 픽셀에 원자 덧셈을
+    // 하고, 퍼뜨린 값을 1 로 맞추려고 그 625 칸을 한 번 더 돌았다. 화면 안 알갱이가
+    // 50만 개면 한 프레임에 6억 회가 넘는다. 드라이버 타임아웃(기본 2초)을 넘겨 강제
+    // 재시작되고 그 와중에 시스템이 통째로 죽었다 — BugCheck 0x139(커널 자료구조 손상).
+    //
+    // 그래서 셋 중 하나만 쓴다: 한 점 · 3×3 · 5×5. 가중치는 이항 계수라 합이 정확히 1 이고
+    // 루프도 나눗셈도 지수함수도 없다. 확대하면 화면 안 알갱이 수 자체가 배율의 제곱으로
+    // 줄어들므로, 크게 그리지 않아도 하나하나가 또렷해진다.
+    //
+    // 게다가 **얼마나 많이 보이는지**로 한 번 더 막는다. 알갱이가 3000만인데 배율이 낮으면
+    // 화면 전체가 알갱이라 5×5 로 칠하는 순간 22억 회가 된다 — 그때는 한 점으로 내린다.
+    const float visible = (float)n / fmaxf(zoom * zoom, 1.0f);
+    const int radCap = (visible > 8.0e6f) ? 0 : ((visible > 2.0e6f) ? 1 : 2);
+
+    const float grow = fminf(sqrtf(fmaxf(zoom, 1.0f)), 4.0f);
+    const float rr   = sizePx * grow;               // 알의 지름에 해당하는 크기(픽셀)
+    int rad = (rr < 2.0f) ? 0 : ((rr < 4.0f) ? 1 : 2);
+    if (rad > radCap) rad = radCap;
+
+    if (rad == 0) {
         float3* px = &accum[y * W + x];
         atomicAdd(&px->x, c.x);
         atomicAdd(&px->y, c.y);
@@ -146,30 +158,20 @@ __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* 
         return;
     }
 
-    // 가운데가 가장 밝고 가장자리로 갈수록 사그라드는 종 모양으로 퍼뜨린다.
-    // 균일하게 칠하면 알이 네모로 보이고, 딱 잘라 끝내면 테두리가 생긴다.
-    //
-    // 퍼뜨린 값을 다 더하면 1 이 되게 나눠 준다. 안 그러면 확대할 때마다 같은 알갱이가
-    // 더 많은 픽셀에 같은 밝기로 쌓여 화면이 통째로 하얗게 탄다.
-    const float sigma2 = 0.5f * rr * rr;
-    float sum = 0.0f;
-    for (int dy = -rad; dy <= rad; ++dy)
-        for (int dx = -rad; dx <= rad; ++dx) {
-            const float d2 = (float)(dx * dx + dy * dy);
-            if (d2 <= rr * rr) sum += __expf(-d2 / sigma2);
-        }
-    if (sum <= 0.0f) sum = 1.0f;
-    const float norm = 1.0f / sum;
+    // 이항 커널. 가로세로 1차원 가중치를 곱해 쓰므로 2차원 합이 저절로 1 이 된다 —
+    // 확대해서 크게 그려도 한 알의 총 밝기는 그대로다.
+    const float k3[3] = { 0.25f,   0.5f,  0.25f };
+    const float k5[5] = { 0.0625f, 0.25f, 0.375f, 0.25f, 0.0625f };
+    const float* kx = (rad == 1) ? k3 : k5;
 
     for (int dy = -rad; dy <= rad; ++dy) {
         const int yy = y + dy;
         if (yy < 0 || yy >= H) continue;
+        const float wy = kx[dy + rad];
         for (int dx = -rad; dx <= rad; ++dx) {
             const int xx = x + dx;
             if (xx < 0 || xx >= W) continue;
-            const float d2 = (float)(dx * dx + dy * dy);
-            if (d2 > rr * rr) continue;
-            const float fall = __expf(-d2 / sigma2) * norm;
+            const float fall = wy * kx[dx + rad];
             float3* px = &accum[yy * W + xx];
             atomicAdd(&px->x, c.x * fall);
             atomicAdd(&px->y, c.y * fall);
@@ -188,28 +190,40 @@ __global__ void kClearAccum(float3* a, int n) {
 // useCmap 을 켜면 쌓인 양을 그대로 색 배열에 통과시킨다. 확대해서 격자 대신 알갱이를
 // 그리게 됐을 때 쓴다 — 격자 쪽은 밀도에 따라 남색에서 주황을 거쳐 흰색으로 가는데
 // 점 쪽이 한 가지 색이면 넘어가는 순간 화면 색이 통째로 바뀐 것처럼 보인다.
+// blend 는 이 그림을 out 에 얼마나 실을지다(1 이면 덮어쓰고, 0.3 이면 30%만 섞인다).
+// 격자에서 알갱이로 서서히 넘어가는 구간에서 쓴다.
 __global__ void kAccumToRGBA(const float3* accum, uchar4* out, int n,
-                             float bright, float invGamma, int useCmap, int cmapKind) {
+                             float bright, float invGamma, int useCmap, int cmapKind,
+                             float blend) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float3 a = accum[i];
     float lum = (a.x + a.y + a.z) * 0.3333f;
 
+    float r, g, b;
     if (useCmap) {
         const float t = __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma);
         const float3 c = (cmapKind == 2) ? cmapThermal(t)
                        : (cmapKind == 1) ? make_float3(t, t, t)
                                          : cmapAstro(t);
-        out[i] = make_uchar4((unsigned char)(c.x * 255.f), (unsigned char)(c.y * 255.f),
-                             (unsigned char)(c.z * 255.f), 255);
-        return;
+        r = c.x; g = c.y; b = c.z;
+    } else {
+        const float s = (lum > 1e-6f)
+                      ? __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma) / lum
+                      : 0.f;
+        r = fminf(a.x * s, 1.f); g = fminf(a.y * s, 1.f); b = fminf(a.z * s, 1.f);
     }
 
-    float s = (lum > 1e-6f) ? __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma) / lum
-                            : 0.f;
-    float r = fminf(a.x * s, 1.f), g = fminf(a.y * s, 1.f), b = fminf(a.z * s, 1.f);
-    out[i] = make_uchar4((unsigned char)(r * 255.f), (unsigned char)(g * 255.f),
-                         (unsigned char)(b * 255.f), 255);
+    if (blend < 0.999f) {
+        const uchar4 prev = out[i];
+        const float k = 1.f - blend;
+        r = r * blend + (prev.x * (1.f / 255.f)) * k;
+        g = g * blend + (prev.y * (1.f / 255.f)) * k;
+        b = b * blend + (prev.z * (1.f / 255.f)) * k;
+    }
+    out[i] = make_uchar4((unsigned char)(fminf(r, 1.f) * 255.f),
+                         (unsigned char)(fminf(g, 1.f) * 255.f),
+                         (unsigned char)(fminf(b, 1.f) * 255.f), 255);
 }
 
 } // namespace
@@ -266,85 +280,103 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     const int cmapKind = (view.cmap == ColorMap::Thermal) ? 2
                        : (view.cmap == ColorMap::Gray)    ? 1 : 0;
 
-    // 다가가면 격자 대신 알갱이를 직접 그린다.
+    // 다가갈수록 격자에서 알갱이로 **서서히** 넘어간다.
     //
     // 밀도 격자는 칸 단위다. 한 칸이 화면에서 여러 픽셀을 덮을 만큼 확대하면 그 칸 모양이
     // 그대로 얼룩으로 드러난다 — 네 칸을 섞어 매끄럽게 이어도 마찬가지다. 격자에 없는
     // 정보를 만들어 낼 수는 없기 때문이다. 알갱이는 격자보다 훨씬 촘촘하므로 그때부터는
     // 알갱이를 찍는 편이 실제로 더 선명하다.
     //
-    // 넘어가는 선은 「한 칸이 화면에서 두 픽셀보다 커질 때」다. 그보다 작으면 칸이 픽셀에
-    // 묻혀 안 보이고, 그때는 격자 쪽이 더 매끄럽고 훨씬 싸다.
+    // 어느 한 배율에서 딱 갈아타면 휠 한 칸에 화면이 통째로 바뀐 것처럼 보인다. 그래서
+    // 겹치는 구간을 두고 섞는다 — 한 칸이 픽셀만 해지면 알갱이가 스미기 시작해, 네 픽셀을
+    // 덮을 즈음 알갱이만 남는다. 그 사이는 10%·20%·30% 씩 갈마든다.
+    //
+    // 섞는 구간에서만 둘 다 그리므로 비용이 잠깐 는다. 그 구간은 배율로 네 배 폭이라 짧다.
     const float shortSide = (float)(viewW < viewH ? viewW : viewH);
     const int   gridG     = app.sim.gridSize();
     const float cellPx    = (gridG > 0) ? shortSide * app.zoom / (float)gridG : 0.0f;
-    const bool  usePoints = (view.mode == RenderMode::Points) || (cellPx > 2.0f);
+    float pointMix = (cellPx - 1.0f) / 3.0f;
+    pointMix = fminf(fmaxf(pointMix, 0.0f), 1.0f);
+    // 양 끝에서 변화가 느려지게 눌러 준다. 선형이면 섞임이 시작·끝나는 순간이 눈에 걸린다.
+    pointMix = pointMix * pointMix * (3.0f - 2.0f * pointMix);
+    if (view.mode == RenderMode::Points) pointMix = 1.0f;   // 직접 고른 경우는 늘 알갱이
 
-    // 점 렌더는 누적 버퍼가 따로 필요하다. 화면 버퍼만 있고 누적 버퍼가 없으면 밀도 필드로 내려간다.
-    if (!devPixels_) { if (hostPixels_) memset(hostPixels_, 0, devBytes_); }
-    else if (usePoints && devAccum_) {
-        // 파티클 점 — 겹칠수록 밝아지도록 누적한 뒤 한 번에 색으로 바꾼다.
-        const int n = app.sim.activeCount();
-        kClearAccum<<<(npix + 255) / 256, 256>>>((float3*)devAccum_, npix);
-        if (n > 0) {
-            kSplatPoints<<<(n + 255) / 256, 256>>>(
-                (const float2*)app.sim.particlePosDevicePtr(),
-                (const float2*)app.sim.particleVelDevicePtr(),
-                app.sim.particleTempDevicePtr(), n,
-                (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
-                app.zoom, app.panX, app.panY, app.ui.pointSizePx);
+    const bool wantField  = (pointMix < 0.999f);
+    const bool wantPoints = (pointMix > 0.001f) && devAccum_;
+    const float meanRho = (gridG > 0) ? (float)app.sim.particleCount() / (float)(gridG * gridG)
+                                      : 1.0f;
+
+    if (!devPixels_) {
+        if (hostPixels_) memset(hostPixels_, 0, devBytes_);
+    } else {
+        bool drew = false;
+
+        if (wantField) {
+            // 밀도 필드 — 색 기준에 맞는 격자를 받아 화면으로 샘플링한다.
+            const Sim::Field f = (view.colorBy == ColorBy::Temperature) ? Sim::Field::Temperature
+                               : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
+                                                                        : Sim::Field::Density;
+            const float* grid = app.sim.fieldDevicePtr(f);
+
+            // 밀도는 파티클 수에 그대로 비례한다 — 같은 배치라도 3000만 개는 100만 개의 30배다.
+            // 원시값을 그대로 넣으면 개수를 올리는 순간 판 전체가 순백으로 타 버린다
+            // (실측 2026-08-14: 3000만에서 평균 밀도만 28.6, 포화선은 13.5).
+            // 평균 밀도로 나눠 「평균의 몇 배인가」로 그리면 개수를 바꿔도 같은 그림이 나온다.
+            //
+            // 나누는 기준은 살아 있는 수가 아니라 **설정된 최대 개수**다. 살아 있는 수로 나누면
+            // 천체가 가스를 먹어 줄어들 때 남은 가스가 오히려 밝아진다 — 줄면 어두워지는 것이 맞다.
+            //
+            // 온도·속도는 밀도로 가중평균한 값이라 개수와 무관하다. 대신 값의 범위가 0~1 로 좁아
+            // 로그 압축이 과하므로 그 자리에서 배율을 올린다.
+            const float bright = (f == Sim::Field::Density)
+                               ? view.brightness / fmaxf(meanRho, 1e-6f)
+                               : view.brightness * 60.0f;
+            if (grid) {
+                dim3 b(16, 16), g((viewW + 15) / 16, (viewH + 15) / 16);
+                kShade<<<g, b>>>(grid, gridG, (uchar4*)devPixels_, viewW, viewH,
+                                 bright, 1.0f / view.gamma, cmapKind,
+                                 app.zoom, app.panX, app.panY);
+                drew = true;
+            }
         }
-        // 격자에서 알갱이로 저절로 넘어갈 때 화면이 갑자기 어두워지지 않게 밝기를 맞춘다.
-        //
-        // 격자 쪽은 평균 밀도로 나눠 「평균의 몇 배인가」로 그린다(아래 밀도 필드 가지 참조).
-        // 점 쪽은 쌓인 값을 그대로 쓰므로, 자동으로 넘어온 경우에는 같은 배수를 곱해 줘야
-        // 넘어가는 순간에 밝기가 이어진다. 사용자가 직접 점 모드를 고른 경우는 건드리지 않는다.
-        const bool autoPoints = (view.mode != RenderMode::Points);
-        const float meanRho = (gridG > 0) ? (float)app.sim.particleCount() / (float)(gridG * gridG)
-                                          : 1.0f;
-        const float pointBright = autoPoints ? view.brightness / fmaxf(meanRho, 1e-6f)
-                                             : view.brightness;
-        kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
-                                                  (uchar4*)devPixels_, npix,
-                                                  pointBright, 1.0f / view.gamma,
-                                                  autoPoints ? 1 : 0, cmapKind);
+
+        if (wantPoints) {
+            // 파티클 점 — 겹칠수록 밝아지도록 누적한 뒤 한 번에 색으로 바꾼다.
+            const int n = app.sim.activeCount();
+            kClearAccum<<<(npix + 255) / 256, 256>>>((float3*)devAccum_, npix);
+            if (n > 0) {
+                kSplatPoints<<<(n + 255) / 256, 256>>>(
+                    (const float2*)app.sim.particlePosDevicePtr(),
+                    (const float2*)app.sim.particleVelDevicePtr(),
+                    app.sim.particleTempDevicePtr(), n,
+                    (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
+                    app.zoom, app.panX, app.panY, app.ui.pointSizePx);
+            }
+            // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
+            //
+            // 격자 쪽은 평균 밀도로 나눠 「평균의 몇 배인가」로 그리고 색 배열을 거친다.
+            // 저절로 넘어온 알갱이 쪽에도 같은 배수와 같은 색 배열을 써야 섞이는 구간에서
+            // 두 그림이 같은 색조로 겹친다. 사용자가 직접 점 모드를 고른 경우는 건드리지 않는다.
+            const bool autoPoints = (view.mode != RenderMode::Points);
+            const float pointBright = autoPoints ? view.brightness / fmaxf(meanRho, 1e-6f)
+                                                 : view.brightness;
+            // wantField 가 그리지 못했으면 섞을 바탕이 없다 — 그때는 알갱이로 덮어쓴다.
+            const float blend = (wantField && drew) ? pointMix : 1.0f;
+            kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
+                                                      (uchar4*)devPixels_, npix,
+                                                      pointBright, 1.0f / view.gamma,
+                                                      autoPoints ? 1 : 0, cmapKind, blend);
+            drew = true;
+        }
+
         // 복사가 실패하면 hostPixels_ 는 이전 프레임 그대로다 — 그걸 새 화면인 양 올리면
         // 사용자는 시뮬레이션이 도는 줄 안다. 실패하면 검은 화면으로 두어 이상을 드러낸다
         // (round-08 리뷰 A11).
-        if (cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        if (!drew) {
             if (hostPixels_) memset(hostPixels_, 0, devBytes_);
-        }
-    } else {
-        // 밀도 필드 — 색 기준에 맞는 격자를 받아 화면으로 샘플링한다.
-        const Sim::Field f = (view.colorBy == ColorBy::Temperature) ? Sim::Field::Temperature
-                           : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
-                                                                    : Sim::Field::Density;
-        const float* grid = app.sim.fieldDevicePtr(f);
-
-        // 밀도는 파티클 수에 그대로 비례한다 — 같은 배치라도 3000만 개는 100만 개의 30배다.
-        // 원시값을 그대로 넣으면 개수를 올리는 순간 판 전체가 순백으로 타 버린다
-        // (실측 2026-08-14: 3000만에서 평균 밀도만 28.6, 포화선은 13.5).
-        // 평균 밀도로 나눠 「평균의 몇 배인가」로 그리면 개수를 바꿔도 같은 그림이 나온다.
-        //
-        // 나누는 기준은 살아 있는 수가 아니라 **설정된 최대 개수**다. 살아 있는 수로 나누면
-        // 천체가 가스를 먹어 줄어들 때 남은 가스가 오히려 밝아진다 — 줄면 어두워지는 것이 맞다.
-        const int   G       = app.sim.gridSize();
-        const float meanRho = (float)app.sim.particleCount() / (float)(G * G);
-        // 온도·속도는 밀도로 가중평균한 값이라 개수와 무관하다. 대신 값의 범위가 0~1 로 좁아
-        // 로그 압축이 과하므로 그 자리에서 배율을 올린다.
-        const float bright = (f == Sim::Field::Density)
-                           ? view.brightness / fmaxf(meanRho, 1e-6f)
-                           : view.brightness * 60.0f;
-        if (grid) {
-            dim3 b(16, 16), g((viewW + 15) / 16, (viewH + 15) / 16);
-            kShade<<<g, b>>>(grid, app.sim.gridSize(), (uchar4*)devPixels_, viewW, viewH,
-                             bright, 1.0f / view.gamma, cmapKind,
-                             app.zoom, app.panX, app.panY);
-            if (cudaMemcpy(hostPixels_, devPixels_, devBytes_, cudaMemcpyDeviceToHost) != cudaSuccess) {
-                if (hostPixels_) memset(hostPixels_, 0, devBytes_);
-            }
-        } else if (hostPixels_) {
-            memset(hostPixels_, 0, devBytes_);
+        } else if (cudaMemcpy(hostPixels_, devPixels_, devBytes_,
+                              cudaMemcpyDeviceToHost) != cudaSuccess) {
+            if (hostPixels_) memset(hostPixels_, 0, devBytes_);
         }
     }
 
