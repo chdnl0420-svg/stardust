@@ -770,8 +770,58 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
         const char* recLabel = app.recording ? "정지" : "녹화";
         const float wSave = ImGui::CalcTextSize(saveLabel).x + 26.0f;
         const float wRec  = ImGui::CalcTextSize(recLabel).x + 40.0f;
-        ImGui::SameLine(right - wSave - wRec - 36.0f - 12.0f);
+        const float wHide = 34.0f, wMet = 34.0f;
+        ImGui::SameLine(right - wSave - wRec - 36.0f - wHide - wMet - 24.0f);
 
+        // 눈 — 조작부를 통째로 감춘다.
+        //
+        // 키(H)만 두었더니 화면 어디에도 여는 자리가 없어 아는 사람만 쓸 수 있었다.
+        // 감춘 뒤에는 아무 글자도 남기지 않기로 했으므로, 들어가는 문은 더더욱 눈에 보여야 한다.
+        {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const bool pressed = ImGui::InvisibleButton("##hide", ImVec2(wHide, 32.0f));
+            const bool hov = ImGui::IsItemHovered();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (hov) dl->AddRectFilled(p, ImVec2(p.x + wHide, p.y + 32.0f),
+                                       IM_COL32(255, 255, 255, 26), 9.0f);
+            const ImVec2 c(p.x + wHide * 0.5f, p.y + 16.0f);
+            const ImU32 col = hov ? kInk : kInkDim;
+            // 눈 모양 — 위아래 호를 맞대고 가운데 동그라미
+            dl->PathArcTo(ImVec2(c.x, c.y + 7.0f), 11.0f, 4.10f, 5.32f);
+            dl->PathStroke(col, 0, 1.6f);
+            dl->PathArcTo(ImVec2(c.x, c.y - 7.0f), 11.0f, 0.96f, 2.18f);
+            dl->PathStroke(col, 0, 1.6f);
+            dl->AddCircleFilled(c, 2.6f, col, 10);
+            if (pressed) {
+                app.uiHidden = true;
+                app.drawerOpen = false;
+                app.shapeDrawerOpen = false;
+                app.settingsOpen = false;
+            }
+            Tip("조작부를 전부 감춥니다. H 로도 됩니다.");
+        }
+
+        ImGui::SameLine();
+        // 눈금 — 회전곡선·프레임 시간·에너지를 보는 창.
+        {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const bool pressed = ImGui::InvisibleButton("##meters", ImVec2(wMet, 32.0f));
+            const bool hov = ImGui::IsItemHovered();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (hov || app.metersOpen)
+                dl->AddRectFilled(p, ImVec2(p.x + wMet, p.y + 32.0f),
+                                  app.metersOpen ? kAccentSoft : IM_COL32(255, 255, 255, 26), 9.0f);
+            const ImU32 col = app.metersOpen ? kAccent : (hov ? kInk : kInkDim);
+            // 막대그래프 셋
+            const float bx = p.x + wMet * 0.5f - 7.0f, by = p.y + 22.0f;
+            dl->AddRectFilled(ImVec2(bx,        by - 6.0f),  ImVec2(bx + 3.0f,  by), col, 1.0f);
+            dl->AddRectFilled(ImVec2(bx + 5.5f, by - 11.0f), ImVec2(bx + 8.5f,  by), col, 1.0f);
+            dl->AddRectFilled(ImVec2(bx + 11.f, by - 8.0f),  ImVec2(bx + 14.0f, by), col, 1.0f);
+            if (pressed) app.metersOpen = !app.metersOpen;
+            Tip("재기 — 회전곡선, 프레임 시간, 에너지. M 으로도 됩니다.");
+        }
+
+        ImGui::SameLine();
         // 톱니 — 나머지 값 전부를 한가운데 큰 판으로 연다. 자주 만지지 않는 것들이라
         // 막대에 상주시키면 「평소엔 우주뿐」이 무너진다.
         if (ToolButton("settings", 4, app.settingsOpen)) app.settingsOpen = !app.settingsOpen;
