@@ -369,13 +369,38 @@ __device__ __forceinline__ float4 sampleAcc(const float4* accG, float4 p, int G,
 // 가속도 크기만 필요할 때(궤도 속도 정하기).
 //
 // 비용: N 스레드 × 8칸 보간.
+// **적분기가 실제로 쓰는 힘을 전부 세야 한다.**
+//
+// 격자 중력만 재서 속도를 정하면, 도는 동안 헤일로와 블랙홀 중력이 더 붙어 궤도가 모자란다.
+// 그러면 판을 열자마자 원반이 안으로 무너진다(2026-08-14 실측). 여기서 더하는 항은
+// kIntegrate 가 더하는 항과 하나하나 짝이 맞아야 한다.
 __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
-                          int n, int G, int periodic) {
+                          int n, int G, int periodic,
+                          float haloV2, float haloCore2,
+                          int blackHole, float bhGM, float bhX, float bhY, float bhZ) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
     if (p.x < 0.f) { out[i] = 0.f; return; }
-    const float4 a = sampleAcc(accG, p, G, periodic);
+    float4 a = sampleAcc(accG, p, G, periodic);
+
+    if (haloV2 > 0.f) {
+        const float hx = p.x - 0.5f, hy = p.y - 0.5f, hz = p.z - 0.5f;
+        const float denom = hx * hx + hy * hy + hz * hz + haloCore2;
+        a.x -= haloV2 * hx / denom;
+        a.y -= haloV2 * hy / denom;
+        a.z -= haloV2 * hz / denom;
+    }
+    if (blackHole) {
+        const float dx = p.x - bhX, dy = p.y - bhY, dz = p.z - bhZ;
+        const float r2 = dx * dx + dy * dy + dz * dz;
+        const float r = sqrtf(fmaxf(r2, 1e-12f));
+        // 처음 속도를 정할 때는 상대론 보정을 빼고 뉴턴만 본다 — 그 보정은 각운동량이
+        // 정해진 뒤에야 계산할 수 있는데, 지금 정하려는 것이 바로 그 각운동량이다.
+        const float m = -bhGM / (r2 * r);
+        a.x += m * dx; a.y += m * dy; a.z += m * dz;
+    }
+
     // 원반 회전에 쓰는 것은 중심을 향한 **수평** 성분이다. 위아래 성분은 회전과 무관하다.
     const float dx = p.x - 0.5f, dy = p.y - 0.5f;
     const float r = sqrtf(dx * dx + dy * dy);
@@ -970,8 +995,14 @@ void Sim::Impl::placeInitial() {
 void Sim::Impl::giveOrbits() {
     if (g_failed || cfg.preset == Preset::Empty || cfg.preset == Preset::CosmicWeb) return;
     computeAccel();
+    // 적분기가 쓰는 힘을 그대로 넘긴다 — 하나라도 빠지면 궤도가 어긋나 원반이 무너진다.
+    const float haloV2 = cfg.haloEnabled ? (cfg.haloSpeed * cfg.haloSpeed) : 0.f;
+    const float haloCore2 = cfg.haloCore * cfg.haloCore;
+    const float bhGM = bh.active
+                     ? cfg.gravity * bh.mass / (float)(allocN > 0 ? allocN : 1) : 0.f;
     kAccelMag<<<(allocN + 255) / 256, 256>>>(accG, pos, accMag, allocN, allocG,
-                                             periodic() ? 1 : 0);
+                                             periodic() ? 1 : 0, haloV2, haloCore2,
+                                             bh.active ? 1 : 0, bhGM, bh.x, bh.y, 0.5f);
     // 은하 충돌은 둘을 서로에게 밀어 준다. 나머지는 제자리에서 돈다.
     const float2 base = make_float2(0.f, 0.f);
     kSetOrbit<<<(allocN + 255) / 256, 256>>>(accG, vel, pos, accMag, allocN,
@@ -1378,8 +1409,13 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
 
     if (autoOrbit && kind != ShapeKind::Blob) {
         d.computeAccel();
+        const float hv2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
+        const float hc2 = d.cfg.haloCore * d.cfg.haloCore;
+        const float gm = d.bh.active
+                       ? d.cfg.gravity * d.bh.mass / (float)(d.allocN > 0 ? d.allocN : 1) : 0.f;
         kAccelMag<<<(d.allocN + 255) / 256, 256>>>(d.accG, d.pos, d.accMag, d.allocN,
-                                                   d.allocG, d.periodic() ? 1 : 0);
+                                                   d.allocG, d.periodic() ? 1 : 0, hv2, hc2,
+                                                   d.bh.active ? 1 : 0, gm, d.bh.x, d.bh.y, 0.5f);
         kSetOrbitAt<<<(n + 255) / 256, 256>>>(d.vel, d.pos, d.accMag, from, n, cx, cy);
     }
     CK(cudaGetLastError());
