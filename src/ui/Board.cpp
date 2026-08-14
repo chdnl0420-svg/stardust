@@ -726,45 +726,9 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
             ImGui::EndPopup();
         }
 
-        ImGui::SameLine();
-        char c[24]; CountText(c, sizeof(c), app.brush.shapeCount);
-        drag = 0.0f;
-        const int rc = Pill("shape", "한 번에", c, &drag, true);
-        const ImVec2 aShape = ImGui::GetItemRectMin();
-        if (rc == 1) ImGui::OpenPopup("##shapepop");
-        else if (rc == 2) {
-            // 개수는 1만에서 수백만까지 걸치므로 곱셈으로 끈다 —
-            // 덧셈이면 작은 쪽에서는 한 픽셀이 너무 크고 큰 쪽에서는 하염없이 끌어야 한다.
-            const float hi = (float)(app.cfg.particleCount > 10000 ? app.cfg.particleCount : 10000);
-            app.brush.shapeCount =
-                (int)Clampf((float)app.brush.shapeCount * expf(drag * 0.012f), 10000.0f, hi);
-        }
-        Tip("한 번 클릭할 때 놓을 알갱이 수와 모양입니다. 좌우로 끌어도 됩니다.");
-        AnchorAbove(aShape);
-        if (ImGui::BeginPopup("##shapepop")) {
-            const char* names[6] = { "은하", "태양", "고리", "구름", "블랙홀", "토성" };
-            for (int i = 0; i < 6; ++i) {
-                if (i > 0) ImGui::SameLine();
-                const bool sel = ((int)app.brush.shapeKind == i);
-                // 고른 것에만 주황을 얹는다. 시안이 강조로 쓰는 색은 이것 하나다.
-                if (sel) {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 0.69f, 0.40f, 0.26f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.69f, 0.40f, 0.34f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 0.77f, 0.54f, 1.00f));
-                }
-                if (ImGui::Button(names[i], ImVec2(58, 0))) {
-                    app.brush.shapeKind = (ShapeKind)i;
-                    app.tool = Tool::AddShape;
-                }
-                if (sel) ImGui::PopStyleColor(3);
-            }
-            ImGui::Spacing();
-            int man = app.brush.shapeCount / 10000; if (man < 1) man = 1;
-            const int cap = (app.cfg.particleCount / 10000) > 1 ? (app.cfg.particleCount / 10000) : 1;
-            if (SliderRowInt("popn", "한 번에", &man, 1, cap, "%d만", true, 322.0f))
-                app.brush.shapeCount = man * 10000;
-            ImGui::EndPopup();
-        }
+        // 「한 번에」 알약은 뺐다. 놓기 서랍이 모양과 개수를 함께 고르는 자리라, 막대에도
+        // 같은 값을 두면 두 곳에서 같은 것을 만지게 된다 — 막대에 상주하는 것을 줄이는 것이
+        // 이 화면 설계의 핵심이다.
 
         ImGui::SameLine();
         snprintf(v, sizeof(v), "%.1f", app.view.brightness);
