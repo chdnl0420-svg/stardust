@@ -541,6 +541,25 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
     }
 
     v.x += a.x * dt; v.y += a.y * dt; v.z += a.z * dt;
+
+    // **이 우주의 광속을 넘지 못한다.**
+    //
+    // 물리적으로 당연한 말이지만, 실용적인 이유가 더 크다. 블랙홀을 놓는 순간 이미 궤도
+    // 속도로 돌던 알갱이들은 그 중력에 맞지 않는 속도가 되어 안으로 떨어지며 폭주한다.
+    // 2026-08-14 실측: 광속의 21배(360)까지 올라갔고, 그러자 CFL 이 「한 스텝에 한 칸을
+    // 넘으면 안 된다」며 dt 를 94분의 1로 깎아 **시간이 흐르지 않았다** — 6초 동안 시뮬레이션
+    // 시간이 0.013 밖에 안 갔다. 화면은 멈춘 것처럼 보인다.
+    //
+    // 여기서 잘라 두면 dt 의 하한이 저절로 생긴다(0.8·칸/광속). 잘리는 알갱이는 어차피
+    // 지평선으로 떨어질 것들이라 궤도의 모양을 바꾸지 않는다.
+    {
+        const float sp2 = v.x * v.x + v.y * v.y + v.z * v.z;
+        if (sp2 > c2) {
+            const float k = sqrtf(c2 / sp2);
+            v.x *= k; v.y *= k; v.z *= k;
+        }
+    }
+
     p.x += v.x * dt; p.y += v.y * dt; p.z += v.z * dt;
 
     // 숫자가 한 번 깨지면 그 알갱이는 영영 돌아오지 않고, 격자를 통해 이웃까지 오염시킨다.
@@ -1389,6 +1408,11 @@ void Sim::step() {
     float dt = 0.0016f * d.cfg.timeScale;
     const float dtMax = (vmax > 1e-6f) ? (0.8f * cell / vmax) : dt;
     if (dt > dtMax) dt = dtMax;
+    // **바닥을 둔다.** 속도를 광속으로 잘라 두었으므로 정상적인 판에서는 여기 닿지 않는다.
+    // 그래도 한 알갱이가 튀는 순간 dt 가 0 에 수렴해 시간이 멎는 것은 막아야 한다 —
+    // 화면이 멈추면 사용자는 앱이 죽은 줄 안다. 광속에 맞춘 값의 절반을 바닥으로 쓴다.
+    const float dtFloor = 0.4f * cell / sqrtf(fmaxf(d.cfg.lightSpeedSq, 1e-6f));
+    if (dt < dtFloor) dt = dtFloor;
     d.tm.dtUsed = dt; d.tm.maxSpeed = vmax; d.tm.substeps = 1;
 
     const float haloV2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
