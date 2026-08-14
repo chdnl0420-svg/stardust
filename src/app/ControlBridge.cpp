@@ -350,6 +350,12 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "zoom")) app.zoom = clampF(getFloat(kv, "zoom", app.zoom), 0.05f, 64.0f, app.zoom);
         if (has(kv, "panX")) app.panX = clampF(getFloat(kv, "panX", app.panX), -8.0f, 8.0f, app.panX);
         if (has(kv, "panY")) app.panY = clampF(getFloat(kv, "panY", app.panY), -8.0f, 8.0f, app.panY);
+        // 보는 방향(라디안). 창을 오른쪽 단추로 끌면 바뀌는 값과 같은 것이라,
+        // 밖에서 각도를 지정해 여러 방향의 그림을 견줄 수 있다.
+        if (has(kv, "camYaw"))
+            app.camYaw = clampF(getFloat(kv, "camYaw", app.camYaw), -6.2832f, 6.2832f, app.camYaw);
+        if (has(kv, "camPitch"))
+            app.camPitch = clampF(getFloat(kv, "camPitch", app.camPitch), -1.5533f, 1.5533f, app.camPitch);
 
         // 무엇이 바뀌었든 그 자리에서 코어에 넘긴다.
         // 전에는 파티클 수·격자·경계에서만 넘겨서, 중력·압력·냉각 같은 값을 단독으로 바꾸면

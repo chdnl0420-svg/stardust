@@ -837,12 +837,55 @@ __global__ void kReorder(const float4* srcP, const float4* srcV, const float* sr
 //
 // 비용: G³ 스레드 × 1 atomicAdd. G=128 이면 200만 회.
 // ---------------------------------------------------------------------------
-__global__ void kProjectXY(const float* grid3, float* out2, int G, int S) {
+// 보는 방향. 화면은 오래 「위에서 곧장 내려다보는」 하나뿐이었는데, 3D 가 되고 나니
+// 그 한 방향으로는 두께가 보이지 않는다 — 나선팔이 원반인지 공인지 알 수가 없다.
+//
+// on 이 0 이면 예전 경로 그대로 z 로 곧장 합친다. 각도를 안 돌린 사람에게 회전 계산
+// 비용을 물리지 않으려는 것이다(격자 209만 칸을 매 프레임 도는 자리다).
+struct ViewRot {
+    float cy, sy;      // 좌우 돌리기(yaw) 의 코사인·사인
+    float cp, sp;      // 위아래 기울이기(pitch)
+    int   on;
+};
+
+// 판 안의 한 점을 돌려 화면 좌표로 옮긴다. 판 밖으로 나가면 false.
+//
+// 판은 정육면체라 비스듬히 보면 대각선이 한 변의 1.73배가 되어 모서리가 화면을 벗어난다.
+// 줄여서 다 담으면 똑바로 볼 때보다 작아 보이므로, 여기서는 자르고 확대·축소는 사용자에게
+// 맡긴다 — 알갱이는 대개 가운데 모여 있어 잘리는 것은 빈 모서리다.
+__device__ inline bool rotPoint(float px, float py, float pz, const ViewRot& r,
+                                float& ox, float& oy) {
+    const float fx = px - 0.5f, fy = py - 0.5f, fz = pz - 0.5f;
+    const float ax =  fx * r.cy + fz * r.sy;         // 세로축으로 돌린다
+    const float az = -fx * r.sy + fz * r.cy;
+    const float ay =  fy * r.cp - az * r.sp;         // 가로축으로 기울인다
+    ox = ax + 0.5f; oy = ay + 0.5f;
+    return (ox >= 0.f && ox < 1.f && oy >= 0.f && oy < 1.f);
+}
+
+// 격자 칸 하나를 같은 규칙으로 옮긴다.
+__device__ inline bool rotCell(int x, int y, int z, int G, const ViewRot& r,
+                               int& sx, int& sy) {
+    const float inv = 1.0f / (float)G;
+    float ox, oy;
+    if (!rotPoint((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv, r, ox, oy))
+        return false;
+    sx = (int)(ox * (float)G);
+    sy = (int)(oy * (float)G);
+    return (sx >= 0 && sx < G && sy >= 0 && sy < G);
+}
+
+__global__ void kProjectXY(const float* grid3, float* out2, int G, int S, ViewRot rot) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     const int z = blockIdx.z * blockDim.z + threadIdx.z;
     if (x >= G || y >= G || z >= G) return;
-    atomicAdd(&out2[y * G + x], grid3[(z * S + y) * S + x]);
+    const float v = grid3[(z * S + y) * S + x];
+    if (!rot.on) { atomicAdd(&out2[y * G + x], v); return; }
+    if (v == 0.f) return;                       // 빈 칸은 돌릴 것도 없다
+    int sx, sy;
+    if (!rotCell(x, y, z, G, rot, sx, sy)) return;
+    atomicAdd(&out2[sy * G + sx], v);
 }
 
 // 속도 분산 — 은하에서 「온도」에 해당하는 값.
@@ -855,7 +898,7 @@ __global__ void kProjectXY(const float* grid3, float* out2, int G, int S) {
 //
 // 비용: N 스레드 × 4 atomicAdd(2D 라 8칸이 아니라 4칸이다). N=100만이면 400만 회.
 __global__ void kScatterDispersion(const float4* pos, const float4* vel, int n, int G,
-                                   float* num, float* den) {
+                                   float* num, float* den, ViewRot rot) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -863,7 +906,9 @@ __global__ void kScatterDispersion(const float4* pos, const float4* vel, int n, 
     const float4 v = vel[i];
     const float v2 = v.x * v.x + v.y * v.y + v.z * v.z;
 
-    const float gx = p.x * G - 0.5f, gy = p.y * G - 0.5f;
+    float ux = p.x, uy = p.y;
+    if (rot.on && !rotPoint(p.x, p.y, p.z, rot, ux, uy)) return;
+    const float gx = ux * G - 0.5f, gy = uy * G - 0.5f;
     const int ix = (int)floorf(gx), iy = (int)floorf(gy);
     const float fx = gx - ix, fy = gy - iy;
     for (int k = 0; k < 4; ++k) {
@@ -1153,6 +1198,16 @@ struct Sim::Impl {
     // 각 블랙홀이 놓인 자리의 격자 가속도(둘레 물질이 블랙홀을 끄는 힘).
     // 커널이 채우고 host 가 읽어 블랙홀을 움직인다.
     float4 *bhAcc = nullptr;
+
+    // 보는 방향(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그대로다.
+    float viewYaw = 0.f, viewPitch = 0.f;
+    ViewRot viewRot() const {
+        ViewRot r{};
+        r.on = (viewYaw != 0.f || viewPitch != 0.f) ? 1 : 0;
+        r.cy = cosf(viewYaw);   r.sy = sinf(viewYaw);
+        r.cp = cosf(viewPitch); r.sp = sinf(viewPitch);
+        return r;
+    }
 
     // 가장 무거운 것. 오래 「판에 하나」였던 자리들이 이것을 본다.
     BlackHoleState heaviest() const {
@@ -2200,6 +2255,12 @@ double Sim::measureForceErrorVsDirect(int, int, float) { return 0.0; }
 
 const float* Sim::densityDevicePtr() const { return impl_->rho; }
 
+// 보는 방향을 정한다(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그림 그대로다.
+void Sim::setViewAngles(float yaw, float pitch) {
+    impl_->viewYaw   = yaw;
+    impl_->viewPitch = pitch;
+}
+
 // 화면은 위에서 내려다본다. 3D 값을 z 로 합쳐 2D 로 투영해 넘긴다.
 const float* Sim::fieldDevicePtr(Field field) {
     Impl& d = *impl_;
@@ -2208,9 +2269,11 @@ const float* Sim::fieldDevicePtr(Field field) {
     const int cells = G * G;
     const int blocks = (cells + 255) / 256;
 
+    const ViewRot rot = d.viewRot();
+
     if (field == Field::Density) {
         kClearF<<<blocks, 256>>>(d.proj, cells);
-        kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.proj, G, d.stride());
+        kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.proj, G, d.stride(), rot);
         CK(cudaGetLastError());
         return d.proj;
     }
@@ -2220,7 +2283,7 @@ const float* Sim::fieldDevicePtr(Field field) {
     kClearF<<<blocks, 256>>>(d.projA, cells);
     kClearF<<<blocks, 256>>>(d.projB, cells);
     kScatterDispersion<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, G,
-                                                        d.projA, d.projB);
+                                                        d.projA, d.projB, rot);
     kDivideInto<<<blocks, 256>>>(d.projA, d.projB, d.proj, cells);
     CK(cudaGetLastError());
     return d.proj;

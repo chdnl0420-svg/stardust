@@ -79,6 +79,10 @@ bool  g_dragging = false;
 POINT g_dragLast{};
 // 도구로 칠하는 중(뿌리기·우물·지우개는 드래그 동안 이어진다)
 bool  g_painting = false;
+// 오른쪽 단추로 시점을 돌리는 중. 어떤 도구를 들고 있든 오른쪽 단추는 늘 시점이다 —
+// 왼쪽은 도구가 가져가므로 「도구를 내려놓아야 돌려 볼 수 있는」 일이 없게 한다.
+bool  g_orbiting = false;
+POINT g_orbitLast{};
 
 // 카메라가 판 밖으로 못 나가게 붙잡는다.
 //
@@ -144,8 +148,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
 
+        // 오른쪽 단추 — 시점 돌리기. 판이 3D 라 한 방향에서만 보면 두께를 알 수 없다.
+        case WM_RBUTTONDOWN:
+            if (g_app && !ImGui::GetIO().WantCaptureMouse) {
+                SetCapture(hwnd);
+                g_orbiting = true;
+                GetCursorPos(&g_orbitLast);
+            }
+            return 0;
+
+        case WM_RBUTTONUP:
+            if (g_orbiting) {
+                g_orbiting = false;
+                ReleaseCapture();
+            }
+            return 0;
+
         case WM_MOUSEMOVE:
-            if (g_dragging && g_app) {
+            if (g_orbiting && g_app) {
+                POINT now; GetCursorPos(&now);
+                // 화면을 가로로 한 번 지나가면 한 바퀴(360도) 돈다.
+                const float turn = 6.2831853f / (float)(g_w > 0 ? g_w : 1);
+                g_app->camYaw += (now.x - g_orbitLast.x) * turn;
+                g_app->camPitch += (now.y - g_orbitLast.y) * turn;
+                // 좌우는 한 바퀴가 제자리라 접어 두고(값이 끝없이 커지는 것을 막는다),
+                // 위아래는 세로로 선 자리(±90도)에서 멈춘다 — 넘어가면 판이 뒤집혀
+                // 어느 쪽이 위인지 알 수 없게 된다.
+                const float twoPi = 6.2831853f, half = 1.5533431f;   // 89도
+                if (g_app->camYaw >  twoPi) g_app->camYaw -= twoPi;
+                if (g_app->camYaw < -twoPi) g_app->camYaw += twoPi;
+                if (g_app->camPitch >  half) g_app->camPitch =  half;
+                if (g_app->camPitch < -half) g_app->camPitch = -half;
+                g_orbitLast = now;
+            } else if (g_dragging && g_app) {
                 POINT now; GetCursorPos(&now);
                 // 화면 픽셀 이동량을 시뮬레이션 공간 이동량으로 바꾼다.
                 // 짧은 변이 [0,1] 에 대응하므로 그 값으로 나눈다.

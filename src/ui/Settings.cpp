@@ -331,11 +331,23 @@ void TabGravity(App& app) {
     // 알갱이가 너무 많으면 판에 움직일 자리가 없어 접촉이 스스로 꺼진다.
     // 켤 수 없는 상태를 감추면 「켰는데 아무 일도 안 일어난다」가 되므로 이유를 적는다.
     const bool fits = ContactFitsCount(app.cfg.particleCount, app.cfg.gridSize);
+    // 설명이 「모여서 덩어리가 된다」였는데 사실이 아니다 — 이 힘은 밀기만 하고 당기지 않아
+    // (kContact 의 f<0 절단) 켜면 오히려 퍼진다. 실측: 점유 셀 40만 → 156만.
+    // 덩어리를 만드는 것은 아래의 식히기다.
     if (Toggle("contact", "서로 통과하지 못하게 하기",
-               "겹치면 밀어내고 부딪히면 에너지를 잃는다 \xE2\x80\x94 모여서 덩어리가 된다",
+               "겹치면 밀어내고 부딪히면 에너지를 잃는다 \xE2\x80\x94 뭉친 자리가 부풀어 퍼진다",
                &app.cfg.contactEnabled, fits))
         ApplyAutoGrid(app.cfg);
     if (!fits) UnderNote("알갱이가 너무 많아 지금은 켤 수 없다 \xE2\x80\x94 상한을 낮추면 켜진다.");
+
+    // **덩어리를 만드는 것은 이것이다.** 끄면 중력으로 모인 자리가 데워져 도로 흩어지고,
+    // 모였다 흩어졌다만 되풀이한다. 오래 UI 에 없어 켤 방법조차 없었다.
+    Toggle("cooling", "식어서 뭉치기",
+           "이웃과 어긋난 움직임을 걷어낸다 \xE2\x80\x94 함께 도는 속도는 그대로라 회전은 살아 있다",
+           &app.cfg.coolingEnabled);
+    SliderLine("coolingRate", "식는 빠르기", &app.cfg.coolingRate, 0.0f, 1.0f, "%.2f",
+               false, app.cfg.coolingEnabled);
+    UnderNote("높이면 빨리 뭉치고, 0 이면 끈 것과 같다.");
 
     Toggle("halo", "보이지 않는 무게",
            "은하 질량의 80~90% 를 차지하는 암흑물질 \xE2\x80\x94 원반을 감싸 나선팔을 자라게 한다",

@@ -362,6 +362,10 @@ public:
     const float* fieldDevicePtr(Field field);
     const float* densityDevicePtr() const;
 
+    // 보는 방향(라디안). 좌우로 도는 각과 위아래로 기우는 각.
+    // 둘 다 0 이면 위에서 곧장 내려다보던 그림 그대로이고, 그때는 회전 계산도 건너뛴다.
+    void setViewAngles(float yaw, float pitch);
+
     // 점 렌더가 직접 읽는 파티클 버퍼. [0, activeCount()) 만 유효하다.
     //
     // 3D 로 옮기면서 float4 배열이 됐다(x, y, z, 안 씀). float3 가 아니라 float4 인 것은

@@ -87,6 +87,11 @@ struct App {
     float zoom = 1.0f;
     float panX = 0.0f, panY = 0.0f;
 
+    // 보는 방향(라디안) — 오른쪽 단추로 끌어 돌린다. 둘 다 0 이면 위에서 곧장 내려다본다.
+    // 판이 3D 가 되고 나서야 필요해진 값이다. 한 방향으로만 보면 나선팔이 원반인지
+    // 공인지 알 수가 없다.
+    float camYaw = 0.0f, camPitch = 0.0f;
+
     // HUD 표시용
     float fps = 0.0f;
     float frameMs = 0.0f;
