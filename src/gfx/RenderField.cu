@@ -253,8 +253,21 @@ void RenderField::shutdown() {
 }
 
 void RenderField::ensureSize(int w, int h) {
-    if (w == texW_ && h == texH_ && devPixels_) return;
+    // **버퍼는 줄이지 않는다. 커질 때만 다시 잡는다.**
+    //
+    // 「버거우면 절반 해상도」는 프레임 시간이 문턱 근처에서 오르내리면 매 프레임 전체와
+    // 절반을 오간다. 그때마다 여기서 cudaFree + cudaMalloc 이 돌면 초당 수십 번 수 MB 를
+    // 해제하고 다시 잡는 셈이고, 그 상태로 몇 분을 돌리면 그래픽 드라이버가 무너진다.
+    // 2026-08-14 실측: BugCheck 0xD1, 참조 주소 0x80(널 + 오프셋) — 이 프로젝트에서
+    // 매 프레임 glTexImage2D 를 부르다 죽었을 때와 **같은 서명**이다.
+    //
+    // 큰 쪽에 맞춰 한 번만 잡아 두고 작게 그릴 때는 그 버퍼의 앞부분만 쓴다.
+    if (devPixels_ && w <= allocW_ && h <= allocH_) { texW_ = w; texH_ = h; return; }
+    const int aw = (w > allocW_) ? w : allocW_;
+    const int ah = (h > allocH_) ? h : allocH_;
+    allocW_ = aw; allocH_ = ah;
     texW_ = w; texH_ = h;
+    w = aw; h = ah;
     size_t need = (size_t)w * h * 4;
     if (hostPixels_) free(hostPixels_);
     hostPixels_ = (unsigned char*)malloc(need);
@@ -275,12 +288,29 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     // 「버거우면 절반 해상도」를 켜면 픽셀 수가 4분의 1이 되고, 그 작은 그림이 화면 전체
     // 쿼드에 늘어 붙는다 — 화면은 그대로 차고 흐려지기만 한다. 멈춰 있을 때는 급할 것이
     // 없으므로 늘 선명하게 그린다.
+    // 한 번 정한 것은 한동안 유지한다.
+    //
+    // 프레임 시간이 문턱 근처에 있으면 매 프레임 전체와 절반이 뒤집힌다. 그러면 화면이
+    // 떨리는 것은 물론이고, 크기가 바뀔 때마다 버퍼를 다시 잡던 예전 코드에서는
+    // 드라이버까지 무너졌다. 켜지는 선과 꺼지는 선을 벌려 두고, 바뀐 뒤 서른 프레임은
+    // 그대로 둔다.
     const int outW = viewW, outH = viewH;
-    if (app.ui.halfResWhenBusy && app.running && app.frameMs > 20.0f) {
+    if (app.ui.halfResWhenBusy && app.running) {
+        if (halfHold_ > 0) --halfHold_;
+        else {
+            const bool want = half_ ? (app.frameMs > 14.0f) : (app.frameMs > 24.0f);
+            if (want != half_) { half_ = want; halfHold_ = 30; }
+        }
+    } else if (half_) {
+        half_ = false; halfHold_ = 0;
+    }
+    if (half_) {
         viewW = (viewW + 1) / 2;
         viewH = (viewH + 1) / 2;
     }
-    ensureSize(viewW, viewH);
+    // 잡는 것은 늘 창 크기 기준이다 — 절반으로 그려도 버퍼를 다시 잡지 않는다.
+    ensureSize(outW, outH);
+    texW_ = viewW; texH_ = viewH;
 
     const ViewSettings& view = app.view;
     const int npix = viewW * viewH;
@@ -404,25 +434,32 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     // 두 번째는 앱이 아무 조작 없이 돌기만 하는 동안 죽어서 이 경로가 남았다.
     //
     // glTexSubImage2D 는 이미 잡아 둔 저장소에 픽셀만 써 넣으므로 할당이 일어나지 않는다.
-    if (hostPixels_) {
-        if (texAllocW_ != viewW || texAllocH_ != viewH) {
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, viewW, viewH, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, hostPixels_);
-            texAllocW_ = viewW; texAllocH_ = viewH;
-        } else {
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, viewW, viewH,
-                            GL_RGBA, GL_UNSIGNED_BYTE, hostPixels_);
+    //
+    // 저장소는 **잡아 둔 크기(allocW_×allocH_)** 로 만들고, 이번에 그린 만큼만 써 넣는다.
+    // 그리는 크기로 저장소를 만들면 절반 해상도가 켜졌을 때 매 프레임 다시 만들게 된다 —
+    // 2026-08-14 에 그것으로 다시 한 번 드라이버가 무너졌다(같은 0xD1 / 0x80).
+    if (hostPixels_ && allocW_ > 0 && allocH_ > 0) {
+        if (texAllocW_ != allocW_ || texAllocH_ != allocH_) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, allocW_, allocH_, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            texAllocW_ = allocW_; texAllocH_ = allocH_;
         }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, viewW, viewH,
+                        GL_RGBA, GL_UNSIGNED_BYTE, hostPixels_);
     }
+
+    // 저장소가 그린 것보다 클 수 있으므로 쓴 만큼만 화면에 편다.
+    const float su = (allocW_ > 0) ? (float)viewW / (float)allocW_ : 1.0f;
+    const float sv = (allocH_ > 0) ? (float)viewH / (float)allocH_ : 1.0f;
 
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
     glColor4f(1.f, 1.f, 1.f, 1.f);
     glBegin(GL_QUADS);
         glTexCoord2f(0.f, 0.f); glVertex2f(-1.f, -1.f);
-        glTexCoord2f(1.f, 0.f); glVertex2f( 1.f, -1.f);
-        glTexCoord2f(1.f, 1.f); glVertex2f( 1.f,  1.f);
-        glTexCoord2f(0.f, 1.f); glVertex2f(-1.f,  1.f);
+        glTexCoord2f(su,  0.f); glVertex2f( 1.f, -1.f);
+        glTexCoord2f(su,  sv);  glVertex2f( 1.f,  1.f);
+        glTexCoord2f(0.f, sv);  glVertex2f(-1.f,  1.f);
     glEnd();
     glDisable(GL_TEXTURE_2D);
 

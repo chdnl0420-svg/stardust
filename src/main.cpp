@@ -46,13 +46,27 @@ bool  g_painting = false;
 // [0.5/z, 1 - 0.5/z] 안에 있어야 한다. 그것을 pan 으로 옮기면 아래 식이 된다.
 // 배율이 1 이면 판이 화면에 꼭 맞아 움직일 자리가 없으므로 pan 은 0 이다.
 void ClampPan(App& app) {
-    const float half = 0.5f / (app.zoom > 1e-3f ? app.zoom : 1e-3f);
-    const float lim = 0.5f - half;          // 배율 1 이면 0
-    const float m = (lim > 0.0f) ? lim : 0.0f;
-    if (app.panX >  m) app.panX =  m;
-    if (app.panX < -m) app.panX = -m;
-    if (app.panY >  m) app.panY =  m;
-    if (app.panY < -m) app.panY = -m;
+    // 화면이 정사각이 아니면 긴 쪽으로 판 밖이 더 넓게 보인다 — 짧은 변을 [0,1] 에 맞추기
+    // 때문이다(App::screenToSim). 그 몫까지 세지 않으면 가로로 끌 때 판의 테두리가 드러난다.
+    const float aspect = (g_h > 0) ? (float)g_w / (float)g_h : 1.0f;
+    const float spanU = (aspect > 1.0f) ? aspect : 1.0f;          // 화면이 덮는 가로 폭
+    const float spanV = (aspect > 1.0f) ? 1.0f : (1.0f / aspect); // 세로 폭
+    const float z = (app.zoom > 1e-3f) ? app.zoom : 1e-3f;
+
+    const float mx = 0.5f - spanU * 0.5f / z;
+    const float my = 0.5f - spanV * 0.5f / z;
+    const float lx = (mx > 0.0f) ? mx : 0.0f;
+    const float ly = (my > 0.0f) ? my : 0.0f;
+    if (app.panX >  lx) app.panX =  lx;
+    if (app.panX < -lx) app.panX = -lx;
+    if (app.panY >  ly) app.panY =  ly;
+    if (app.panY < -ly) app.panY = -ly;
+}
+
+// 판이 화면을 꽉 채우는 가장 작은 배율. 이보다 줄이면 판 밖의 검은 테두리가 보인다.
+float MinZoom() {
+    const float aspect = (g_h > 0) ? (float)g_w / (float)g_h : 1.0f;
+    return (aspect > 1.0f) ? aspect : (1.0f / aspect);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -114,7 +128,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 // 한 칸에 얼마나 확대할지. 설정의 「휠 확대 속도」가 1.0 일 때 12% 다.
                 const float step = 1.0f + 0.15f * g_app->ui.wheelZoomSpeed;
                 g_app->zoom *= (d > 0) ? step : (1.0f / step);
-                if (g_app->zoom < 1.0f)   g_app->zoom = 1.0f;   // 판보다 작게 줄이지 않는다
+                const float mz = MinZoom();     // 판이 화면을 꽉 채우는 선까지만 줄인다
+                if (g_app->zoom < mz)     g_app->zoom = mz;
                 if (g_app->zoom > 64.0f)  g_app->zoom = 64.0f;
                 ClampPan(*g_app);
             }
@@ -426,10 +441,17 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         fpsAccum += dtMs; ++fpsFrames;
         if (fpsAccum > 300.0f) { app.fps = fpsFrames * 1000.0f / fpsAccum; fpsAccum = 0; fpsFrames = 0; }
 
-        // 창이 뒤에 있으면 계산을 쉰다. 보고 있지 않은 그림에 카드를 쓸 이유가 없고,
-        // 이 앱은 쉬지 않으면 노트북 배터리와 팬을 그대로 먹는다.
+        // 창이 뒤에 있으면 계산을 쉰다(설정에서 끄면 뒤에서도 계속 돈다).
+        // 오래 돌려 놓고 다른 일을 하려면 꺼야 하고, 배터리를 아끼려면 켜야 한다.
         if (app.ui.pauseWhenHidden && !app.windowActive) Sleep(30);
         else app.tick();
+
+        // 창 크기가 바뀌면 판이 화면을 못 채우게 될 수 있다 — 그때마다 배율을 다시 맞춘다.
+        {
+            const float mz = MinZoom();
+            if (app.zoom < mz) app.zoom = mz;
+            ClampPan(app);
+        }
 
         // 배경 — 순수 검정이 기본이고, 「아주 옅은 보라」는 완전한 검정이 답답한 화면에서 쓴다.
         if (app.ui.background == 1) glClearColor(0.012f, 0.009f, 0.021f, 1.f);

@@ -724,7 +724,17 @@ __global__ void kFillShape(float4* pos, float4* vel, float* temp, int from, int 
     } else if (kind == 3) {                // 구름 — 넓게 퍼진 차가운 성운
         const float3 b = bulgePoint(R * 1.4f, s);
         x = cx + b.x * 1.6f; y = cy + b.y * 1.6f; z = 0.5f + b.z * 1.6f;
-    } else {                               // 덩어리 — 속도 0. 그대로 무너지는 것을 본다
+    } else if (kind == 5) {                // 토성 — 가운데 공에 아주 얇은 고리
+        if (u3 < 0.42f) {                  // 본체
+            const float3 b = bulgePoint(R * 0.34f, s);
+            x = cx + b.x; y = cy + b.y; z = 0.5f + b.z;
+        } else {                           // 고리 — 두께가 지름의 백분의 몇밖에 안 된다
+            const float th = u1 * 6.2831853f;
+            const float rr = R * (0.60f + 0.36f * u2);
+            x = cx + rr * __cosf(th); y = cy + rr * __sinf(th);
+            z = 0.5f + rndNormal(s ^ 0x68E31DA4u) * thickness * 0.12f;
+        }
+    } else {                               // 여기로 오지 않는다(블랙홀은 알갱이를 놓지 않는다)
         const float th = u1 * 6.2831853f;
         const float r = R * sqrtf(u2);
         x = cx + r * __cosf(th); y = cy + r * __sinf(th);
@@ -835,6 +845,9 @@ struct Sim::Impl {
 
     int active = 0;
     int stepCount = 0;
+    // 형태를 놓을 자리를 가리키는 커서. 빈 자리가 다 차면 앞으로 돌아와 먼저 넣은 것을
+    // 덮어쓴다 — 그래야 계속 놓아도 총수가 상한을 넘지 않으면서 새로 놓은 것이 항상 보인다.
+    int ringCursor = 0;
     BlackHoleState bh;
     int *eaten = nullptr;
 
@@ -1396,18 +1409,52 @@ const float* Sim::particleTempDevicePtr() const { return impl_->temp; }
 // ---------------------------------------------------------------------------
 int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, bool autoOrbit) {
     Impl& d = *impl_;
-    if (g_failed || count <= 0) return 0;
+    if (g_failed || d.allocN <= 0) return 0;
+
+    // 블랙홀은 알갱이가 아니다 — 그 자리에 지평선을 세운다.
+    //
+    // 크기(반지름)가 곧 질량이다. rs = 2GM/c² 이므로 M = rs·c²/(2G) 이고, 크게 놓을수록
+    // 무거운 블랙홀이 되어 둘레의 것을 더 멀리서부터 끌어당긴다.
+    if (kind == ShapeKind::BlackHole) {
+        const float rs = fmaxf(radius * 0.06f, 1e-4f);   // 브러시 크기를 지평선으로 옮긴다
+        d.bh.active = true;
+        d.bh.born = false;
+        d.bh.x = cx; d.bh.y = cy;
+        d.bh.rs = rs;
+        d.bh.mass = rs * d.cfg.lightSpeedSq / (2.0f * fmaxf(d.cfg.gravity, 1e-6f))
+                  * (float)d.allocN;
+        return 1;
+    }
+
+    if (count <= 0) return 0;
+
+    // 빈 자리가 있으면 거기에 넣고, 다 찼으면 앞에서부터 덮어쓴다.
+    //
+    // 장면을 깔면 알갱이를 전부 쓰므로 빈 자리가 하나도 없다. 빈 자리만 찾으면 그때부터
+    // 「놓기」가 아무 일도 하지 않는다(2026-08-14 실측: 100만 알 장면에서 99만을 놓으려니
+    // 한 알도 안 들어갔다). 덮어쓰기가 있어야 언제 눌러도 놓인다.
+    //
+    // 커서 계산은 정수로만 하고 매번 범위를 확인한다 — 예전에 이 자리에서 커서가 배열 밖으로
+    // 넘어가 시스템이 재부팅됐다.
+    int n = (count < d.allocN) ? count : d.allocN;
+    int from;
     const int room = d.allocN - d.active;
-    if (room <= 0) return 0;
-    const int n = (count < room) ? count : room;
-    const int from = d.active;
+    if (room >= n) {
+        from = d.active;
+        d.active += n;
+    } else {
+        from = d.ringCursor;
+        if (from < 0 || from + n > d.allocN) from = 0;
+        d.ringCursor = from + n;
+        if (d.ringCursor >= d.allocN) d.ringCursor = 0;
+        d.active = d.allocN;
+    }
 
     kFillShape<<<(n + 255) / 256, 256>>>(d.pos, d.vel, d.temp, from, n, cx, cy,
                                          (int)kind, radius, d.cfg.diskThickness,
                                          (unsigned)(d.stepCount * 7919 + 17));
-    d.active += n;
 
-    if (autoOrbit && kind != ShapeKind::Blob) {
+    if (autoOrbit) {
         d.computeAccel();
         const float hv2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
         const float hc2 = d.cfg.haloCore * d.cfg.haloCore;

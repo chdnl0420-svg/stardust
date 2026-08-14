@@ -363,8 +363,14 @@ void TabBounds(App& app) {
     int edge = (app.cfg.boundary == Boundary::Isolated) ? 0 : 1;
     const char* edges[3] = { "그냥 멀어짐", "반대편에서 나옴", "벽에 튕김" };
     const bool canEdge[3] = { true, true, false };
-    if (Segmented("edge", edges, 3, &edge, canEdge, 146.0f, "밖으로 나가면"))
+    if (Segmented("edge", edges, 3, &edge, canEdge, 146.0f, "밖으로 나가면")) {
+        if (!app.needsRestart) {
+            app.preRestartCount = app.cfg.particleCount;
+            app.preRestartGrid  = app.cfg.gridSize;
+        }
         app.cfg.boundary = (edge == 0) ? Boundary::Isolated : Boundary::Periodic;
+        app.needsRestart = true;
+    }
     UnderNote("\"반대편에서 나옴\"은 우주 거미줄처럼 끝없이 이어진 우주를 볼 때 쓴다.");
 
     SliderLine("box", "우주 상자 크기", &app.ui.boxSizeKpc, 10.0f, 1000.0f, "%.0f kpc", true, false);
@@ -383,33 +389,31 @@ void TabBounds(App& app) {
 }
 
 void TabLook(App& app) {
+    // 색은 밀도 하나로 굳혔다.
+    //
+    // 온도는 상태방정식과 충격 가열이 있어야 뜻이 있는데 그 계산을 하지 않았고, 속도는
+    // 점으로 그릴 때만 값이 있었다. 둘 다 「고를 수는 있지만 무엇을 보는지 알 수 없는」
+    // 항목이었다 — 고를 것이 하나뿐이면 고르는 자리도 필요 없다.
     static const ImU32 astro[5] = {
         IM_COL32(0, 0, 0, 255), IM_COL32(23, 22, 73, 255), IM_COL32(88, 56, 150, 255),
         IM_COL32(219, 136, 74, 255), IM_COL32(255, 255, 240, 255)
     };
-    static const ImU32 thermal[5] = {
-        IM_COL32(0, 0, 0, 255), IM_COL32(60, 90, 200, 255), IM_COL32(200, 90, 60, 255),
-        IM_COL32(255, 208, 41, 255), IM_COL32(255, 255, 245, 255)
-    };
-    static const ImU32 speed[5] = {
-        IM_COL32(0, 0, 0, 255), IM_COL32(20, 70, 50, 255), IM_COL32(40, 140, 90, 255),
-        IM_COL32(140, 220, 150, 255), IM_COL32(240, 255, 240, 255)
-    };
-
-    GroupLabel("색 입히기");
-    if (ColorCard("c0", "밀도", astro, app.look == App::Look::Density, "기본")) {
-        app.look = App::Look::Density; ApplyLook(app);
-    }
-    // 은하에서 「온도」란 별들이 얼마나 제각각 움직이는가다. 그 말이 더 정확하고,
-    // 실제로 화면에 뜨는 것도 그것이다.
-    if (ColorCard("c1", "움직임 흩어짐", thermal, app.look == App::Look::Dispersion,
-                  "은하의 온도")) {
-        app.look = App::Look::Dispersion; ApplyLook(app);
-    }
-    // 속도로 칠하는 것은 점 모드에서만 뜻이 있다. 밀도 격자에는 속도가 없다.
-    if (ColorCard("c2", "속도", speed, app.view.colorBy == ColorBy::Speed,
-                  app.view.mode == RenderMode::Points ? nullptr : "점으로 그릴 때만")) {
-        if (app.view.mode == RenderMode::Points) app.view.colorBy = ColorBy::Speed;
+    GroupLabel("색");
+    {
+        // 지금 쓰는 색 배열을 띠로만 보여 준다. 고르는 것이 아니라 알려 주는 자리다.
+        const float w = ImGui::GetContentRegionAvail().x;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 a(p.x, p.y + 6.0f), b(a.x + 150.0f, p.y + 26.0f);
+        const float step = (b.x - a.x) * 0.25f;
+        for (int i = 0; i < 4; ++i)
+            dl->AddRectFilledMultiColor(ImVec2(a.x + step * i, a.y), ImVec2(a.x + step * (i + 1), b.y),
+                                        astro[i], astro[i + 1], astro[i + 1], astro[i]);
+        dl->AddRect(a, b, IM_COL32(255, 255, 255, 41), 3.0f);
+        const char* lab = "성기면 짙은 남색, 빽빽하면 흰빛";
+        const ImVec2 tsz = ImGui::CalcTextSize(lab);
+        dl->AddText(ImVec2(b.x + 16.0f, (a.y + b.y) * 0.5f - tsz.y * 0.5f), kInkGhost, lab);
+        ImGui::Dummy(ImVec2(w, 34.0f));
     }
 
     Line();
@@ -460,8 +464,14 @@ void TabPerf(App& app) {
     int hardMan = app.hardMaxParticles / 10000; if (hardMan < 1) hardMan = 1;
     if (maxMan > hardMan) maxMan = hardMan;
     if (SliderLineInt("cap", "알갱이 상한", &maxMan, 1, hardMan, "%d만", true)) {
+        // 만지기 전 값을 한 번만 담아 둔다 — 「그대로 두기」가 여기로 되돌린다.
+        if (!app.needsRestart) {
+            app.preRestartCount = app.cfg.particleCount;
+            app.preRestartGrid  = app.cfg.gridSize;
+        }
         app.cfg.particleCount = maxMan * 10000;
         ApplyAutoGrid(app.cfg);
+        app.needsRestart = true;
     }
     char note[128];
     snprintf(note, sizeof(note), "이 카드는 %d만까지 올릴 수 있다 \xE2\x80\x94 올리면 다시 시작해야 한다.", hardMan);
@@ -472,8 +482,14 @@ void TabPerf(App& app) {
     const char* grids[3] = { "64\xC2\xB3", "128\xC2\xB3", "256\xC2\xB3" };
     const int gcap = Sim::maxGridSize(app.cfg.boundary);
     const bool canGrid[3] = { true, gcap >= 128, gcap >= 256 };
-    if (Segmented("grid", grids, 3, &g, canGrid, 146.0f, "계산 격자"))
+    if (Segmented("grid", grids, 3, &g, canGrid, 146.0f, "계산 격자")) {
+        if (!app.needsRestart) {
+            app.preRestartCount = app.cfg.particleCount;
+            app.preRestartGrid  = app.cfg.gridSize;
+        }
         app.cfg.gridSize = (g == 0) ? 64 : (g == 1) ? 128 : 256;
+        app.needsRestart = true;
+    }
     ImGui::SameLine();
     SideNote("한 변이다 — 하나 올리면 칸이 여덟 배");
 
@@ -484,7 +500,8 @@ void TabPerf(App& app) {
     Line();
     Toggle("half", "버거우면 절반 해상도로 그리기",
            "움직일 때만 흐려지고 멈추면 선명해진다", &app.ui.halfResWhenBusy);
-    Toggle("pause", "창이 뒤에 있으면 멈추기", nullptr, &app.ui.pauseWhenHidden);
+    Toggle("pause", "창이 뒤에 있으면 멈추기",
+           "끄면 다른 창을 보는 동안에도 우주가 계속 흐른다", &app.ui.pauseWhenHidden);
 }
 
 void TabInput(App& app) {
@@ -683,13 +700,60 @@ void DrawSettings(App& app, int viewW, int viewH) {
         const ImVec2 p = ImGui::GetCursorScreenPos();
         dl->AddText(ImVec2(p.x + 12.0f, p.y + (36.0f - hsz.y) * 0.5f), kInkGhost, hint);
     }
-    ImGui::SetCursorPos(ImVec2(w - 188.0f, h - kFootH + 16.0f));
-    if (Btn("restart", "이 설정으로 다시 시작", true, 168.0f)) {
-        app.applyConfig();
-        app.sim.reset();
+    ImGui::SetCursorPos(ImVec2(w - 148.0f, h - kFootH + 16.0f));
+    if (Btn("apply", "적용", true, 128.0f)) {
+        // 대부분은 이미 반영돼 있다. 판을 다시 깔아야 하는 것을 만졌을 때만 물어본다 —
+        // 다시 깔면 지금까지 흘러온 우주가 사라지므로 말없이 해서는 안 된다.
+        if (app.needsRestart) app.restartAskOpen = true;
+        else app.settingsOpen = false;
     }
 
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
+
+    // ── 다시 시작할지 묻는 판 ────────────────────────────────────────────
+    if (app.restartAskOpen) {
+        ImGui::GetForegroundDrawList()->AddRectFilled(
+            ImVec2(0, 0), ImVec2((float)viewW, (float)viewH), IM_COL32(0, 0, 0, 130));
+
+        const float dw = 460.0f, dh = 190.0f;
+        ImGui::SetNextWindowPos(ImVec2((viewW - dw) * 0.5f, (viewH - dh) * 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(dw, dh));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 22));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.075f, 0.070f, 0.092f, 0.99f));
+        ImGui::Begin("##restartask", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoCollapse);
+
+        ImGui::TextUnformatted("판을 다시 깔아야 반영됩니다");
+        ImGui::Dummy(ImVec2(1, 6));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+        ImGui::TextWrapped("알갱이 수\xC2\xB7격자\xC2\xB7경계는 판을 새로 깔아야 바뀝니다. "
+                           "지금까지 흘러온 우주는 사라집니다.");
+        ImGui::PopStyleColor();
+
+        ImGui::SetCursorPos(ImVec2(24.0f, dh - 58.0f));
+        if (Btn("keep", "그대로 두기", false, 150.0f)) {
+            // 만지기 전 값으로 되돌린다 — 안 그러면 화면의 숫자와 실제가 어긋난 채로 남는다.
+            if (app.preRestartCount > 0) app.cfg.particleCount = app.preRestartCount;
+            if (app.preRestartGrid  > 0) app.cfg.gridSize      = app.preRestartGrid;
+            app.needsRestart = false;
+            app.restartAskOpen = false;
+        }
+        ImGui::SetCursorPos(ImVec2(dw - 24.0f - 190.0f, dh - 58.0f));
+        if (Btn("doit", "다시 깔고 적용", true, 190.0f)) {
+            app.applyConfig();
+            app.sim.reset();
+            app.needsRestart = false;
+            app.restartAskOpen = false;
+            app.settingsOpen = false;
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+    }
 }

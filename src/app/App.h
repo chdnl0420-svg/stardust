@@ -60,7 +60,9 @@ struct UiSettings {
     // ── 성능 ─────────────────────────────────────────────────────────────
     int   frameCap        = 0;       // 0 화면에 맞춤 · 1 60 · 2 무제한
     bool  halfResWhenBusy = false;   // 움직일 때만 절반 해상도로 그린다
-    bool  pauseWhenHidden = true;    // 창이 뒤에 있으면 계산을 멈춘다
+    // 창이 뒤에 있으면 계산을 멈춘다. 기본은 끔 — 오래 돌려 놓고 다른 일을 하는 쪽이
+    // 이 앱의 흔한 쓰임이라, 뒤로 보냈다고 우주가 멎으면 그게 더 당황스럽다.
+    bool  pauseWhenHidden = false;
 
     // ── 조작 ─────────────────────────────────────────────────────────────
     float dragSensitivity = 1.0f;
@@ -166,6 +168,17 @@ struct App {
     bool  saveStateRequested    = false;
     bool  loadStateRequested    = false;
     bool  resetSettingsRequested = false;
+
+    // 판을 다시 깔아야 반영되는 값(알갱이 수·격자·경계·장면)을 만졌는가.
+    //
+    // 나머지는 만지는 즉시 반영되지만 이 넷은 버퍼를 다시 잡아야 해서, 만지자마자 다시 깔면
+    // 손이 슬라이더 위에 있는 동안 판이 몇 번이고 새로 깔린다. 그래서 표시만 세워 두고
+    // 「적용」을 누를 때 물어본다.
+    bool  needsRestart = false;
+    bool  restartAskOpen = false;
+    // 다시 깔기 전 값 — 「그대로 두기」를 고르면 여기로 되돌린다.
+    int   preRestartCount = 0;
+    int   preRestartGrid  = 0;
 
     // 설정 화면 왼쪽 아래에 적는 이 컴퓨터의 카드. 앱을 켤 때 한 번 물어 담아 둔다.
     std::string deviceName;

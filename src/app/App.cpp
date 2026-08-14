@@ -211,19 +211,13 @@ bool ContactFitsCount(int particleCount, int gridSize) {
 }
 
 void ApplyLook(App& app) {
-    // 사용자가 고르는 것은 「밀도로 볼까 움직임으로 볼까」 하나뿐이다.
-    // 색 기준과 색 배열은 그 선택에 딸려 오는 것이라 여기서 함께 맞춘다.
-    if (app.look == App::Look::Dispersion) {
-        app.view.colorBy = ColorBy::Dispersion;
-        app.view.cmap    = ColorMap::Thermal;
-        app.view.brightness = app.brightTemp;
-        app.view.gamma      = app.gammaTemp;
-    } else {
-        app.view.colorBy = ColorBy::Density;
-        app.view.cmap    = ColorMap::Astro;
-        app.view.brightness = app.brightDensity;
-        app.view.gamma      = app.gammaDensity;
-    }
+    // 색은 밀도 하나로 굳혔다. 온도는 그 계산을 하지 않아 값이 없었고, 속도는 점으로 그릴
+    // 때만 뜻이 있었다 — 고를 것이 하나뿐이라 고르는 자리도 없앴다.
+    app.look = App::Look::Density;
+    app.view.colorBy = ColorBy::Density;
+    app.view.cmap    = ColorMap::Astro;
+    app.view.brightness = app.brightDensity;
+    app.view.gamma      = app.gammaDensity;
 }
 
 void RememberLook(App& app) {

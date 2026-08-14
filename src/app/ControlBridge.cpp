@@ -432,7 +432,8 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
             if      (ks == "sun")   k = ShapeKind::Sun;
             else if (ks == "ring")  k = ShapeKind::Ring;
             else if (ks == "cloud") k = ShapeKind::Cloud;
-            else if (ks == "blob")  k = ShapeKind::Blob;
+            else if (ks == "blackhole" || ks == "blob") k = ShapeKind::BlackHole;
+            else if (ks == "saturn") k = ShapeKind::Saturn;
             const int cnt = clampI(getInt(kv, "count", app.brush.shapeCount), 1, 300000000);
             const bool orb = getInt(kv, "autoOrbit", app.brush.autoOrbit ? 1 : 0) != 0;
             const float sr = clampF(getFloat(kv, "radius", app.brush.shapeRadius),

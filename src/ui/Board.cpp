@@ -394,20 +394,21 @@ void DrawShapeDrawer(App& app, int viewW, int viewH) {
     ImGui::Spacing();
 
     struct Shape { const char* name; const char* help; };
-    const Shape shapes[5] = {
+    const Shape shapes[6] = {
         { "은하",   "도는 원반입니다. 놓는 자리 중력에 맞는 속도가 들어가 모양을 유지합니다." },
         { "태양",   "가운데가 빽빽하고 뜨겁습니다." },
         { "고리",   "가운데가 빈 도넛입니다." },
         { "구름",   "넓고 성기게 퍼진 차가운 성운입니다." },
-        { "덩어리", "고르게 찬 공입니다. 속도 없이 놓여 그대로 무너집니다." },
+        { "블랙홀", "지평선을 세웁니다. 크게 놓을수록 무거워 더 멀리서부터 끌어당깁니다." },
+        { "토성",   "가운데 공에 아주 얇은 고리가 둘립니다." },
     };
 
     const float avail = (float)viewW - kBarPad * 2.0f;
     const float gap = 12.0f;
-    // 다섯 모양 뒤에 개수 조절 칸을 하나 더 둔다 — 놓기 직전에 가장 자주 바꾸는 값이다.
-    const float cardW = (avail - gap * 5.0f) / 6.0f;
+    // 여섯 모양 뒤에 개수 조절 칸을 하나 더 둔다 — 놓기 직전에 가장 자주 바꾸는 값이다.
+    const float cardW = (avail - gap * 6.0f) / 7.0f;
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         if (i > 0) ImGui::SameLine(0.0f, gap);
         const bool sel = ((int)app.brush.shapeKind == i);
         ImGui::PushID(i);
@@ -424,37 +425,90 @@ void DrawShapeDrawer(App& app, int viewW, int viewH) {
         const ImVec2 m(p.x + cardW * 0.5f, p.y + cardH * 0.5f);
         const float r = cardH * 0.30f;
         const ImU32 c = sel ? kAccent : IM_COL32(190, 185, 210, 200);
+        // 미리보기는 **실제로 놓이는 배치를 그대로 축소한 그림**이다.
+        //
+        // 도식으로 그리면 눌러 보기 전에는 무엇이 놓일지 알 수 없고, 놓고 나서 「이게 아닌데」가
+        // 된다. 아래 점 찍는 규칙은 코어의 kFillShape 와 같은 식을 쓴다 — 한쪽을 고치면
+        // 다른 쪽도 함께 고쳐야 한다.
+        auto rnd = [](unsigned v) {
+            unsigned s = v * 747796405u + 2891336453u;
+            unsigned w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+            return (float)((w >> 22u) ^ w) * 2.3283064365386963e-10f;
+        };
+        const ImU32 dot = (c & 0x00FFFFFF) | 0xC0000000;
         switch (i) {
-            case 0:  // 은하 — 나선
-                for (int k = 0; k < 2; ++k) {
-                    dl->PathClear();
-                    for (int j = 0; j <= 18; ++j) {
-                        const float t = (float)j / 18.0f;
-                        const float ang = t * 3.4f + (float)k * 3.14159f;
-                        const float rad = r * (0.18f + 0.82f * t);
-                        dl->PathLineTo(ImVec2(m.x + cosf(ang) * rad, m.y + sinf(ang) * rad * 0.62f));
+            case 0: {   // 은하 — 지수 원반 위에 두 팔이 얹힌다(코어의 diskPoint 와 같은 식)
+                for (int j = 0; j < 220; ++j) {
+                    const unsigned s = (unsigned)j * 2654435761u + 11u;
+                    const float u1 = rnd(s), u2 = rnd(s * 3u + 1u), u4 = rnd(s * 13u + 7u);
+                    float rr = -0.28f * (logf(fmaxf(u1, 1e-6f)) + logf(fmaxf(u4, 1e-6f)));
+                    if (rr > 1.8f) rr = 1.8f;
+                    const float psi = logf(fmaxf(rr, 1e-4f) / 0.06f) / 0.325f;
+                    const float rn = rr;
+                    const float A = 0.95f * expf(-(rn - 0.35f) * (rn - 0.35f) / 0.45f);
+                    const float th0 = u2 * 6.2831853f;
+                    const float th = th0 - (A * 0.5f) * sinf(2.0f * (th0 - psi));
+                    const float rad = r * rr * 0.62f;
+                    dl->AddCircleFilled(ImVec2(m.x + cosf(th) * rad, m.y + sinf(th) * rad * 0.62f),
+                                        1.25f, dot, 4);
+                }
+                break;
+            }
+            case 1: {   // 태양 — 가운데로 갈수록 빽빽한 공. r = R·u² 라 중심에 몰린다
+                for (int j = 0; j < 200; ++j) {
+                    const unsigned s = (unsigned)j * 2654435761u + 23u;
+                    const float u = rnd(s), th = rnd(s * 7u + 5u) * 6.2831853f;
+                    const float rad = r * u * u;
+                    dl->AddCircleFilled(ImVec2(m.x + cosf(th) * rad, m.y + sinf(th) * rad),
+                                        1.25f, dot, 4);
+                }
+                break;
+            }
+            case 2: {   // 고리 — 가운데가 빈 도넛
+                for (int j = 0; j < 200; ++j) {
+                    const unsigned s = (unsigned)j * 2654435761u + 37u;
+                    const float th = rnd(s) * 6.2831853f;
+                    const float rad = r * (0.72f + 0.22f * rnd(s * 3u + 1u));
+                    dl->AddCircleFilled(ImVec2(m.x + cosf(th) * rad, m.y + sinf(th) * rad),
+                                        1.25f, dot, 4);
+                }
+                break;
+            }
+            case 3: {   // 구름 — 넓게 퍼진 성운
+                for (int j = 0; j < 190; ++j) {
+                    const unsigned s = (unsigned)j * 2654435761u + 53u;
+                    const float u = rnd(s), th = rnd(s * 7u + 5u) * 6.2831853f;
+                    const float rad = r * 1.25f * u * u;
+                    dl->AddCircleFilled(ImVec2(m.x + cosf(th) * rad, m.y + sinf(th) * rad),
+                                        1.25f, dot, 4);
+                }
+                break;
+            }
+            case 4: {   // 블랙홀 — 알갱이가 아니라 지평선. 가운데는 빛이 나오지 못해 검다
+                dl->AddCircleFilled(m, r * 0.42f, IM_COL32(0, 0, 0, 255), 28);
+                dl->AddCircle(m, r * 0.42f, c, 28, 2.0f);
+                // 둘레의 물질이 삼켜지기 전에 달아오르는 원반
+                dl->AddCircle(m, r * 0.80f, (c & 0x00FFFFFF) | 0x55000000, 32, r * 0.16f);
+                break;
+            }
+            default: {  // 토성 — 가운데 공에 아주 얇은 고리
+                for (int j = 0; j < 200; ++j) {
+                    const unsigned s = (unsigned)j * 2654435761u + 71u;
+                    const float u3 = rnd(s * 7u + 5u);
+                    float px, py;
+                    if (u3 < 0.42f) {                     // 본체
+                        const float u = rnd(s), th = rnd(s * 11u + 3u) * 6.2831853f;
+                        const float rad = r * 0.34f * u * u;
+                        px = cosf(th) * rad; py = sinf(th) * rad;
+                    } else {                              // 고리 — 위에서 비스듬히 본다
+                        const float th = rnd(s) * 6.2831853f;
+                        const float rad = r * (0.60f + 0.36f * rnd(s * 3u + 1u));
+                        px = cosf(th) * rad; py = sinf(th) * rad * 0.28f;
                     }
-                    dl->PathStroke(c, 0, 2.0f);
+                    dl->AddCircleFilled(ImVec2(m.x + px, m.y + py), 1.25f, dot, 4);
                 }
                 break;
-            case 1:  // 태양 — 가운데가 밝은 원
-                dl->AddCircleFilled(m, r, (c & 0x00FFFFFF) | 0x40000000, 28);
-                dl->AddCircleFilled(m, r * 0.45f, c, 24);
-                break;
-            case 2:  // 고리 — 도넛
-                dl->AddCircle(m, r * 0.82f, c, 32, r * 0.34f);
-                break;
-            case 3:  // 구름 — 성긴 점들
-                for (int j = 0; j < 26; ++j) {
-                    const float ang = (float)j * 2.399963f;
-                    const float rad = r * 1.15f * sqrtf((float)(j + 1) / 26.0f);
-                    dl->AddCircleFilled(ImVec2(m.x + cosf(ang) * rad, m.y + sinf(ang) * rad),
-                                        1.7f, (c & 0x00FFFFFF) | 0xB0000000, 6);
-                }
-                break;
-            default: // 덩어리 — 꽉 찬 원
-                dl->AddCircleFilled(m, r * 0.9f, c, 28);
-                break;
+            }
         }
 
         dl->AddRectFilled(ImVec2(a.x, p.y + cardH), b,
@@ -686,8 +740,8 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
         Tip("한 번 클릭할 때 놓을 알갱이 수와 모양입니다. 좌우로 끌어도 됩니다.");
         AnchorAbove(aShape);
         if (ImGui::BeginPopup("##shapepop")) {
-            const char* names[5] = { "은하", "태양", "고리", "구름", "덩어리" };
-            for (int i = 0; i < 5; ++i) {
+            const char* names[6] = { "은하", "태양", "고리", "구름", "블랙홀", "토성" };
+            for (int i = 0; i < 6; ++i) {
                 if (i > 0) ImGui::SameLine();
                 const bool sel = ((int)app.brush.shapeKind == i);
                 // 고른 것에만 주황을 얹는다. 시안이 강조로 쓰는 색은 이것 하나다.
@@ -734,23 +788,7 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
         Tip("화면이 하얗게 타면 내리고 너무 어두우면 올립니다. 좌우로 끌어도 됩니다.");
         AnchorAbove(aBright);
         if (ImGui::BeginPopup("##brightpop")) {
-            // 지금 고른 쪽에만 주황을 얹는다 — 이름 뒤에 「(지금)」을 붙이지 않아도 알 수 있다.
-            const bool dens = (app.look == App::Look::Density);
-            for (int i = 0; i < 2; ++i) {
-                const bool sel = (i == 0) ? dens : !dens;
-                if (i > 0) ImGui::SameLine();
-                if (sel) {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 0.69f, 0.40f, 0.26f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.69f, 0.40f, 0.34f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 0.77f, 0.54f, 1.00f));
-                }
-                if (ImGui::Button(i == 0 ? "밀도" : "움직임", ImVec2(120, 0))) {
-                    app.look = (i == 0) ? App::Look::Density : App::Look::Dispersion;
-                    ApplyLook(app);
-                }
-                if (sel) ImGui::PopStyleColor(3);
-            }
-            ImGui::Spacing();
+            // 색은 밀도 하나로 고정이라 고를 것이 없다 — 밝기와 세기만 둔다.
             if (SliderRow("b", "밝기", &app.view.brightness, 0.05f, 20.0f, "%.2f", true, 252.0f))
                 RememberLook(app);
             if (SliderRow("g", "희미한 것", &app.view.gamma, 0.4f, 4.0f, "%.2f", false, 252.0f))
