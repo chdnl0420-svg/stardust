@@ -321,25 +321,10 @@ void TabGravity(App& app) {
     SliderLine("g", "중력 세기 G", &app.cfg.gravity, 0.05f, 4.0f, "%.2f");
     SliderLine("soft", "뭉침 방지 거리", &app.cfg.softeningCells, 0.5f, 8.0f, "%.1f 칸");
 
-    // 나무(Barnes-Hut)는 아직 없다. 자리를 비워 두면 나중에 붙일 곳이 어딘지 모르게 되므로
-    // 시안대로 놓되 고를 수 없게 해 둔다.
-    int method = 0;
-    const char* methods[2] = { "격자 (빠름)", "나무 (정확)" };
-    const bool canUse[2] = { true, false };
-    Segmented("method", methods, 2, &method, canUse, 146.0f, "계산 방식");
-    ImGui::SameLine();
-    SideNote("3000만 알에서는 격자만 실시간이 된다");
-
     Line();
     GroupLabel("시간 나아가기");
     SliderLine("dt", "한 칸의 크기", &app.cfg.timeScale, 0.1f, 10.0f, "%.3f", true);
-    ImGui::Dummy(ImVec2(1.0f, 6.0f));
-
-    // 아래 둘은 코어를 손봐야 하는 자리라 아직 만들지 않았다. 자리만 둔다.
-    Toggle("substep", "위험하면 자동으로 잘게 쪼개기",
-           "가까이 붙은 알갱이가 튀어 날아가는 것을 막는다", &app.ui.autoSubstep, false);
-    Toggle("drift", "에너지 새는 정도 보기",
-           "계산이 얼마나 정확한지 숫자로 감시한다", &app.ui.showEnergyDrift, false);
+    UnderNote("한 스텝이 너무 크면 알갱이가 튀므로, 위험한 값은 자동으로 잘린다.");
 
     Line();
     GroupLabel("알갱이끼리");
@@ -359,11 +344,9 @@ void TabGravity(App& app) {
 
 void TabBounds(App& app) {
     GroupLabel("판 바깥");
-    // 「벽에 튕김」은 코어에 아직 없다. 고르면 아무 일도 안 일어나는 것보다 못 고르는 편이 낫다.
     int edge = (app.cfg.boundary == Boundary::Isolated) ? 0 : 1;
-    const char* edges[3] = { "그냥 멀어짐", "반대편에서 나옴", "벽에 튕김" };
-    const bool canEdge[3] = { true, true, false };
-    if (Segmented("edge", edges, 3, &edge, canEdge, 146.0f, "밖으로 나가면")) {
+    const char* edges[2] = { "판 끝에서 멈춤", "반대편에서 나옴" };
+    if (Segmented("edge", edges, 2, &edge, nullptr, 146.0f, "밖으로 나가면")) {
         if (!app.needsRestart) {
             app.preRestartCount = app.cfg.particleCount;
             app.preRestartGrid  = app.cfg.gridSize;
@@ -373,19 +356,9 @@ void TabBounds(App& app) {
     }
     UnderNote("\"반대편에서 나옴\"은 우주 거미줄처럼 끝없이 이어진 우주를 볼 때 쓴다.");
 
-    SliderLine("box", "우주 상자 크기", &app.ui.boxSizeKpc, 10.0f, 1000.0f, "%.0f kpc", true, false);
-
-    int cull = app.ui.cullFarAway ? 1 : 0;
-    const char* culls[2] = { "그대로 둔다", "지운다" };
-    const bool canCull[2] = { true, false };
-    if (Segmented("cull", culls, 2, &cull, canCull, 146.0f, "너무 멀어진 알갱이"))
-        app.ui.cullFarAway = (cull == 1);
-
     Line();
     Toggle("com", "무게중심을 화면 가운데에 붙여두기",
            "은하가 화면 밖으로 흘러가지 않는다", &app.ui.keepCenterOfMass);
-    Toggle("mom", "새로 놓을 때 전체 운동량 0 으로 맞추기",
-           "우주 전체가 한쪽으로 표류하는 것을 막는다", &app.ui.zeroMomentum, false);
 }
 
 void TabLook(App& app) {
@@ -419,7 +392,6 @@ void TabLook(App& app) {
     Line();
     SliderLine("psize", "알갱이 크기", &app.ui.pointSizePx, 0.5f, 6.0f, "%.1f px");
     UnderNote("확대할수록 이 크기에서 더 커지고 또렷해진다.");
-    SliderLine("trail", "덧그림 남는 시간", &app.ui.trailSeconds, 0.0f, 3.0f, "%.1f 초", false, false);
 
     int bg = app.ui.background;
     const char* bgs[2] = { "순수 검정", "아주 옅은 보라" };
@@ -427,7 +399,6 @@ void TabLook(App& app) {
 
     Line();
     Toggle("grid", "계산 격자 겹쳐 보기", nullptr, &app.ui.showGridOverlay);
-    Toggle("trails", "무거운 천체의 지나온 길 그리기", nullptr, &app.ui.showBodyTrails, false);
     Toggle("horizon", "블랙홀 경계 그리기",
            "지평선\xC2\xB7광자 구면\xC2\xB7최소 안정 궤도를 원으로 얹는다", &app.showHorizon);
 }
@@ -510,8 +481,6 @@ void TabInput(App& app) {
 
     Line();
     Toggle("winv", "휠 방향 뒤집기", nullptr, &app.ui.wheelInverted);
-    Toggle("bleft", "막대를 왼쪽 끝에 붙이기",
-           "왼손잡이 배치 \xE2\x80\x94 저장\xC2\xB7녹화가 왼쪽으로 간다", &app.ui.barOnLeft, false);
 
     Line();
     GroupLabel("단축키");
@@ -553,18 +522,9 @@ void TabSave(App& app) {
     int fmt = app.ui.imageFormat;
     const char* fmts[2] = { "PNG", "JPG" };
     if (Segmented("ifmt", fmts, 2, &fmt, nullptr, 146.0f, "이미지")) app.ui.imageFormat = fmt;
-    // 화면보다 크게 찍으려면 큰 프레임버퍼에 한 번 더 그려야 한다. 아직 없다.
-    int sc = app.ui.imageScale;
-    const char* scs[3] = { "1\xC3\x97", "2\xC3\x97", "4\xC3\x97" };
-    const bool canScale[3] = { true, false, false };
-    if (Segmented("iscale", scs, 3, &sc, canScale, 146.0f, "크게 찍기")) app.ui.imageScale = sc;
 
     Line();
-    // MP4 는 인코더가 필요해 아직 없다. PNG 연속만 실제로 돈다.
-    int rf = app.ui.recordFormat;
-    const char* rfs[2] = { "MP4", "PNG 연속" };
-    const bool canRf[2] = { false, true };
-    if (Segmented("rfmt", rfs, 2, &rf, canRf, 146.0f, "녹화")) app.ui.recordFormat = rf;
+    // 녹화는 화면을 한 장씩 PNG 로 남긴다. 이어 붙이는 것은 밖의 도구가 한다.
     int rfps = app.ui.recordFps;
     const char* fpss[2] = { "60", "30" };
     if (Segmented("rfps", fpss, 2, &rfps, nullptr, 146.0f, "초당 장수")) {
@@ -575,14 +535,6 @@ void TabSave(App& app) {
     ImGui::Dummy(ImVec2(1.0f, 6.0f));
     Toggle("noui", "녹화에 UI 넣지 않기", "막대와 판은 영상에 찍히지 않는다", &app.ui.recordWithoutUi);
     Toggle("shutter", "저장할 때 딸깍 소리", nullptr, &app.ui.shutterSound);
-
-    Line();
-    GroupLabel("우주 상태");
-    if (Btn("save", "지금 상태 저장", false, 168.0f, false)) app.saveStateRequested = true;
-    ImGui::SameLine();
-    if (Btn("load", "불러오기", false, 168.0f, false)) app.loadStateRequested = true;
-    ImGui::Dummy(ImVec2(1.0f, 8.0f));
-    UnderNote("아직 없다 \xE2\x80\x94 100만 알 기준 한 파일이 약 24 MB 가 된다.");
 }
 
 } // namespace

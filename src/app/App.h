@@ -45,17 +45,12 @@ struct BrushSettings {
 // 창을 어떻게 다루는지, 무엇을 어디에 저장하는지 같은 「앱의 습관」이다.
 struct UiSettings {
     // ── 우주의 경계 ──────────────────────────────────────────────────────
-    float boxSizeKpc      = 120.0f;  // 판 한 변이 몇 kpc 인지. 화면에 단위를 붙이는 용도다
-    bool  cullFarAway     = false;   // 판 밖으로 한참 나간 알갱이를 지운다
     bool  keepCenterOfMass = false;  // 무게중심을 화면 가운데에 붙여 둔다
-    bool  zeroMomentum    = false;   // 새로 놓을 때 전체 운동량을 0 으로 맞춘다
 
     // ── 보기와 색 ────────────────────────────────────────────────────────
     float pointSizePx     = 1.2f;    // 점으로 그릴 때 한 알의 크기
-    float trailSeconds    = 0.6f;    // 앞 프레임 그림이 남아 있는 시간(0 이면 안 남긴다)
     int   background      = 0;       // 0 순수 검정 · 1 아주 옅은 보라
     bool  showGridOverlay = false;   // 계산 격자를 겹쳐 그린다
-    bool  showBodyTrails  = true;    // 무거운 천체가 지나온 길을 그린다
 
     // ── 성능 ─────────────────────────────────────────────────────────────
     int   frameCap        = 0;       // 0 화면에 맞춤 · 1 60 · 2 무제한
@@ -68,20 +63,13 @@ struct UiSettings {
     float dragSensitivity = 1.0f;
     float wheelZoomSpeed  = 0.8f;
     bool  wheelInverted   = false;
-    bool  barOnLeft       = false;   // 왼손잡이 배치 — 저장·녹화가 왼쪽으로 간다
 
     // ── 저장과 녹화 ──────────────────────────────────────────────────────
     std::string saveFolder;          // 비어 있으면 실행 파일 옆에 둔다
     int   imageFormat     = 0;       // 0 PNG · 1 JPG
-    int   imageScale      = 1;       // 0 = 1배 · 1 = 2배 · 2 = 4배
-    int   recordFormat    = 1;       // 0 MP4(아직 없다) · 1 PNG 연속
     int   recordFps       = 0;       // 0 = 60 · 1 = 30
     bool  recordWithoutUi = true;    // 막대와 판을 영상에 넣지 않는다
     bool  shutterSound    = false;
-
-    // ── 중력과 시간 ──────────────────────────────────────────────────────
-    bool  autoSubstep     = true;    // 위험하면 한 칸을 자동으로 잘게 쪼갠다
-    bool  showEnergyDrift = false;   // 계산이 얼마나 정확한지 숫자로 감시한다
 };
 
 struct App {
@@ -165,8 +153,6 @@ struct App {
     // 설정 화면이 눌러 두는 한 번짜리 부탁. 그리는 쪽에서 무거운 일을 하면 화면이 멎으므로
     // 표시만 세워 두고 실제 처리는 App::tick 이 한 뒤 지운다.
     bool  pickSaveFolder        = false;
-    bool  saveStateRequested    = false;
-    bool  loadStateRequested    = false;
     bool  resetSettingsRequested = false;
 
     // 판을 다시 깔아야 반영되는 값(알갱이 수·격자·경계·장면)을 만졌는가.
