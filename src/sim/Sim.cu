@@ -313,7 +313,7 @@ __global__ void kScatter(const float4* pos, int n, float* grid, int G, int S, in
 // 2D 판에서는 1/k 를 곱해 3D 형 1/r² 힘을 흉내 냈지만, 진짜 3D 에서는 그럴 필요가 없다.
 //
 // 비용: (G/2+1)·G² 스레드 × O(1).
-__global__ void kPoissonPeriodic(cufftComplex* F, int G, float scale) {
+__global__ void kPoissonPeriodic(cufftComplex* F, int G, float scale, float softCells) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     const int z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -325,7 +325,22 @@ __global__ void kPoissonPeriodic(cufftComplex* F, int G, float scale) {
     const float k2 = (float)(x * x + ky * ky + kz * kz);
     const int idx = (z * G + y) * H + x;
     if (k2 < 1e-6f) { F[idx].x = 0.f; F[idx].y = 0.f; return; }   // 평균값은 힘에 기여하지 않는다
-    const float m = -scale / k2;
+
+    // **소프트닝은 여기서 넣는다.**
+    //
+    // 고립 경계는 실공간 그린함수에 `-1/(r + soft)` 로 넣지만, 주기 경계는 주파수공간에서
+    // 곱하므로 따로 실어야 한다. 이 항을 빠뜨리면 소프트닝 슬라이더가 주기 경계에서 아무
+    // 일도 하지 않는다 — 0.5 셀과 6 셀의 결과가 소수점 아래까지 같았다(2026-08-14 실측).
+    //
+    // 짧은 파장(큰 k)일수록 세게 누르는 가우시안을 쓴다. 실공간에서 점을 그만한 폭으로
+    // 번지게 하는 것과 같아, 가까이 붙은 알갱이가 무한대로 당기는 것을 막는다.
+    float m = -scale / k2;
+    if (softCells > 0.f) {
+        // k 는 정수 파수라 실제 파수는 2π·k/L(L=1). 셀 크기는 1/G 이므로
+        // 소프트닝 길이는 softCells/G 이고, 지수는 -(2π k · soft/G)²/2 가 된다.
+        const float s = 6.2831853f * softCells / (float)G;
+        m *= __expf(-0.5f * k2 * s * s);
+    }
     F[idx].x *= m; F[idx].y *= m;
 }
 
@@ -788,9 +803,18 @@ __global__ void kFillShape(float4* pos, float4* vel, float* temp, int from, int 
         const float th = u1 * 6.2831853f;
         const float r = R * (0.72f + 0.22f * u2);
         x = cx + r * __cosf(th); y = cy + r * __sinf(th);
-    } else if (kind == 3) {                // 구름 — 넓게 퍼진 차가운 성운
-        const float3 b = bulgePoint(R * 1.4f, s);
-        x = cx + b.x * 1.6f; y = cy + b.y * 1.6f; z = 0.5f + b.z * 1.6f;
+    } else if (kind == 3) {                // 구름 — 넓게 퍼진 성운
+        // **공 안에 고르게** 뿌린다. bulgePoint 는 r = R·u² 라 중심에 몰리는 분포라,
+        // 그걸 키워 쓰면 태양과 비슷하게 뭉쳐 「성기게 퍼진 성운」이 되지 않는다
+        // (2026-08-14 실측: 구름 최대 밀도가 태양의 2/3 까지 올라갔다).
+        // 부피가 r³ 에 비례하므로 세제곱근을 씌워야 고르게 찬다.
+        const float rr = R * 1.5f * cbrtf(fmaxf(u1, 1e-6f));
+        const float cz2 = u2 * 2.0f - 1.0f;
+        const float sz2 = sqrtf(fmaxf(1.0f - cz2 * cz2, 0.0f));
+        const float ph2 = rnd01(s * 17u + 9u) * 6.2831853f;
+        x = cx + rr * sz2 * __cosf(ph2);
+        y = cy + rr * sz2 * __sinf(ph2);
+        z = 0.5f + rr * cz2;
     } else if (kind == 5) {                // 토성 — 가운데 공에 아주 얇은 고리
         if (u3 < 0.42f) {                  // 본체
             const float3 b = bulgePoint(R * 0.34f, s);
@@ -1042,7 +1066,7 @@ void Sim::Impl::solvePoisson() {
         // 3D 뉴턴 중력은 주파수공간에서 -1/k² 다. 배율에 FFT 정규화를 함께 싣는다.
         const float scale = norm / (4.0f * 3.14159265f * 3.14159265f);
         dim3 b(8, 8, 8), g((S / 2 + 1 + 7) / 8, (S + 7) / 8, (S + 7) / 8);
-        kPoissonPeriodic<<<g, b>>>(specRho, S, scale);
+        kPoissonPeriodic<<<g, b>>>(specRho, S, scale, cfg.softeningCells);
     } else {
         kMulSpec<<<(int)((spec + 255) / 256), 256>>>(specRho, specGreen, (int)spec, norm);
     }

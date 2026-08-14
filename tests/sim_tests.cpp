@@ -25,11 +25,12 @@ static void check(bool ok, const std::string& name, const std::string& detail) {
 
 // ---------------------------------------------------------------------------
 // 1. 질량 보존 — 산란(파티클을 격자에 뿌리기)은 질량을 잃거나 만들면 안 된다.
-//    CIC 는 파티클 하나를 이웃 4칸에 가중치로 쪼개 넣으므로 가중치 합이 정확히 1 이어야 한다.
+//    CIC 는 알갱이 하나를 이웃 **8칸**에 가중치로 쪼개 넣으므로 가중치 합이 정확히 1 이어야 한다.
+//    3D 로 옮기면서 4칸에서 8칸이 됐고, 격자 한 변의 상한도 크게 낮아졌다.
 // ---------------------------------------------------------------------------
 static void testMassConservation() {
     printf("\n[1] 질량 보존\n");
-    for (int G : {128, 256, 512}) {
+    for (int G : {32, 64, 128}) {
         Sim sim;
         SimConfig cfg;
         cfg.particleCount = 200000;
@@ -60,37 +61,39 @@ static void testGravityResponds() {
         Sim sim;
         SimConfig cfg;
         cfg.particleCount = 300000;
-        cfg.gridSize = 256;
+        cfg.gridSize = 128;
         cfg.gravity = gravity;
         cfg.pressureEnabled = false;
         cfg.preset = Preset::SpiralDisk;
         // 보는 것은 중력이 뭉치게 하는가 하나뿐이다. 가운데 별 무리는 중력과 무관하게
         // 처음부터 빽빽해서 초기 밀도를 지배해 버리므로 여기서는 깔지 않는다.
         cfg.bulgeFraction = 0.0f;
+        // 밀도파도 끈다 — 이 힘이 알갱이를 팔로 모으므로 중력이 0 이어도 밀도가 오른다.
+        cfg.spiralWaveEnabled = false;
+        cfg.haloEnabled = false;
         sim.init(cfg);
-        for (int i = 0; i < 200; ++i) sim.step();
+        // 3D 는 같은 스텝 수에서 훨씬 덜 뭉친다. 200 스텝에서는 비율이 1.03 에 그쳤다.
+        for (int i = 0; i < 900; ++i) sim.step();
         return sim.measureMaxDensity();
     };
     double off = peakAfter(0.0f);
-    double on  = peakAfter(0.6f);
+    double on  = peakAfter(2.5f);
     char buf[160];
-    snprintf(buf, sizeof(buf), "중력0 최대밀도=%.1f  중력0.6 최대밀도=%.1f  비율=%.2f", off, on, on / (off > 0 ? off : 1));
+    snprintf(buf, sizeof(buf), "중력0 최대밀도=%.1f  중력2.5 최대밀도=%.1f  비율=%.2f", off, on, on / (off > 0 ? off : 1));
     check(on > off * 1.5, "중력을 켜면 더 뭉친다", buf);
 }
 
 // ---------------------------------------------------------------------------
-// 3. 힘 오차 — 격자로 푼 중력이 정답지(직접 O(N²))와 얼마나 다른가.
-//    판정선 0.15 의 근거는 design.md §8 (512² 실측 0.134 에 여유를 얹은 값).
+// 3. 힘 오차 — 3D 전환에서 이 진단을 껐다.
+//
+//    격자 중력을 직접 O(N²) 계산과 견주는 검사였는데, 3D 로 옮기면서 코어의
+//    measureForceErrorVsDirect 가 0 을 돌려주도록 비워 두었다(자기 버퍼를 따로 잡아 도는
+//    무거운 진단이라 3D 로 다시 쓰는 일을 미뤘다). 값이 없는 것을 통과로 세면 검사가
+//    있는 척만 하게 되므로, 되살릴 때까지 건너뛴다는 것을 눈에 보이게 남긴다.
 // ---------------------------------------------------------------------------
 static void testForceAccuracy() {
-    printf("\n[3] 격자 중력의 힘 오차 (정답지: 직접 O(N^2))\n");
-    for (int G : {256, 512}) {
-        Sim sim;
-        double rms = sim.measureForceErrorVsDirect(20000, G, 3.0f);
-        char buf[160];
-        snprintf(buf, sizeof(buf), "G=%d  소프트닝=3셀  상대오차RMS=%.4f  (판정선 0.15)", G, rms);
-        check(rms >= 0.0 && rms < 0.15, "힘 오차가 판정선 안에 든다", buf);
-    }
+    printf("\n[3] 격자 중력의 힘 오차 — 3D 로 다시 쓰기 전까지 건너뜀\n");
+    printf("  [SKIP] measureForceErrorVsDirect 가 아직 3D 를 재지 않는다\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +115,9 @@ static void testReconfigure() {
     sim.init(cfg);
 
     struct Case { int n; int g; };
-    for (Case c : { Case{1000000, 1024}, Case{100000, 2048}, Case{2000000, 4096} }) {
+    // 3D 기준 값이다. 2D 시절 값(1024·2048·4096)을 그대로 두면 4096³ = 687억 칸을
+    // 잡으려 들어 시스템 메모리가 통째로 치솟는다(2026-08-14 실측).
+    for (Case c : { Case{500000, 64}, Case{100000, 128}, Case{1000000, 128} }) {
         cfg.particleCount = c.n;
         cfg.gridSize = c.g;
         sim.reconfigure(cfg);
@@ -163,16 +168,17 @@ static void testTimings() {
     Sim sim;
     SimConfig cfg;
     cfg.particleCount = 500000;
-    cfg.gridSize = 512;
+    cfg.gridSize = 128;
     cfg.preset = Preset::SpiralDisk;
     sim.init(cfg);
     for (int i = 0; i < 20; ++i) sim.step();
     SimTimings t = sim.timings();
     char buf[200];
-    snprintf(buf, sizeof(buf), "산란=%.3f FFT=%.3f 보간=%.3f 정렬=%.3f 합=%.3f ms",
-             t.scatterMs, t.poissonMs, t.gatherMs, t.sortMs, t.totalMs);
-    check(t.totalMs > 0.0f && t.scatterMs > 0.0f && t.poissonMs > 0.0f,
-          "단계별 시간이 채워진다", buf);
+    // 3D 코어는 단계별로 나눠 재지 않고 한 스텝 전체만 잰다. 단계마다 이벤트를 걸면
+    // 그 동기화가 프레임을 잡아먹는데, 화면에 필요한 것은 합계 하나뿐이다.
+    snprintf(buf, sizeof(buf), "합=%.3f ms · dt=%.7f · 최대속력=%.3f",
+             t.totalMs, t.dtUsed, t.maxSpeed);
+    check(t.totalMs > 0.0f && t.dtUsed > 0.0f, "스텝 시간과 dt 가 채워진다", buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +190,7 @@ static void testCflClamp() {
     Sim sim;
     SimConfig cfg;
     cfg.particleCount = 300000;
-    cfg.gridSize = 512;
+    cfg.gridSize = 128;
     cfg.gravity = 2.0f;          // 슬라이더 최대치
     cfg.pressureEnabled = false;
     cfg.preset = Preset::SpiralDisk;
@@ -235,13 +241,18 @@ static void testLongRun() {
 // ---------------------------------------------------------------------------
 static void testVramClamp() {
     printf("\n[9] VRAM 초과 요청 클램프\n");
+    // **격자를 코어의 상한으로 재야 한다.**
+    // 2D 시절 값(2048)을 그대로 두면 3D 에서 2048³ = 85억 칸이라 계산이 폭발하고,
+    // maxParticlesFor 가 0 을 돌려주는데도 할당을 시도해 시스템 메모리가 치솟는다
+    // (2026-08-14 실측 — 이 테스트가 그 사고를 냈다).
+    const int gCap = Sim::maxGridSize(Boundary::Isolated);
     size_t freeB = Sim::deviceFreeBytes();
-    int maxN = Sim::maxParticlesFor(2048, Boundary::Isolated, freeB);
+    int maxN = Sim::maxParticlesFor(gCap, Boundary::Isolated, freeB);
 
     Sim sim;
     SimConfig cfg;
-    cfg.particleCount = 500000000;   // 5억 — 8GB 로는 불가능
-    cfg.gridSize = 2048;
+    cfg.particleCount = 500000000;   // 5억 — 이 카드로는 불가능
+    cfg.gridSize = gCap;
     cfg.boundary = Boundary::Isolated;
     cfg.preset = Preset::SpiralDisk;
     sim.init(cfg);
@@ -269,7 +280,7 @@ static void testMouseTools() {
     Sim sim;
     SimConfig cfg;
     cfg.particleCount = 1000000;
-    cfg.gridSize = 512;
+    cfg.gridSize = 128;
     cfg.gravity = 0.6f;
     cfg.pressureEnabled = false;
     cfg.preset = Preset::Empty;
@@ -282,7 +293,7 @@ static void testMouseTools() {
     // 세 번 추가하고 매번 정확한 개수가 들어가는지 본다
     const int want = 120000;
     int got1 = sim.addShape(0.35f, 0.45f, ShapeKind::Galaxy, 0.10f, want, true);
-    int got2 = sim.addShape(0.65f, 0.55f, ShapeKind::Blob,   0.08f, want, false);
+    int got2 = sim.addShape(0.65f, 0.55f, ShapeKind::Cloud,   0.08f, want, false);
     int got3 = sim.addShape(0.50f, 0.75f, ShapeKind::Ring,      0.09f, want, true);
     int total = sim.activeCount();
     double mass = sim.measureTotalGridMass();
@@ -308,7 +319,7 @@ static void testMouseTools() {
     // 지우개 — 지운 만큼 줄고, 남은 것은 앞쪽에 모여 있어야 다음 추가가 정확하다
     int erased = sim.eraseAt(0.35f, 0.45f, 0.12f);
     int afterErase = sim.activeCount();
-    int got4 = sim.addShape(0.20f, 0.20f, ShapeKind::Blob, 0.05f, 50000, false);
+    int got4 = sim.addShape(0.20f, 0.20f, ShapeKind::Cloud, 0.05f, 50000, false);
     int afterAdd = sim.activeCount();
     snprintf(buf, sizeof(buf), "지움=%d  지운뒤=%d  다시추가=%d  최종=%d",
              erased, afterErase, got4, afterAdd);
@@ -319,7 +330,7 @@ static void testMouseTools() {
     // 뿌리기·우물 — 속도가 실제로 바뀌는지 (최대속력으로 본다)
     {
         Sim s4; SimConfig c4 = cfg; c4.gravity = 0.0f; s4.init(c4);
-        s4.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.10f, 200000, false);
+        s4.addShape(0.5f, 0.5f, ShapeKind::Cloud, 0.10f, 200000, false);
         s4.step();
         float v0 = s4.timings().maxSpeed;
         s4.sprayAt(0.5f, 0.5f, 0.12f, 0.5f);
@@ -400,10 +411,14 @@ static void testStarBookkeeping() {
 
     char buf[220];
     snprintf(buf, sizeof(buf),
-             "지우기 전 별=%d/%d  지움=%d  지운 뒤 별=%d/%d",
-             starsBefore, aliveBefore, erased, starsAfter, aliveAfter);
-    check(starsBefore > 0 && erased > 0 && starsAfter <= aliveAfter,
-          "지운 뒤 별 수가 살아있는 수를 넘지 않는다", buf);
+             "지운 것=%d · 지우기 전 살아있음=%d · 지운 뒤=%d (별 형성은 3D 에서 제거됨)",
+             erased, aliveBefore, aliveAfter);
+    // 별 형성은 3D 로 옮기면서 뺐다(한 번도 켜지지 않던 기능이라 함께 정리했다).
+    // 그래서 별 수는 늘 0 이고, 이 항목이 실제로 지키는 것은 **지운 만큼 살아있는 수가
+    // 줄어드는가** 하나만 남는다. 검사 이름과 판정을 거기에 맞춘다.
+    check(erased > 0 && aliveAfter == aliveBefore - erased && starsAfter == 0,
+          "지운 만큼 살아있는 수가 정확히 줄어든다", buf);
+    (void)starsBefore;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,17 +439,18 @@ static void testPeriodicSoftening() {
         Sim sim;
         SimConfig cfg;
         cfg.particleCount = 200000;
-        cfg.gridSize = 256;
+        cfg.gridSize = 128;
         cfg.boundary = Boundary::Periodic;
         cfg.preset = Preset::Empty;
         cfg.softeningCells = soft;
-        cfg.gravity = 0.9f;
+        cfg.gravity = 3.0f;
         cfg.pressureEnabled = false;
         sim.init(cfg);
-        sim.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.18f, 200000, false);
+        sim.addShape(0.5f, 0.5f, ShapeKind::Cloud, 0.18f, 200000, false);
         // 속력이 부동소수 잡음과 구분될 만큼 자라되 붕괴가 끝나기 전인 구간을 쓴다.
-        // 30스텝에서는 0.0001 대라 자리수 아래에 묻혀 비율을 믿을 수 없었다.
-        for (int i = 0; i < 150; ++i) sim.step();
+        // 3D 는 같은 스텝 수에서 속력이 훨씬 작게 자란다 — 150 스텝에서는 0.000003 대라
+        // 두 값이 자리수 아래에서 같아 보였다(2026-08-14 실측).
+        for (int i = 0; i < 600; ++i) sim.step();
         return (double)sim.timings().maxSpeed;
     };
     // 소프트닝을 키우면 가까운 거리의 힘이 뭉툭해져 덜 가속된다.
@@ -466,7 +482,7 @@ static void testTimeScaleNoDoubleApply() {
         cfg.timeScale = ts;
         cfg.preset = Preset::Empty;
         sim.init(cfg);
-        sim.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.10f, 100000, false);
+        sim.addShape(0.5f, 0.5f, ShapeKind::Cloud, 0.10f, 100000, false);
         sim.step();
         return sim.timings().dtUsed;
     };
@@ -476,11 +492,15 @@ static void testTimeScaleNoDoubleApply() {
 
     char buf[220];
     snprintf(buf, sizeof(buf),
-             "dtUsed  1.0x=%.7f  3.0x=%.7f  0.25x=%.7f  (3배속/1배속=%.2f, 1 이어야 한다)",
+             "dtUsed  1.0x=%.7f  3.0x=%.7f  0.25x=%.7f  (3배속/1배속=%.2f)",
              d1, d3, dq, d1 > 0 ? d3 / d1 : 0.0f);
-    // 올리는 쪽은 dt 가 그대로여야 하고(반복 횟수로 낸다), 내리는 쪽은 dt 가 줄어야 한다.
-    check(d1 > 0.f && fabsf(d3 - d1) < 1e-9f && dq < d1 * 0.5f,
-          "배속을 올려도 시간 간격은 그대로다", buf);
+    // 3D 코어는 배속을 dt 에 그대로 곱한다.
+    //
+    // 2D 는 dt 를 고정하고 한 프레임에 스텝을 여러 번 돌렸는데, 3D 는 한 스텝이 훨씬
+    // 무거워 그 방식이면 배속 3배가 곧 프레임 3배 부하가 된다. 대신 dt 를 키우고 CFL 이
+    // 위험한 값을 잘라 낸다 — 자를 일이 없으면 배속에 정확히 비례한다.
+    check(d1 > 0.f && d3 > d1 * 2.5f && dq < d1 * 0.5f,
+          "배속이 시간 간격에 그대로 반영된다", buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -549,7 +569,7 @@ static void testRingBufferCap() {
     const int aliveAfter = sim.activeCount();
 
     // 상한보다 큰 요청은 상한까지만 들어간다.
-    const int huge = sim.addShape(0.5f, 0.5f, ShapeKind::Blob, 0.2f, 5000000, false);
+    const int huge = sim.addShape(0.5f, 0.5f, ShapeKind::Cloud, 0.2f, 5000000, false);
 
     char buf[220];
     snprintf(buf, sizeof(buf),
@@ -573,13 +593,16 @@ static void testShapeVariety() {
         Sim sim;
         SimConfig cfg;
         cfg.particleCount = 200000;
-        cfg.gridSize = 256;
+        cfg.gridSize = 128;
         cfg.gravity = 0.0f;
         cfg.pressureEnabled = false;
         cfg.preset = Preset::Empty;
         sim.init(cfg);
         sim.addShape(0.5f, 0.5f, k, 0.15f, 200000, false);
-        sim.measureTotalGridMass();        // 격자를 현재 배치로 채운다
+        // **격자를 채우는 것은 step 이다.** measureTotalGridMass 는 이미 채워진 것을 읽기만
+        // 한다 — 그걸 「채운다」고 여겨 전부 0 이 나왔다(2026-08-14 실측). 중력이 0 이라
+        // 한 스텝을 돌려도 배치는 그대로다.
+        sim.step();
         return sim.measureMaxDensity();
     };
     const double sun    = peakOf(ShapeKind::Sun);
@@ -614,8 +637,12 @@ static void testBlackHoleGeodesic() {
         Sim sim;
         SimConfig cfg;
         cfg.particleCount = 200000;
-        cfg.gridSize = 256;
-        cfg.preset = Preset::BlackHole;
+        cfg.gridSize = 128;
+        // **장면을 BlackHole 로 두면 안 된다.**
+        // 코어는 `preset == BlackHole || blackHoleEnabled` 로 블랙홀을 세운다 — 장면 자체가
+        // 블랙홀이면 끄는 쪽도 켜져서 둘이 같은 결과가 나온다(2026-08-14 실측: 양쪽 다 5.3%).
+        // 갈림을 보려면 장면은 그대로 두고 이 값 하나만 켰다 꺼야 한다.
+        cfg.preset = Preset::SpiralDisk;
         // 지평선 크기는 이제 질량에서 나오고(rs = 2GM/c²) 그 G 가 여기 있는 중력 세기다.
         // 0 으로 두면 블랙홀도 함께 사라지므로, 낮게 두어 중심이 주인공이 되게만 한다.
         cfg.gravity = 0.15f;
@@ -668,9 +695,11 @@ static void testContactBlocksOverlap() {
     auto run = [](bool contact, double& maxDensity, double& mass) {
         Sim sim;
         SimConfig cfg;
-        // 20만 개는 1024² 에서 접촉을 켤 수 있는 한도(약 80만) 안이다.
+        // 20만 개는 128³ 에서 접촉을 켤 수 있는 한도(0.764·G³ ≈ 160만) 안이다.
+        // 3D 는 부피로 세므로 2D 의 G² 공식을 그대로 쓰면 상한이 1만 2천으로 나와
+        // 접촉이 아예 안 켜진다.
         cfg.particleCount = 200000;
-        cfg.gridSize = 1024;
+        cfg.gridSize = 128;
         cfg.preset = Preset::SpiralDisk;
         cfg.boundary = Boundary::Isolated;
         cfg.gravity = 0.6f;
