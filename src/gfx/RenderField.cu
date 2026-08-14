@@ -78,7 +78,8 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
 // uchar4 에는 atomicAdd 가 없어 float3 누적 버퍼에 모았다가 뒤에서 색으로 바꾼다.
 __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* temp,
                              int n, float3* accum, int W, int H,
-                             int colorBy, int cmapKind, float zoom, float panX, float panY) {
+                             int colorBy, int cmapKind, float zoom, float panX, float panY,
+                             float sizePx) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float2 p = pos[i];
@@ -116,10 +117,32 @@ __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* 
                             : cmapAstro(t);
     }
 
-    float3* px = &accum[y * W + x];
-    atomicAdd(&px->x, c.x);
-    atomicAdd(&px->y, c.y);
-    atomicAdd(&px->z, c.z);
+    // 알갱이 하나를 몇 픽셀로 찍을지. 1.2 px 이면 한 점, 그보다 크면 둘레도 함께 물들인다.
+    // 반지름을 픽셀 수로 쓰는 대신 정수 칸으로 끊는 이유는, 한 알에 수십 픽셀을 칠하면
+    // 3000만 알에서 그리기가 계산보다 무거워지기 때문이다 — 최대 2칸(5×5)까지만 번진다.
+    const int rad = (sizePx <= 1.5f) ? 0 : (sizePx <= 3.5f ? 1 : 2);
+    if (rad == 0) {
+        float3* px = &accum[y * W + x];
+        atomicAdd(&px->x, c.x);
+        atomicAdd(&px->y, c.y);
+        atomicAdd(&px->z, c.z);
+        return;
+    }
+    // 가운데가 가장 밝고 가장자리로 갈수록 옅어지게 나눈다. 균일하게 칠하면 알이 네모로 보인다.
+    const float inv = 1.0f / ((2 * rad + 1) * (2 * rad + 1));
+    for (int dy = -rad; dy <= rad; ++dy) {
+        const int yy = y + dy;
+        if (yy < 0 || yy >= H) continue;
+        for (int dx = -rad; dx <= rad; ++dx) {
+            const int xx = x + dx;
+            if (xx < 0 || xx >= W) continue;
+            const float fall = (dx == 0 && dy == 0) ? 1.0f : inv;
+            float3* px = &accum[yy * W + xx];
+            atomicAdd(&px->x, c.x * fall);
+            atomicAdd(&px->y, c.y * fall);
+            atomicAdd(&px->z, c.z * fall);
+        }
+    }
 }
 
 __global__ void kClearAccum(float3* a, int n) {
@@ -177,6 +200,17 @@ void RenderField::ensureSize(int w, int h) {
 
 void RenderField::draw(App& app, int viewW, int viewH) {
     if (viewW <= 0 || viewH <= 0) return;
+
+    // 창 크기와 「그리는 크기」를 나눈다.
+    //
+    // 「버거우면 절반 해상도」를 켜면 픽셀 수가 4분의 1이 되고, 그 작은 그림이 화면 전체
+    // 쿼드에 늘어 붙는다 — 화면은 그대로 차고 흐려지기만 한다. 멈춰 있을 때는 급할 것이
+    // 없으므로 늘 선명하게 그린다.
+    const int outW = viewW, outH = viewH;
+    if (app.ui.halfResWhenBusy && app.running && app.frameMs > 20.0f) {
+        viewW = (viewW + 1) / 2;
+        viewH = (viewH + 1) / 2;
+    }
     ensureSize(viewW, viewH);
 
     const ViewSettings& view = app.view;
@@ -196,7 +230,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 (const float2*)app.sim.particleVelDevicePtr(),
                 app.sim.particleTempDevicePtr(), n,
                 (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
-                app.zoom, app.panX, app.panY);
+                app.zoom, app.panX, app.panY, app.ui.pointSizePx);
         }
         kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
                                                   (uchar4*)devPixels_, npix,
@@ -241,7 +275,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
         }
     }
 
-    glViewport(0, 0, viewW, viewH);
+    glViewport(0, 0, outW, outH);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_LIGHTING);
     glEnable(GL_TEXTURE_2D);
@@ -279,4 +313,42 @@ void RenderField::draw(App& app, int viewW, int viewH) {
         glTexCoord2f(0.f, 1.f); glVertex2f(-1.f,  1.f);
     glEnd();
     glDisable(GL_TEXTURE_2D);
+
+    // 계산 격자를 겹쳐 그린다.
+    //
+    // 힘을 어느 칸 단위로 재는지 눈으로 보게 하는 그림이다. 칸이 2048² 이면 선이 화면보다
+    // 촘촘해 회색 판이 되므로, 화면에서 24 px 보다 성기게 나오도록 몇 칸씩 건너뛴다.
+    if (app.ui.showGridOverlay) {
+        const int G = app.sim.gridSize();
+        const float shortSide = (float)(outW < outH ? outW : outH);
+        const float cellPx = shortSide * app.zoom / (float)G;
+        int stride = 1;
+        while (cellPx * stride < 24.0f && stride < G) stride *= 2;
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(1.f, 1.f, 1.f, 0.12f);
+        glBegin(GL_LINES);
+        const float aspect = (float)outW / (float)outH;
+        for (int i = 0; i <= G; i += stride) {
+            // 시뮬 좌표 [0,1] → 화면 [-1,1]. kShade 와 같은 변환이라야 선이 칸 위에 얹힌다.
+            const float s = (float)i / (float)G;
+            float a = (s - 0.5f + app.panX) * app.zoom + 0.5f;
+            float bx = a, by = a;
+            if (aspect > 1.f) bx = (a - 0.5f) / aspect + 0.5f;
+            else              by = (a - 0.5f) * aspect + 0.5f;
+            const float gx = bx * 2.f - 1.f;
+            // 세로줄은 x 가 pan 을 타고, 가로줄은 y 가 탄다 — 둘을 따로 계산해야 맞는다.
+            float ay = ((float)i / (float)G - 0.5f + app.panY) * app.zoom + 0.5f;
+            if (aspect > 1.f) { /* y 는 그대로 */ }
+            else              ay = (ay - 0.5f) * aspect + 0.5f;
+            const float gy = 1.f - ay * 2.f;
+            if (gx >= -1.f && gx <= 1.f) { glVertex2f(gx, -1.f); glVertex2f(gx, 1.f); }
+            if (gy >= -1.f && gy <= 1.f) { glVertex2f(-1.f, gy); glVertex2f(1.f, gy); }
+            (void)by;
+        }
+        glEnd();
+        glDisable(GL_BLEND);
+        glColor4f(1.f, 1.f, 1.f, 1.f);
+    }
 }
