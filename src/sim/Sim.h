@@ -25,8 +25,20 @@ enum class Boundary { Isolated, Periodic };
 enum class GravityLaw { InverseSquare, InverseR };
 
 struct SimConfig {
-    int   particleCount        = 1000000;
-    int   gridSize             = 2048;   // 2의 거듭제곱만 쓴다(주기 wrap 을 비트 마스크로 처리)
+    // ── 3D 로 옮기면서 달라진 값들 ────────────────────────────────────────
+    //
+    // 격자가 한 변이 아니라 세제곱으로 자란다. 2D 의 2048² 은 400만 칸이지만
+    // 3D 의 2048³ 은 85억 칸이라 그릴 수도 잡을 수도 없다. 실제 상한은 이렇다.
+    //   고립 경계 : 한 변 256 까지 (패딩 때문에 실제로는 512³ 을 잡는다)
+    //   주기 경계 : 한 변 512 까지
+    // 방향당 해상도는 내려가지만, 별이 위아래로 진동할 자유도가 생겨 원반이 조각나는 대신
+    // 나선팔이 유지된다 — 3D 로 옮기는 이유가 그것이다.
+    int   particleCount        = 2000000;
+    int   gridSize             = 128;    // 2의 거듭제곱만 쓴다(주기 wrap 을 비트 마스크로 처리)
+
+    // 원반의 두께. 실제 나선 은하의 원반은 지름에 견주면 아주 얇다(대략 1/100).
+    // 이 값이 0 이면 알갱이가 한 평면에 갇혀 2D 와 같아진다.
+    float diskThickness        = 0.012f;
     Preset preset              = Preset::SpiralDisk;
     Boundary boundary          = Boundary::Isolated;
     GravityLaw law             = GravityLaw::InverseSquare;
@@ -192,6 +204,12 @@ public:
     // 이 카드의 멀티프로세서 수. 감당할 수 있는 알갱이 수를 어림하는 데 쓴다(못 읽으면 0).
     static int         deviceMultiProcessors();
 
+    // 이 경계에서 격자 한 변이 가질 수 있는 최대값.
+    //
+    // 3D 라 세제곱으로 자란다. 고립 경계는 합성곱이 감기지 않게 한 변을 두 배로 잡으므로
+    // 실제로 잡는 것은 그 여덟 배다. 밖에서 이보다 큰 값을 넣어도 reconfigure 가 잘라 낸다.
+    static int         maxGridSize(Boundary boundary);
+
     // 이 설정으로 잡아야 할 VRAM 바이트 수. 할당하기 전에 가용량과 비교하는 데 쓴다.
     static size_t      estimateBytes(int particleCount, int gridSize, Boundary boundary);
     // 가용 VRAM 안에 들어가는 최대 파티클 수. 요청이 넘치면 이 값으로 잘라 쓴다.
@@ -259,7 +277,11 @@ public:
     const float* densityDevicePtr() const;
 
     // 점 렌더가 직접 읽는 파티클 버퍼. [0, activeCount()) 만 유효하다.
-    const float* particlePosDevicePtr() const;   // float2 배열을 float* 로 넘긴다
+    //
+    // 3D 로 옮기면서 float4 배열이 됐다(x, y, z, 안 씀). float3 가 아니라 float4 인 것은
+    // 16 바이트 정렬이라야 카드가 한 번에 읽어 가기 때문이다 — 12 바이트는 두 번에 걸쳐 읽는다.
+    // 화면은 위에서 내려다보므로 그리는 쪽은 x, y 만 쓴다.
+    const float* particlePosDevicePtr() const;   // float4 배열을 float* 로 넘긴다
     const float* particleVelDevicePtr() const;
     const float* particleTempDevicePtr() const;
 

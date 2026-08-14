@@ -39,6 +39,22 @@ POINT g_dragLast{};
 // 도구로 칠하는 중(뿌리기·우물·지우개는 드래그 동안 이어진다)
 bool  g_painting = false;
 
+// 카메라가 판 밖으로 못 나가게 붙잡는다.
+//
+// 판은 [0,1] 이고 화면 한가운데가 시뮬 좌표 (0.5 - pan) 에 닿는다(App::screenToSim).
+// 배율이 z 일 때 화면이 덮는 폭은 1/z 이므로, 판을 벗어나지 않으려면 가운데가
+// [0.5/z, 1 - 0.5/z] 안에 있어야 한다. 그것을 pan 으로 옮기면 아래 식이 된다.
+// 배율이 1 이면 판이 화면에 꼭 맞아 움직일 자리가 없으므로 pan 은 0 이다.
+void ClampPan(App& app) {
+    const float half = 0.5f / (app.zoom > 1e-3f ? app.zoom : 1e-3f);
+    const float lim = 0.5f - half;          // 배율 1 이면 0
+    const float m = (lim > 0.0f) ? lim : 0.0f;
+    if (app.panX >  m) app.panX =  m;
+    if (app.panX < -m) app.panX = -m;
+    if (app.panY >  m) app.panY =  m;
+    if (app.panY < -m) app.panY = -m;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
 
@@ -82,6 +98,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const float s = g_app->ui.dragSensitivity;
                 g_app->panX += (now.x - g_dragLast.x) * s / unit;
                 g_app->panY += (now.y - g_dragLast.y) * s / unit;
+                ClampPan(*g_app);
                 g_dragLast = now;
             } else if (g_painting && g_app) {
                 float u, v;
@@ -97,8 +114,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 // 한 칸에 얼마나 확대할지. 설정의 「휠 확대 속도」가 1.0 일 때 12% 다.
                 const float step = 1.0f + 0.15f * g_app->ui.wheelZoomSpeed;
                 g_app->zoom *= (d > 0) ? step : (1.0f / step);
-                if (g_app->zoom < 0.25f)  g_app->zoom = 0.25f;
+                if (g_app->zoom < 1.0f)   g_app->zoom = 1.0f;   // 판보다 작게 줄이지 않는다
                 if (g_app->zoom > 64.0f)  g_app->zoom = 64.0f;
+                ClampPan(*g_app);
             }
             return 0;
 

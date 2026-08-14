@@ -88,13 +88,15 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
 
 // 파티클을 화면에 더한다. 겹칠수록 밝아지므로 밀집한 곳이 자연히 도드라진다.
 // uchar4 에는 atomicAdd 가 없어 float3 누적 버퍼에 모았다가 뒤에서 색으로 바꾼다.
-__global__ void kSplatPoints(const float2* pos, const float2* vel, const float* temp,
+// 코어가 3D 로 바뀌면서 위치·속도가 float4 가 됐다(x, y, z, 안 씀).
+// 화면은 위에서 내려다보므로 여기서는 x, y 만 쓴다 — z 는 깊이라 투영에서 사라진다.
+__global__ void kSplatPoints(const float4* pos, const float4* vel, const float* temp,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
                              float sizePx) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float2 p = pos[i];
+    float4 p = pos[i];
     if (p.x < 0.f) return;                       // 빈 슬롯
 
     float u = (p.x - 0.5f + panX) * zoom + 0.5f;
@@ -114,7 +116,12 @@ __global__ void kSplatPoints(const float2* pos, const float2* vel, const float* 
     // (round-06 리뷰 P2 #26).
     float t = 0.5f;
     if (colorBy == 1)      t = fminf(temp[i] * 0.5f, 1.f);
-    else if (colorBy == 2) t = fminf(sqrtf(vel[i].x * vel[i].x + vel[i].y * vel[i].y) * 0.25f, 1.f);
+    else if (colorBy == 2) {
+        // 속력은 3차원 전부를 센다. xy 만 보면 위아래로 빠르게 진동하는 알갱이가
+        // 멈춰 있는 것처럼 보인다 — 원반이 3D 라 그 성분이 실제로 있다.
+        const float4 v = vel[i];
+        t = fminf(sqrtf(v.x * v.x + v.y * v.y + v.z * v.z) * 0.25f, 1.f);
+    }
 
     float3 c;
     if (colorBy == 0) {
@@ -346,8 +353,8 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             kClearAccum<<<(npix + 255) / 256, 256>>>((float3*)devAccum_, npix);
             if (n > 0) {
                 kSplatPoints<<<(n + 255) / 256, 256>>>(
-                    (const float2*)app.sim.particlePosDevicePtr(),
-                    (const float2*)app.sim.particleVelDevicePtr(),
+                    (const float4*)app.sim.particlePosDevicePtr(),
+                    (const float4*)app.sim.particleVelDevicePtr(),
                     app.sim.particleTempDevicePtr(), n,
                     (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
                     app.zoom, app.panX, app.panY, app.ui.pointSizePx);

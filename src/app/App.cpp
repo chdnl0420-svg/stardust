@@ -14,24 +14,30 @@ void App::init() {
     // 이 그래픽카드가 감당할 수 있는 상한을 여기서 한 번 정하고 그 뒤로 바꾸지 않는다.
     //
     // 기준은 두 가지다.
-    //  · 메모리 — 가장 큰 격자(2048²)로도 버퍼가 들어가는가
+    //  · 메모리 — **실제로 쓸 격자**로 버퍼가 들어가는가
     //  · 계산량 — 알갱이 하나를 한 스텝 옮기는 데 드는 일이 초당 몇 번이나 가능한가
     //
+    // 재는 격자를 실제 값으로 잡는 것이 중요하다. 2D 시절에는 여기에 가장 큰 격자(2048)를
+    // 넣었는데, 3D 로 오면서 그 값이 상한 밖이 되어 계산이 폭발했고 상한이 최소값(10만)까지
+    // 떨어졌다(2026-08-14 실측: 200만을 요청했는데 화면에 10만만 떴다).
+    //
     // 계산량 쪽은 정확히 예측할 수 없어 카드의 멀티프로세서 수로 어림한다. 실측에서
-    // 이 카드(SM 46개)가 3000만 개를 60 FPS 로 돌리기는 했지만 그때 드라이버가 깨졌다 —
-    // 「프레임이 나온다」와 「카드가 버틴다」는 다른 말이었다. 그래서 어림값을 보수적으로 잡고,
-    // 모자라면 아래 guardPerformance 가 도는 중에 더 낮춘다.
+    // 3000만 개가 60 FPS 로 돌기는 했지만 그때 드라이버가 깨졌다 — 「프레임이 나온다」와
+    // 「카드가 버틴다」는 다른 말이었다. 그래서 어림값을 보수적으로 잡고, 모자라면
+    // 아래 guardPerformance 가 도는 중에 더 낮춘다.
     const size_t freeB = Sim::deviceFreeBytes();
-    int byMemory = Sim::maxParticlesFor(2048, Boundary::Isolated, freeB);
-    int bySpeed  = 30000000;
+    const int gridForBudget = Sim::maxGridSize(cfg.boundary);
+    int byMemory = Sim::maxParticlesFor(gridForBudget, cfg.boundary, freeB);
+    // 3D 는 알갱이 하나가 격자 8칸을 오가므로 2D 보다 한 개당 일이 두 배다.
+    int bySpeed  = 10000000;
     {
         const int sm = Sim::deviceMultiProcessors();
-        // 멀티프로세서 하나당 20만 개를 상한으로 본다.
-        if (sm > 0) bySpeed = sm * 200000;
+        // 멀티프로세서 하나당 10만 개를 상한으로 본다.
+        if (sm > 0) bySpeed = sm * 100000;
     }
     int cap = (byMemory < bySpeed) ? byMemory : bySpeed;
-    if (cap > 30000000) cap = 30000000;
-    if (cap < 100000)   cap = 100000;
+    if (cap > 10000000) cap = 10000000;
+    if (cap < 200000)   cap = 200000;
     hardMaxParticles = cap;
     if (cfg.particleCount > hardMaxParticles) {
         cfg.particleCount = hardMaxParticles;
@@ -174,21 +180,26 @@ void App::applyToolAt(float u, float v, bool firstClick) {
 void ApplyAutoGrid(SimConfig& cfg) {
     // 격자는 알갱이 수에 맞춰 고른다.
     //
-    // 칸당 알갱이가 너무 많으면 밀도장이 뭉개져 화면이 뿌옇게 보인다 — 3000만 개를 1024² 에
-    // 뿌리면 칸당 28개라 구조가 죄다 번진다(2026-08-14 실측). 칸당 대여섯 개가 되도록 올린다.
-    // 4096 은 고립 경계에서 패딩이 8192² 라 VRAM 을 몇 GB 더 먹으므로 여기서는 쓰지 않는다.
-    int g = (cfg.particleCount >= 5000000) ? 2048 : 1024;
+    // **3D 라 한 변을 하나 올릴 때마다 칸이 여덟 배가 된다.** 2D 시절에는 1024 와 2048 을
+    // 오갔지만 여기서는 64~256 이 실제 범위다. 칸당 알갱이가 대여섯이 되도록 잡는다 —
+    // 128³ 은 200만 칸이라 200만 알갱이면 칸당 하나 남짓이다.
+    // 아래로는 128 밑으로 내려가지 않는다. 64³ 이면 한 칸이 0.0156 이라 원반 두께(0.012)가
+    // 한 칸보다 얇아 z 방향이 아예 표현되지 않는다 — 3D 로 옮긴 의미가 사라진다.
+    int g = (cfg.particleCount >= 4000000) ? 256 : 128;
 
-    // 알갱이끼리 부딪히게 할 장면이면 격자를 한 단계 더 올려 본다.
-    // 알갱이 반지름이 칸의 절반이라, 칸이 크면 알갱이도 커져 금세 판을 가득 채운다 —
-    // 100만 개는 1024² 에서 이미 한도(약 80만)를 넘어 접촉이 아예 안 켜진다.
-    if (cfg.contactEnabled && !ContactFitsCount(cfg.particleCount, g)) g = 2048;
+    // 알갱이끼리 부딪히게 할 장면이면 격자를 한 단계 올려 본다.
+    // 알갱이 반지름이 칸의 절반이라, 칸이 크면 알갱이도 커져 금세 판을 가득 채운다.
+    if (cfg.contactEnabled && !ContactFitsCount(cfg.particleCount, g) && g < 256) g *= 2;
+
+    // 코어가 아는 상한을 넘지 않는다. 고립 경계는 패딩 때문에 실제로 여덟 배를 잡는다.
+    const int cap = Sim::maxGridSize(cfg.boundary);
+    if (g > cap) g = cap;
     cfg.gridSize = g;
 
     // 소프트닝은 「칸 몇 개」 단위라, 격자를 올리면 칸이 작아진 만큼 실제 길이가 짧아진다.
-    // 그대로 두면 가까운 거리의 힘이 두 배가 되어 처음 켜자마자 알갱이가 튀어 나간다
-    // (2026-08-13 실측: 초속 80까지 올라 원반이 부풀었다). 격자에 비례해 올려 길이를 지킨다.
-    cfg.softeningCells = 3.0f * ((float)cfg.gridSize / 1024.0f);
+    // 그대로 두면 가까운 거리의 힘이 커져 처음 켜자마자 알갱이가 튀어 나간다.
+    // 격자에 비례해 올려 길이를 지킨다(기준은 128³).
+    cfg.softeningCells = 3.0f * ((float)cfg.gridSize / 128.0f);
 }
 
 bool ContactFitsCount(int particleCount, int gridSize) {
@@ -238,7 +249,13 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     // 무너져 생기는 쪽은 알갱이끼리 부딪히게 해 두었을 때만 뜻이 있다. 버티는 힘이 있어야
     // 「중력이 그것을 이겼다」는 말이 성립하기 때문이다. 그래서 접촉과 함께 켜고 끈다.
     cfg.blackHoleEnabled = (preset == Preset::BlackHole);
-    cfg.collapseEnabled  = (preset != Preset::BlackHole);
+    // 3D 로 오면서 기본을 끔으로 돌렸다.
+    //
+    // 밀도의 대비가 2D 와 완전히 다르다. 원반은 위아래로 얇아(두께가 지름의 1/50) 그 칸들의
+    // 밀도가 평균의 백몇십 배로 뜬다 — 아무것도 무너지지 않았는데도 그렇다. 2D 문턱을 그대로
+    // 쓰면 판을 열자마자 블랙홀이 생긴다(2026-08-14 실측). 3D 에 맞는 문턱을 실측으로 정하기
+    // 전까지는 사용자가 설정에서 켜는 것으로 둔다.
+    cfg.collapseEnabled  = false;
 
     // 보이지 않는 무게는 은하 장면에서만 켠다.
     //  · 은하 둘 — 판 한가운데 하나를 두어 둘이 그 둘레를 돌게 한다(은하군이 그렇다)

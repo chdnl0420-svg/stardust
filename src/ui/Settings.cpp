@@ -464,12 +464,15 @@ void TabPerf(App& app) {
     snprintf(note, sizeof(note), "이 카드는 %d만까지 올릴 수 있다 \xE2\x80\x94 올리면 다시 시작해야 한다.", hardMan);
     UnderNote(note);
 
-    int g = (app.cfg.gridSize <= 512) ? 0 : (app.cfg.gridSize <= 1024) ? 1 : 2;
-    const char* grids[3] = { "512\xC2\xB2", "1024\xC2\xB2", "2048\xC2\xB2" };
-    if (Segmented("grid", grids, 3, &g, nullptr, 146.0f, "계산 격자"))
-        app.cfg.gridSize = (g == 0) ? 512 : (g == 1) ? 1024 : 2048;
+    // 3D 라 한 변을 하나 올릴 때마다 칸이 여덟 배가 된다. 고를 수 있는 값이 훨씬 낮다.
+    int g = (app.cfg.gridSize <= 64) ? 0 : (app.cfg.gridSize <= 128) ? 1 : 2;
+    const char* grids[3] = { "64\xC2\xB3", "128\xC2\xB3", "256\xC2\xB3" };
+    const int gcap = Sim::maxGridSize(app.cfg.boundary);
+    const bool canGrid[3] = { true, gcap >= 128, gcap >= 256 };
+    if (Segmented("grid", grids, 3, &g, canGrid, 146.0f, "계산 격자"))
+        app.cfg.gridSize = (g == 0) ? 64 : (g == 1) ? 128 : 256;
     ImGui::SameLine();
-    SideNote("클수록 세밀하고 느리다");
+    SideNote("한 변이다 — 하나 올리면 칸이 여덟 배");
 
     int cap = app.ui.frameCap;
     const char* caps[3] = { "화면에 맞춤", "60", "무제한" };
