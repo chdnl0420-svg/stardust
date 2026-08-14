@@ -97,16 +97,47 @@ __device__ __forceinline__ int gidx3(int x, int y, int z, int G, int S, int peri
 // 초기 배치
 // ---------------------------------------------------------------------------
 
-// 나선 은하의 한 점(원반 면 위). 로그 나선을 쓴다 — 실제 은하의 팔이 그 모양이다.
-// 반지름이 커질수록 각이 로그로 밀리고, 팔 둘을 반 바퀴 어긋나게 둔다.
-__device__ __forceinline__ float2 spiralPoint(float R, float u1, float u2, float u3) {
-    const float t = 0.08f + 0.92f * sqrtf(u1);
-    const float r = R * t;
-    const float arm = (u3 < 0.5f) ? 0.f : 3.14159265f;
-    const float th = arm + 3.2f * __logf(t + 0.12f);
-    const float spread = 0.85f * (1.0f - t) + 0.16f;
-    const float g = (u2 + rnd01((unsigned)(u1 * 65536.0f) * 7919u + 13u) - 1.0f);
-    return make_float2(r * __cosf(th + g * spread), r * __sinf(th + g * spread));
+// 나선 은하의 원반 한 점.
+//
+// 은하는 「팔만 있는」 것이 아니다. 원반 전체에 별이 깔려 있고, 나선팔은 그 위에 얹힌
+// 밀도 파동이라 팔이 배경의 두 배쯤 진할 뿐이다. 팔 위에만 점을 찍으면 팔 사이가 텅 비어
+// 실제 사진과 전혀 달라 보인다 — 전에 그렇게 만들어서 국수 두 가닥처럼 나왔다.
+//
+// 그래서 세 가지를 겹친다.
+//
+//  1) 반지름 — 지수분포에서 뽑는다. 실제 원반의 표면 밀도가 exp(-r/h) 이고,
+//     h(스케일 길이)는 눈에 보이는 반지름의 1/3 쯤이다.
+//
+//  2) 각도 — 균등하게 뽑은 각을 팔 쪽으로 당긴다. 당기는 양을 -(A/m)·sin(m(θ-ψ)) 로 두면
+//     밀도가 1 + A·cos(m(θ-ψ)) 가 된다(변환의 야코비안이 그렇게 나온다). 팔은 두 개(m=2).
+//     ψ 는 그 반지름에서 팔이 지나는 각이고, 로그 나선이라 ln(r) 에 비례한다.
+//     실제 은하의 감김각은 10~25도다 — 여기서는 18도를 쓴다.
+//
+//  3) 두께 — 안쪽이 얇고 바깥으로 갈수록 두껍다. 실제 원반이 나팔처럼 벌어진다.
+__device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s) {
+    const float u1 = rnd01(s), u2 = rnd01(s * 3u + 1u), u4 = rnd01(s * 13u + 7u);
+
+    // 반지름 — 표면 밀도가 exp(-r/h) 라도, **그 반지름에 있는 별의 수**는 원둘레가 곱해져
+    // r·exp(-r/h) 다. 지수분포를 그대로 쓰면 중심에 과하게 몰려 팔이 안 보인다(실측).
+    // r·exp(-r/h) 는 지수 둘의 합이라, 균등난수 두 개의 로그를 더하면 그 분포가 나온다.
+    const float h = R * 0.28f;                       // 스케일 길이
+    float r = -h * (__logf(fmaxf(u1, 1e-6f)) + __logf(fmaxf(u4, 1e-6f)));
+    if (r > R * 1.8f) r = R * 1.8f;                  // 아주 먼 꼬리는 자른다
+    r = fmaxf(r, R * 0.015f);
+
+    const float tanI = 0.325f;                       // tan(18°)
+    const float psi = __logf(r / (R * 0.06f)) / tanI;
+
+    const float th0 = u2 * 6.2831853f;
+    // 팔의 진하기. 1 에 가까울수록 팔과 그 사이의 대비가 크다.
+    // 안쪽은 팽대부가 덮으므로 팔이 시작되는 자리부터 진해지고, 아주 바깥에서 다시 흐려진다.
+    const float rn = r / R;
+    const float A = 0.95f * __expf(-(rn - 0.35f) * (rn - 0.35f) / 0.45f);
+    const float th = th0 - (A * 0.5f) * __sinf(2.0f * (th0 - psi));
+
+    const float sigma = thickness * (0.6f + 0.9f * r / R);
+    const float z = rndNormal(s ^ 0x2545F491u) * sigma;
+    return make_float3(r * __cosf(th), r * __sinf(th), z);
 }
 
 // 팽대부의 한 점 — 가운데가 빽빽한 공. r = R·u² 로 중심에 몰아 넣는다.
@@ -137,10 +168,8 @@ __global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
             const float3 b = bulgePoint(bulgeR, s ^ 0x51ED2701u);
             x = 0.5f + b.x; y = 0.5f + b.y; z = 0.5f + b.z;
         } else {
-            const float2 p = spiralPoint(R, u1, u2, rnd01(s * 11u + 3u));
-            x = 0.5f + p.x; y = 0.5f + p.y;
-            // 원반은 얇다. 두께를 정규분포로 주면 가장자리가 흐릿하게 사그라든다.
-            z = 0.5f + rndNormal(s ^ 0x2545F491u) * thickness;
+            const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
+            x = 0.5f + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
         }
     } else if (preset == 1) {                    // 은하 충돌 — 나선 둘이 양옆에서
         const int side = (i & 1);
@@ -150,9 +179,8 @@ __global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
             const float3 b = bulgePoint(bulgeR * 0.8f, s ^ 0x51ED2701u);
             x = cx + b.x; y = 0.5f + b.y; z = 0.5f + b.z;
         } else {
-            const float2 p = spiralPoint(R, u1, u2, rnd01(s * 11u + 3u));
-            x = cx + p.x; y = 0.5f + p.y;
-            z = 0.5f + rndNormal(s ^ 0x2545F491u) * thickness;
+            const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
+            x = cx + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
         }
     } else if (preset == 2) {                    // 우주 거미줄 — 공간 전체에 고르게 + 잔물결
         x = u1; y = u2; z = u3;
@@ -546,6 +574,46 @@ __global__ void kProjectXY(const float* grid3, float* out2, int G, int S) {
     atomicAdd(&out2[y * G + x], grid3[(z * S + y) * S + x]);
 }
 
+// 속도 분산 — 은하에서 「온도」에 해당하는 값.
+//
+// 별들이 나란히 돌면 차가운 것이고, 제각각 움직이면 뜨거운 것이다. 그 무질서한 속도가
+// 원반이 조각나지 않게 버티는 힘이라, 실제로 온도와 같은 자리에 선다.
+//
+// 시선 방향(z)으로 합쳐 보므로 화면에는 「그 자리에서 별들이 얼마나 흩어져 움직이나」가 뜬다.
+// 두 격자에 나눠 쌓고 나중에 나눈다 — 합만으로는 알갱이가 많은 곳이 무조건 뜨거워 보인다.
+//
+// 비용: N 스레드 × 4 atomicAdd(2D 라 8칸이 아니라 4칸이다). N=100만이면 400만 회.
+__global__ void kScatterDispersion(const float4* pos, const float4* vel, int n, int G,
+                                   float* num, float* den) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+    const float4 v = vel[i];
+    const float v2 = v.x * v.x + v.y * v.y + v.z * v.z;
+
+    const float gx = p.x * G - 0.5f, gy = p.y * G - 0.5f;
+    const int ix = (int)floorf(gx), iy = (int)floorf(gy);
+    const float fx = gx - ix, fy = gy - iy;
+    for (int k = 0; k < 4; ++k) {
+        const int ox = k & 1, oy = (k >> 1) & 1;
+        const int cx = min(max(ix + ox, 0), G - 1);
+        const int cy = min(max(iy + oy, 0), G - 1);
+        const float w = (ox ? fx : 1.f - fx) * (oy ? fy : 1.f - fy);
+        atomicAdd(&num[cy * G + cx], w * v2);
+        atomicAdd(&den[cy * G + cx], w);
+    }
+}
+
+// 합을 밀도로 나눠 평균으로 만든다. 빈 칸은 0 으로 둔다.
+__global__ void kDivideInto(const float* num, const float* den, float* out, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float d = den[i];
+    // 속도 제곱의 평균이라 제곱근을 씌워 「속도」 단위로 돌려놓는다 — 그래야 색의 폭이 고르다.
+    out[i] = (d > 1e-6f) ? sqrtf(fmaxf(num[i] / d, 0.f)) : 0.f;
+}
+
 // ---------------------------------------------------------------------------
 // 측정
 // ---------------------------------------------------------------------------
@@ -618,8 +686,8 @@ __global__ void kFillShape(float4* pos, float4* vel, float* temp, int from, int 
     float temp0 = 0.02f;
 
     if (kind == 0) {                       // 은하 — 도는 원반
-        const float2 p = spiralPoint(R, u1, u2, u3);
-        x = cx + p.x; y = cy + p.y;
+        const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
+        x = cx + p.x; y = cy + p.y; z = 0.5f + p.z;
     } else if (kind == 1) {                // 태양 — 가운데로 갈수록 빽빽하고 뜨겁다
         const float3 b = bulgePoint(R, s);
         x = cx + b.x; y = cy + b.y; z = 0.5f + b.z;
@@ -719,6 +787,7 @@ struct Sim::Impl {
     float  *rho = nullptr;           // 밀도(패딩 포함) S³
     float  *pot = nullptr;           // 퍼텐셜(패딩 포함) S³
     float  *proj = nullptr;          // 화면에 넘길 2D 투영 G²
+    float  *projA = nullptr, *projB = nullptr;   // 속도 분산을 구할 때 쓰는 두 격자 G²
     float  *accMag = nullptr;        // 궤도 속도용 N
 
     cufftComplex *specRho = nullptr, *specGreen = nullptr;
@@ -786,7 +855,7 @@ void Sim::Impl::freeAll() {
     F((void*&)pos); F((void*&)vel); F((void*&)posTmp); F((void*&)velTmp);
     F((void*&)temp); F((void*&)tempTmp);
     F((void*&)accG); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
-    F((void*&)proj); F((void*&)accMag);
+    F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)accMag);
     F((void*&)specRho); F((void*&)specGreen);
     F((void*&)keys); F((void*&)order); F((void*&)cellStart); F((void*&)cellEnd);
     F((void*&)flag); F((void*&)scan);
@@ -815,6 +884,8 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&rho, sizeof(float) * cells));
     CK(cudaMalloc(&pot, sizeof(float) * cells));
     CK(cudaMalloc(&proj, sizeof(float) * (size_t)G * G));
+    CK(cudaMalloc(&projA, sizeof(float) * (size_t)G * G));
+    CK(cudaMalloc(&projB, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&specRho, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&specGreen, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&keys, sizeof(int) * N));
@@ -1259,13 +1330,28 @@ double Sim::measureForceErrorVsDirect(int, int, float) { return 0.0; }
 
 const float* Sim::densityDevicePtr() const { return impl_->rho; }
 
-// 화면은 위에서 내려다본다. 3D 밀도를 z 로 합쳐 2D 로 투영해 넘긴다.
-const float* Sim::fieldDevicePtr(Field) {
+// 화면은 위에서 내려다본다. 3D 값을 z 로 합쳐 2D 로 투영해 넘긴다.
+const float* Sim::fieldDevicePtr(Field field) {
     Impl& d = *impl_;
     if (g_failed) return d.proj;
     const int G = d.allocG;
-    kClearF<<<(G * G + 255) / 256, 256>>>(d.proj, G * G);
-    kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.proj, G, d.stride());
+    const int cells = G * G;
+    const int blocks = (cells + 255) / 256;
+
+    if (field == Field::Density) {
+        kClearF<<<blocks, 256>>>(d.proj, cells);
+        kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.proj, G, d.stride());
+        CK(cudaGetLastError());
+        return d.proj;
+    }
+
+    // 속도 분산(=은하의 온도)과 속력은 알갱이에서 바로 뿌린다.
+    // 격자에는 속도가 없으므로 3D 격자를 거치지 않고 화면 격자에 곧장 쌓는다.
+    kClearF<<<blocks, 256>>>(d.projA, cells);
+    kClearF<<<blocks, 256>>>(d.projB, cells);
+    kScatterDispersion<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, G,
+                                                        d.projA, d.projB);
+    kDivideInto<<<blocks, 256>>>(d.projA, d.projB, d.proj, cells);
     CK(cudaGetLastError());
     return d.proj;
 }

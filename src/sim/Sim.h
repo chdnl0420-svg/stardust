@@ -268,7 +268,9 @@ public:
     BlackHoleState blackHole() const;
 
     // 화면에 색을 입힐 때 무엇을 기준으로 삼을지.
-    enum class Field { Density, Temperature, Speed };
+    // Dispersion 은 속도 분산 — 은하에서 「온도」에 해당한다.
+    // 별들이 나란히 돌면 차갑고, 제각각 움직이면 뜨겁다.
+    enum class Field { Density, Dispersion, Speed };
 
     // 렌더가 읽어 갈 격자(디바이스 포인터). gridSize()² 개의 float.
     // 온도·속도는 밀도로 가중 평균한 값이라 빈 칸은 0 이다.

@@ -320,7 +320,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
 
         if (wantField) {
             // 밀도 필드 — 색 기준에 맞는 격자를 받아 화면으로 샘플링한다.
-            const Sim::Field f = (view.colorBy == ColorBy::Temperature) ? Sim::Field::Temperature
+            const Sim::Field f = (view.colorBy == ColorBy::Dispersion) ? Sim::Field::Dispersion
                                : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
                                                                         : Sim::Field::Density;
             const float* grid = app.sim.fieldDevicePtr(f);

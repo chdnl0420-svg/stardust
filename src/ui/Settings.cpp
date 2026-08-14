@@ -400,8 +400,11 @@ void TabLook(App& app) {
     if (ColorCard("c0", "밀도", astro, app.look == App::Look::Density, "기본")) {
         app.look = App::Look::Density; ApplyLook(app);
     }
-    if (ColorCard("c1", "온도", thermal, app.look == App::Look::Temperature, nullptr)) {
-        app.look = App::Look::Temperature; ApplyLook(app);
+    // 은하에서 「온도」란 별들이 얼마나 제각각 움직이는가다. 그 말이 더 정확하고,
+    // 실제로 화면에 뜨는 것도 그것이다.
+    if (ColorCard("c1", "움직임 흩어짐", thermal, app.look == App::Look::Dispersion,
+                  "은하의 온도")) {
+        app.look = App::Look::Dispersion; ApplyLook(app);
     }
     // 속도로 칠하는 것은 점 모드에서만 뜻이 있다. 밀도 격자에는 속도가 없다.
     if (ColorCard("c2", "속도", speed, app.view.colorBy == ColorBy::Speed,

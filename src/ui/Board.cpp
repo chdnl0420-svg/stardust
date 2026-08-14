@@ -744,8 +744,8 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.69f, 0.40f, 0.34f));
                     ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 0.77f, 0.54f, 1.00f));
                 }
-                if (ImGui::Button(i == 0 ? "밀도" : "온도", ImVec2(120, 0))) {
-                    app.look = (i == 0) ? App::Look::Density : App::Look::Temperature;
+                if (ImGui::Button(i == 0 ? "밀도" : "움직임", ImVec2(120, 0))) {
+                    app.look = (i == 0) ? App::Look::Density : App::Look::Dispersion;
                     ApplyLook(app);
                 }
                 if (sel) ImGui::PopStyleColor(3);

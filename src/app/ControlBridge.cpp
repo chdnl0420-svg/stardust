@@ -180,7 +180,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
         app.running ? 1 : 0, app.sim.simTime(), app.sim.activeCount(), app.sim.starCount(),
         app.view.mode == RenderMode::Points ? "points" : "field",
-        app.view.colorBy == ColorBy::Temperature ? "temperature"
+        app.view.colorBy == ColorBy::Dispersion ? "dispersion"
             : app.view.colorBy == ColorBy::Speed ? "speed" : "density",
         app.view.cmap == ColorMap::Gray ? "gray"
             : app.view.cmap == ColorMap::Thermal ? "thermal" : "astro",
@@ -332,8 +332,9 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
                                                            : RenderMode::DensityField;
         if (has(kv, "colorBy")) {
             const std::string& c = kv["colorBy"];
-            app.view.colorBy = (c == "temperature") ? ColorBy::Temperature
-                             : (c == "speed")       ? ColorBy::Speed : ColorBy::Density;
+            // "temperature" 도 받아 준다 — 밖에서 부르던 이름이라 그대로 두면 조용히 무시된다.
+            app.view.colorBy = (c == "dispersion" || c == "temperature") ? ColorBy::Dispersion
+                             : (c == "speed")     ? ColorBy::Speed : ColorBy::Density;
         }
         if (has(kv, "colormap")) {
             const std::string& c = kv["colormap"];

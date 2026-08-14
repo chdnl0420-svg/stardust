@@ -211,13 +211,11 @@ bool ContactFitsCount(int particleCount, int gridSize) {
 }
 
 void ApplyLook(App& app) {
-    // 사용자가 고르는 것은 「밀도로 볼까 온도로 볼까」 하나뿐이다.
-    // 색 기준·컬러맵·온도 추적은 그 선택에 딸려 오는 것이라 여기서 함께 맞춘다 —
-    // 따로 두면 온도로 바꿔 놓고 온도 추적이 꺼져 있어 화면이 새까맣게 보이는 일이 생긴다.
-    if (app.look == App::Look::Temperature) {
-        app.view.colorBy = ColorBy::Temperature;
+    // 사용자가 고르는 것은 「밀도로 볼까 움직임으로 볼까」 하나뿐이다.
+    // 색 기준과 색 배열은 그 선택에 딸려 오는 것이라 여기서 함께 맞춘다.
+    if (app.look == App::Look::Dispersion) {
+        app.view.colorBy = ColorBy::Dispersion;
         app.view.cmap    = ColorMap::Thermal;
-        app.cfg.temperatureEnabled = true;   // 온도를 안 재면 보여줄 값이 없다
         app.view.brightness = app.brightTemp;
         app.view.gamma      = app.gammaTemp;
     } else {
@@ -229,9 +227,9 @@ void ApplyLook(App& app) {
 }
 
 void RememberLook(App& app) {
-    // 슬라이더로 방금 맞춘 값을 지금 보고 있는 쪽에 담아 둔다. 이게 없으면 밀도↔온도를
+    // 슬라이더로 방금 맞춘 값을 지금 보고 있는 쪽에 담아 둔다. 이게 없으면 밀도↔움직임을
     // 오갈 때마다 ApplyLook 이 예전 값으로 되돌려 방금 맞춘 것이 사라진다.
-    if (app.look == App::Look::Temperature) {
+    if (app.look == App::Look::Dispersion) {
         app.brightTemp = app.view.brightness;
         app.gammaTemp  = app.view.gamma;
     } else {
