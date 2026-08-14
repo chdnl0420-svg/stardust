@@ -768,88 +768,10 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
         const float wRec  = ImGui::CalcTextSize(recLabel).x + 40.0f;
         ImGui::SameLine(right - wSave - wRec - 36.0f - 12.0f);
 
-        // 톱니 — 시안에 없던 나머지 값들을 여기 모았다. 자주 만지지 않는 것들이라
+        // 톱니 — 나머지 값 전부를 한가운데 큰 판으로 연다. 자주 만지지 않는 것들이라
         // 막대에 상주시키면 「평소엔 우주뿐」이 무너진다.
-        if (ToolButton("settings", 4, false)) ImGui::OpenPopup("##setpop");
-        const ImVec2 aSet(ImGui::GetItemRectMax().x, ImGui::GetItemRectMin().y);
-        Tip("나머지 설정 — 최대 개수, 알갱이끼리 부딪힘, 보이지 않는 무게");
-        AnchorAbove(aSet, 1.0f);
-        // 팝업은 우주 위에 뜨므로 배경이 비치면 글자가 묻힌다. 불투명하게 깔고 여백을 준다.
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.055f, 0.05f, 0.075f, 0.985f));
-        ImGui::PushStyleColor(ImGuiCol_Border,  ImVec4(1.0f, 0.69f, 0.40f, 0.35f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(8, 10));
-        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 10.0f);
-        if (ImGui::BeginPopup("##setpop")) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.545f, 0.525f, 0.612f, 1.0f));
-            ImGui::TextUnformatted("알갱이");
-            ImGui::PopStyleColor();
-            int maxMan = app.cfg.particleCount / 10000; if (maxMan < 1) maxMan = 1;
-            int hardMan = app.hardMaxParticles / 10000; if (hardMan < 1) hardMan = 1;
-            if (maxMan > hardMan) maxMan = hardMan;
-            if (SliderRowInt("cap", "최대", &maxMan, 1, hardMan, "%d만", true, 300.0f)) {
-                app.cfg.particleCount = maxMan * 10000;
-                ApplyAutoGrid(app.cfg);
-            }
-            ImGui::TextDisabled("이 그래픽카드 상한 %d만", hardMan);
-            if (app.guardCappedTo > 0) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
-                ImGui::TextWrapped("너무 버거워서 %d 개로 낮췄습니다", app.guardCappedTo);
-                ImGui::PopStyleColor();
-                if (ImGui::SmallButton("확인")) app.guardCappedTo = 0;
-            }
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.545f, 0.525f, 0.612f, 1.0f));
-            ImGui::TextUnformatted("물리");
-            ImGui::PopStyleColor();
-            if (ImGui::Checkbox("알갱이끼리 부딪힘", &app.cfg.contactEnabled))
-                ApplyAutoGrid(app.cfg);
-            ImGui::Checkbox("보이지 않는 무게", &app.cfg.haloEnabled);
-            Tip("암흑물질 헤일로입니다. 실제 은하는 질량의 80~90% 가 여기 있고,\n"
-                "그것이 원반을 감싸 붙잡아 나선팔이 자라게 합니다.\n\n"
-                "끄면 원반이 제 무게만으로 버텨야 해서 조각조각 뭉칩니다.\n"
-                "장면을 바꾸면 그 장면에 맞는 값으로 다시 정해집니다.");
-            ImGui::Checkbox("블랙홀 경계 그리기", &app.showHorizon);
-            Tip("지평선·광자 구면·최소 안정 궤도를 원으로 겹쳐 그립니다.\n"
-                "계산 결과가 아니라 어디서 무슨 일이 일어나는지 알려 주려고 얹는 그림입니다.");
-            if (app.cfg.contactEnabled
-                && !ContactFitsCount(app.cfg.particleCount, app.cfg.gridSize)) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));
-                ImGui::TextWrapped("알갱이가 너무 많아 지금은 꺼져 있습니다");
-                ImGui::PopStyleColor();
-            }
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            const UpdateInfo up = app.updater.status();
-            if (up.available) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.85f, 0.62f, 1.0f));
-                ImGui::Text("새 버전 %s", up.latest.c_str());
-                ImGui::PopStyleColor();
-                if (app.updateBusy) {
-                    ImGui::TextDisabled("받는 중입니다...");
-                } else if (ImGui::Button("받아서 다시 켜기", ImVec2(300, 0))) {
-                    app.updateError.clear();
-                    app.updateBusy = true;
-                    std::string err;
-                    if (!app.updater.applyUpdate(err)) { app.updateError = err; app.updateBusy = false; }
-                }
-            } else {
-                ImGui::TextDisabled("Stardust %s — 최신입니다", STARDUST_VERSION);
-            }
-            if (!app.updateError.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.35f, 0.30f, 1.0f));
-                ImGui::TextWrapped("업데이트 실패 — %s", app.updateError.c_str());
-                ImGui::PopStyleColor();
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::PopStyleVar(4);
-        ImGui::PopStyleColor(2);
-
+        if (ToolButton("settings", 4, app.settingsOpen)) app.settingsOpen = !app.settingsOpen;
+        Tip("설정 — 중력과 시간, 우주의 경계, 보기와 색, 성능, 조작, 저장과 녹화");
         ImGui::SameLine();
         {
             const ImVec2 p = ImGui::GetCursorScreenPos();

@@ -4,6 +4,12 @@
 #include <cstring>
 #include <vector>
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <objidl.h>
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
+
 namespace {
 
 unsigned CrcTable[256];
@@ -96,4 +102,63 @@ bool WritePngRGBA(const std::string& path, const unsigned char* rgba, int w, int
     const size_t wrote = fwrite(png.data(), 1, png.size(), f);
     const bool closedOk = (fclose(f) == 0);
     return wrote == png.size() && closedOk;
+}
+
+namespace {
+
+// 이름으로 인코더를 찾는다. GDI+ 는 CLSID 로만 저장을 받는데 그 값을 코드에 박아 두면
+// 무엇을 가리키는지 알 수 없고, 시스템이 다르면 어긋날 수도 있다.
+bool FindEncoder(const wchar_t* mime, CLSID* out) {
+    UINT n = 0, bytes = 0;
+    if (Gdiplus::GetImageEncodersSize(&n, &bytes) != Gdiplus::Ok || bytes == 0) return false;
+    std::vector<unsigned char> buf(bytes);
+    Gdiplus::ImageCodecInfo* info = (Gdiplus::ImageCodecInfo*)buf.data();
+    if (Gdiplus::GetImageEncoders(n, bytes, info) != Gdiplus::Ok) return false;
+    for (UINT i = 0; i < n; ++i)
+        if (wcscmp(info[i].MimeType, mime) == 0) { *out = info[i].Clsid; return true; }
+    return false;
+}
+
+} // namespace
+
+bool WriteJpgRGBA(const std::string& path, const unsigned char* rgba, int w, int h, int quality) {
+    if (!rgba || w <= 0 || h <= 0) return false;
+    if (quality < 1) quality = 1;
+    if (quality > 100) quality = 100;
+
+    // GDI+ 는 쓰기 직전에 켜고 끝나면 끈다. 앱이 도는 내내 켜 둘 만한 것이 아니고,
+    // 저장은 사용자가 누를 때만 일어난다.
+    Gdiplus::GdiplusStartupInput si;
+    ULONG_PTR token = 0;
+    if (Gdiplus::GdiplusStartup(&token, &si, nullptr) != Gdiplus::Ok) return false;
+
+    bool ok = false;
+    {
+        // GDI+ 의 32bppARGB 는 메모리에서 BGRA 순서다. 그대로 넘기면 빨강과 파랑이 바뀐다.
+        std::vector<unsigned char> bgra((size_t)w * h * 4);
+        for (size_t i = 0, n = (size_t)w * h; i < n; ++i) {
+            bgra[i * 4 + 0] = rgba[i * 4 + 2];
+            bgra[i * 4 + 1] = rgba[i * 4 + 1];
+            bgra[i * 4 + 2] = rgba[i * 4 + 0];
+            bgra[i * 4 + 3] = 255;
+        }
+        Gdiplus::Bitmap bmp(w, h, w * 4, PixelFormat32bppARGB, bgra.data());
+        CLSID clsid{};
+        if (bmp.GetLastStatus() == Gdiplus::Ok && FindEncoder(L"image/jpeg", &clsid)) {
+            ULONG q = (ULONG)quality;
+            Gdiplus::EncoderParameters params;
+            params.Count = 1;
+            params.Parameter[0].Guid = Gdiplus::EncoderQuality;
+            params.Parameter[0].Type = Gdiplus::EncoderParameterValueTypeLong;
+            params.Parameter[0].NumberOfValues = 1;
+            params.Parameter[0].Value = &q;
+
+            const int need = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+            std::vector<wchar_t> wpath(need > 0 ? need : 1, 0);
+            if (need > 0) MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), need);
+            ok = (bmp.Save(wpath.data(), &clsid, &params) == Gdiplus::Ok);
+        }
+    }
+    Gdiplus::GdiplusShutdown(token);
+    return ok;
 }

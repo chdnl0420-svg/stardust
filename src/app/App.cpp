@@ -40,6 +40,10 @@ void App::init() {
 
     sim.init(cfg);
 
+    // 설정 화면 왼쪽 아래에 적을 「이 그림을 그리는 카드」. 한 번 물어 담아 둔다.
+    deviceName    = Sim::deviceName();
+    driverVersion = Sim::deviceDriver();
+
     // 새 버전이 나왔는지 배포 저장소에 물어본다. 다른 스레드에서 도므로 창이 뜨는 것을 막지 않는다.
     updater.startCheck();
 }

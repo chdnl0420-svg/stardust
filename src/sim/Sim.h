@@ -186,6 +186,8 @@ public:
 
     static bool        deviceAvailable();
     static std::string deviceName();
+    // 이 드라이버가 받아 주는 CUDA 판("CUDA 13.3"). 못 읽으면 빈 문자열.
+    static std::string deviceDriver();
     static size_t      deviceFreeBytes();
     // 이 카드의 멀티프로세서 수. 감당할 수 있는 알갱이 수를 어림하는 데 쓴다(못 읽으면 0).
     static int         deviceMultiProcessors();

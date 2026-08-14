@@ -1229,6 +1229,15 @@ std::string Sim::deviceName() {
     if (cudaGetDeviceProperties(&p, 0) != cudaSuccess) return "unknown";
     return p.name;
 }
+std::string Sim::deviceDriver() {
+    // NVIDIA 드라이버 번호(555.99 같은 것)는 여기서 알 수 없다 — 그건 NVML 이 준다.
+    // 대신 그 드라이버가 지원하는 CUDA 판을 적는다. 「무엇으로 그리고 있나」에는 그것으로 족하다.
+    int v = 0;
+    if (cudaDriverGetVersion(&v) != cudaSuccess || v <= 0) return "";
+    char buf[32];
+    snprintf(buf, sizeof(buf), "CUDA %d.%d", v / 1000, (v % 1000) / 10);
+    return buf;
+}
 bool Sim::failed() { return g_failed; }
 std::string Sim::failMessage() { return g_failMsg; }
 

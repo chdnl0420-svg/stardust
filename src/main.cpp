@@ -16,6 +16,7 @@
 #include "gfx/RenderField.h"
 #include "ui/Board.h"
 #include "ui/Hud.h"
+#include "ui/Settings.h"
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -38,14 +39,6 @@ POINT g_dragLast{};
 bool  g_painting = false;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    // 창 제목을 다루는 메시지는 ImGui 를 거치지 않고 곧장 기본 처리로 넘긴다.
-    //
-    // 아래 한 줄은 ImGui 핸들러가 0 이 아닌 값을 돌려주면 그것으로 처리를 끝낸다(return true).
-    // 그 바람에 제목을 세우고 읽는 메시지가 기본 처리에 닿지 못해, 제목이 첫 글자('S')로
-    // 잘린 채 남았다 — 밖에서 같은 API 로 넣으면 멀쩡히 들어가는 것과 대비된다(2026-08-14 실측).
-    if (msg == WM_SETTEXT || msg == WM_GETTEXT || msg == WM_GETTEXTLENGTH)
-        return DefWindowProcW(hwnd, msg, wp, lp);
-
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
 
     switch (msg) {
@@ -84,9 +77,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 POINT now; GetCursorPos(&now);
                 // 화면 픽셀 이동량을 시뮬레이션 공간 이동량으로 바꾼다.
                 // 짧은 변이 [0,1] 에 대응하므로 그 값으로 나눈다.
-                float unit = (float)(g_w < g_h ? g_w : g_h) * g_app->zoom;
-                g_app->panX += (now.x - g_dragLast.x) / unit;
-                g_app->panY += (now.y - g_dragLast.y) / unit;
+                const float unit = (float)(g_w < g_h ? g_w : g_h) * g_app->zoom;
+                const float s = g_app->ui.dragSensitivity;
+                g_app->panX += (now.x - g_dragLast.x) * s / unit;
+                g_app->panY += (now.y - g_dragLast.y) * s / unit;
                 g_dragLast = now;
             } else if (g_painting && g_app) {
                 float u, v;
@@ -98,15 +92,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSEWHEEL:
             if (g_app && !ImGui::GetIO().WantCaptureMouse) {
                 float d = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
-                g_app->zoom *= (d > 0) ? 1.12f : (1.0f / 1.12f);
+                if (g_app->ui.wheelInverted) d = -d;
+                // 한 칸에 얼마나 확대할지. 설정의 「휠 확대 속도」가 1.0 일 때 12% 다.
+                const float step = 1.0f + 0.15f * g_app->ui.wheelZoomSpeed;
+                g_app->zoom *= (d > 0) ? step : (1.0f / step);
                 if (g_app->zoom < 0.25f)  g_app->zoom = 0.25f;
                 if (g_app->zoom > 64.0f)  g_app->zoom = 64.0f;
             }
             return 0;
 
+        // 창이 뒤로 가면 계산을 멈출 수 있게 상태를 적어 둔다(설정의 「창이 뒤에 있으면 멈추기」).
+        case WM_ACTIVATE:
+            if (g_app) g_app->windowActive = (LOWORD(wp) != WA_INACTIVE);
+            return 0;
+
         case WM_KEYDOWN:
-            if (g_app && wp == VK_SPACE && !ImGui::GetIO().WantCaptureKeyboard)
-                g_app->running = !g_app->running;
+            if (g_app && !ImGui::GetIO().WantCaptureKeyboard) {
+                if (wp == VK_SPACE) g_app->running = !g_app->running;
+                // S 와 Esc 는 아래 프레임 루프의 ImGui 쪽에서 함께 다룬다 —
+                // 설정 창이 떠 있으면 키를 ImGui 가 먼저 잡아 여기까지 오지 않는다.
+            }
             return 0;
 
         case WM_DESTROY:
@@ -203,6 +208,69 @@ void ApplyDarkStyle() {
     c[ImGuiCol_TableBorderLight]     = ImVec4(1.000f, 1.000f, 1.000f, 0.08f);
     c[ImGuiCol_NavCursor]            = accent;
     c[ImGuiCol_DragDropTarget]       = accent;
+}
+
+// 저장할 폴더. 설정에서 고르지 않았으면 실행 파일 옆의 captures 를 쓴다.
+// 없으면 만든다 — 첫 저장에서 「폴더가 없다」로 실패하면 사용자는 이유를 알 수 없다.
+std::string CaptureDir(const App& app) {
+    std::string d = app.ui.saveFolder.empty() ? std::string("captures") : app.ui.saveFolder;
+    CreateDirectoryA(d.c_str(), nullptr);
+    if (!d.empty() && d.back() != '\\' && d.back() != '/') d += '\\';
+    return d;
+}
+
+// 스냅샷·녹화가 걸려 있으면 지금 화면을 집어 파일로 남긴다.
+//
+// 버퍼를 교체하기 **전에** 불러야 한다 — 교체하고 나면 백버퍼 내용이 바뀐다.
+// 부르는 자리가 두 곳인 것은 「녹화에 UI 넣지 않기」 때문이다. 켜져 있으면 판을 그리기 전에,
+// 꺼져 있으면 다 그린 뒤에 집는다.
+void CaptureIfAsked(App& app, int w, int h) {
+    if (!app.snapshotRequested && !app.recording) return;
+    const int every = (app.recordEvery > 0) ? app.recordEvery : 1;
+    const bool takeNow = app.snapshotRequested || (app.frameCounter++ % every == 0);
+    if (!takeNow) return;
+
+    std::vector<unsigned char> px((size_t)w * h * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    // OpenGL 은 아래에서 위로 읽으므로 줄 순서를 뒤집는다
+    std::vector<unsigned char> flipped((size_t)w * h * 4);
+    for (int y = 0; y < h; ++y)
+        memcpy(&flipped[(size_t)y * w * 4], &px[(size_t)(h - 1 - y) * w * 4], (size_t)w * 4);
+
+    const std::string dir = CaptureDir(app);
+    const bool jpg = (app.ui.imageFormat == 1);
+    const bool isSnapshot = app.snapshotRequested;
+    char name[512];
+    if (isSnapshot) {
+        SYSTEMTIME t; GetLocalTime(&t);
+        snprintf(name, sizeof(name), "%ssnap-%02d%02d%02d-%03d.%s",
+                 dir.c_str(), t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, jpg ? "jpg" : "png");
+    } else {
+        // 녹화는 늘 PNG 다. 이어 붙일 그림을 매 장 다시 압축해 흐리게 만들 이유가 없다.
+        snprintf(name, sizeof(name), "%srec-%05d.png", dir.c_str(), app.recordedFrames);
+    }
+
+    // 저장에 성공한 뒤에야 요청을 지우고 프레임 수를 올린다.
+    // 전에는 결과를 안 보고 먼저 세어서, 디스크가 차 저장이 실패해도
+    // "N 프레임 녹화됨"이 그대로 올라가고 실제 파일 수와 어긋났다(round-06 리뷰 P2 #30).
+    const bool saved = (isSnapshot && jpg)
+                     ? WriteJpgRGBA(name, flipped.data(), w, h, 92)
+                     : WritePngRGBA(name, flipped.data(), w, h);
+    if (isSnapshot) {
+        // 실패해도 요청은 소비한다 — 안 그러면 매 프레임 같은 실패를 반복한다.
+        app.snapshotRequested = false;
+        if (!saved) app.lastSaveFailed = true;
+        // 찍혔다는 것을 눈으로 알기 어려우므로 소리로 알린다(켠 사람만).
+        else if (app.ui.shutterSound) MessageBeep(MB_OK);
+    } else if (saved) {
+        ++app.recordedFrames;
+    } else {
+        // 녹화 중 저장이 실패하면 계속 시도해 봐야 같은 결과라 멈춘다.
+        app.recording = false;
+        app.lastSaveFailed = true;
+    }
 }
 
 } // namespace
@@ -312,6 +380,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         }
         if (quit) break;
 
+        // 새 버전을 찾았으면 **스스로** 받아 갈아 끼운다.
+        //
+        // 전에는 설정 팝업에 「새 버전이 있습니다」를 띄우고 누르기를 기다렸다. 그러면 그 팝업을
+        // 열어 보지 않는 한 영영 옛 버전으로 남는다 — 「올라오면 자동으로」가 되려면 여기서 한다.
+        // 시작하고 몇 초 안에 끝나므로 무언가 하던 중에 화면이 사라지는 일은 없다.
+        // 받다 실패하면 조용히 물러나고, 설정 팝업의 버튼이 남아 손으로 다시 시도할 수 있다.
+        if (!app.updateBusy && app.updateError.empty()) {
+            const UpdateInfo up = app.updater.status();
+            if (up.checked && up.available) {
+                app.updateBusy = true;
+                std::string err;
+                if (!app.updater.applyUpdate(err)) { app.updateError = err; app.updateBusy = false; }
+            }
+        }
+
         // 업데이트를 받아 두었으면 여기서 끝낸다. 옆에 남겨 둔 스크립트가 앱이 완전히 끝나기를
         // 기다렸다가 실행 파일을 갈아 끼우고 다시 띄운다 — 돌고 있는 파일은 덮어쓸 수 없다.
         if (app.updater.wantsRestart()) break;
@@ -324,9 +407,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         fpsAccum += dtMs; ++fpsFrames;
         if (fpsAccum > 300.0f) { app.fps = fpsFrames * 1000.0f / fpsAccum; fpsAccum = 0; fpsFrames = 0; }
 
-        app.tick();
+        // 창이 뒤에 있으면 계산을 쉰다. 보고 있지 않은 그림에 카드를 쓸 이유가 없고,
+        // 이 앱은 쉬지 않으면 노트북 배터리와 팬을 그대로 먹는다.
+        if (app.ui.pauseWhenHidden && !app.windowActive) Sleep(30);
+        else app.tick();
 
-        glClearColor(0.f, 0.f, 0.f, 1.f);
+        // 배경 — 순수 검정이 기본이고, 「아주 옅은 보라」는 완전한 검정이 답답한 화면에서 쓴다.
+        if (app.ui.background == 1) glClearColor(0.012f, 0.009f, 0.021f, 1.f);
+        else                        glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         g_field.draw(app, g_w, g_h);
 
@@ -341,10 +429,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
                 app.drawerOpen = !app.drawerOpen;
                 app.shapeDrawerOpen = false;
             }
+            // Esc 는 「지금 열려 있는 것을 닫는다」 하나로 읽힌다. 설정이 떠 있으면 그것부터.
             if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-                app.drawerOpen = false;
-                app.shapeDrawerOpen = false;
+                if (app.settingsOpen) app.settingsOpen = false;
+                else { app.drawerOpen = false; app.shapeDrawerOpen = false; }
             }
+            // S 로 설정을 여닫는다.
+            if (ImGui::IsKeyPressed(ImGuiKey_S, false)) app.settingsOpen = !app.settingsOpen;
             // H 로 막대까지 전부 감춘다(녹화·감상용).
             if (ImGui::IsKeyPressed(ImGuiKey_H, false)) {
                 app.uiHidden = !app.uiHidden;
@@ -377,52 +468,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             DrawSceneDrawer(app, g_w, g_h);
             DrawShapeDrawer(app, g_w, g_h);
             DrawBottomBar(app, g_w, g_h);
+            // 설정은 맨 마지막이다 — 열려 있는 동안은 막대까지 뒤로 물러나야 한다.
+            DrawSettings(app, g_w, g_h);
         }
 
         ImGui::Render();
+
+        // 「녹화에 UI 넣지 않기」가 켜져 있으면 판을 그리기 **전에** 집는다.
+        // 뒤에 집으면 막대와 설정 창이 그대로 영상에 박힌다.
+        const bool grabBeforeUi = app.ui.recordWithoutUi;
+        if (grabBeforeUi) CaptureIfAsked(app, g_w, g_h);
+
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
 
-        // 스냅샷·녹화도 버퍼 교체 전에 지금 프레임을 집는다.
-        if (app.snapshotRequested || app.recording) {
-            const bool takeNow = app.snapshotRequested ||
-                                 (app.frameCounter++ % (app.recordEvery > 0 ? app.recordEvery : 1) == 0);
-            if (takeNow) {
-                CreateDirectoryA("captures", nullptr);
-                std::vector<unsigned char> px((size_t)g_w * g_h * 4);
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                glReadBuffer(GL_BACK);
-                glReadPixels(0, 0, g_w, g_h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-                // OpenGL 은 아래에서 위로 읽으므로 줄 순서를 뒤집는다
-                std::vector<unsigned char> flipped((size_t)g_w * g_h * 4);
-                for (int y = 0; y < g_h; ++y)
-                    memcpy(&flipped[(size_t)y * g_w * 4],
-                           &px[(size_t)(g_h - 1 - y) * g_w * 4], (size_t)g_w * 4);
-                char name[256];
-                const bool isSnapshot = app.snapshotRequested;
-                if (isSnapshot) {
-                    SYSTEMTIME t; GetLocalTime(&t);
-                    snprintf(name, sizeof(name), "captures\\snap-%02d%02d%02d-%03d.png",
-                             t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-                } else {
-                    snprintf(name, sizeof(name), "captures\\rec-%05d.png", app.recordedFrames);
-                }
-                // 저장에 성공한 뒤에야 요청을 지우고 프레임 수를 올린다.
-                // 전에는 결과를 안 보고 먼저 세어서, 디스크가 차 저장이 실패해도
-                // "N 프레임 녹화됨"이 그대로 올라가고 실제 파일 수와 어긋났다(round-06 리뷰 P2 #30).
-                const bool saved = WritePngRGBA(name, flipped.data(), g_w, g_h);
-                if (isSnapshot) {
-                    // 실패해도 요청은 소비한다 — 안 그러면 매 프레임 같은 실패를 반복한다.
-                    app.snapshotRequested = false;
-                    if (!saved) app.lastSaveFailed = true;
-                } else if (saved) {
-                    ++app.recordedFrames;
-                } else {
-                    // 녹화 중 저장이 실패하면 계속 시도해 봐야 같은 결과라 멈춘다.
-                    app.recording = false;
-                    app.lastSaveFailed = true;
-                }
-            }
-        }
+        if (!grabBeforeUi) CaptureIfAsked(app, g_w, g_h);
 
         // 제어 명령은 화면을 다 그린 뒤, 버퍼를 교체하기 전에 처리한다.
         // 그래야 screenshot 이 지금 프레임을 집는다(교체 후엔 백버퍼 내용이 바뀐다).
