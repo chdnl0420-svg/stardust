@@ -12,6 +12,7 @@
 
 #include "app/App.h"
 #include "app/ControlBridge.h"
+#include "app/Prefs.h"
 #include "gfx/GLContext.h"
 #include "gfx/PngWriter.h"
 #include "gfx/RenderField.h"
@@ -371,6 +372,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
     ImGui_ImplOpenGL2_Init();
 
     App app;
+    // 지난번에 맞춰 둔 값을 먼저 읽고 그 값으로 판을 연다. 읽은 뒤에 init 을 부르므로
+    // 카드가 감당 못 할 값이 들어 있어도 거기서 상한에 걸려 잘린다.
+    LoadPrefs(app);
     app.init();
     g_app = &app;
     g_field.init();
@@ -510,7 +514,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             DrawShapeDrawer(app, g_w, g_h);
             DrawBottomBar(app, g_w, g_h);
             // 설정은 맨 마지막이다 — 열려 있는 동안은 막대까지 뒤로 물러나야 한다.
+            const bool wasOpen = app.settingsOpen;
             DrawSettings(app, g_w, g_h);
+            // 설정 창을 닫는 순간 남긴다. 앱이 강제로 끝나도(작업 관리자, 크래시) 그때까지
+            // 맞춰 둔 값은 살아 있어야 한다 — 끝낼 때 한 번만 쓰면 그런 경우에 전부 날아간다.
+            if (wasOpen && !app.settingsOpen) SavePrefs(app);
         }
 
         ImGui::Render();
@@ -581,6 +589,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
 
         g_gl.present();
     }
+
+    // 맞춰 둔 값을 남긴다. 업데이트로 다시 뜨는 경우에도 여기를 지나므로 설정이 이어진다.
+    SavePrefs(app);
 
     g_field.shutdown();
     ImGui_ImplOpenGL2_Shutdown();

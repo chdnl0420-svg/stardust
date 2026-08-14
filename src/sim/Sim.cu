@@ -450,7 +450,8 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
                            int blackHole, float bhGM, float bhRs,
                            float bhX, float bhY, float bhZ, float c2, int* eaten,
                            float haloV2, float haloCore2,
-                           const float4* accContact) {
+                           const float4* accContact,
+                           float waveA, float wavePattern, float wavePitch, float waveTime) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -468,6 +469,37 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
         a.x -= haloV2 * hx / denom;
         a.y -= haloV2 * hy / denom;
         a.z -= haloV2 * hz / denom;
+    }
+
+    // 나선 밀도파 — 팔은 물질이 아니라 회전하는 무늬다.
+    //
+    // 얕은 나선 골 Φ = -A·cos(2(θ - Ωp·t) - (2/tan i)·ln(r/r0)) 를 중력에 더한다.
+    // 별은 골을 지날 때 잠깐 몰렸다가 빠져나가고, 몰린 자리가 팔이 된다. 그 자리는 Ωp 로
+    // 돌기 때문에 원반이 몇 바퀴를 돌아도 무늬가 감기지 않는다 — 이것이 실제 은하의 팔이
+    // 유지되는 방식이다(감김 문제의 답).
+    //
+    // 힘은 -∇Φ 다. 반지름 방향과 각 방향으로 나눠 구한 뒤 xy 로 되돌린다.
+    if (waveA > 0.f) {
+        const float dx = p.x - 0.5f, dy = p.y - 0.5f;
+        const float r2 = dx * dx + dy * dy;
+        const float r = sqrtf(fmaxf(r2, 1e-8f));
+        if (r > 0.01f && r < 0.9f) {
+            const float th = atan2f(dy, dx);
+            const float m = 2.0f;                       // 팔 두 개
+            const float km = m / fmaxf(wavePitch, 1e-3f);
+            const float phase = m * (th - wavePattern * waveTime) - km * __logf(r / 0.06f);
+            // 골의 깊이는 바깥으로 갈수록 사그라든다 — 원반 밖에서까지 끌면 어색하다.
+            const float amp = waveA * __expf(-r / 0.30f) * r;
+            const float s = __sinf(phase), c = __cosf(phase);
+            // Φ = -amp·cos(phase)
+            //   ∂Φ/∂r  = -(∂amp/∂r)·cos + amp·sin·(-km/r)·(-1) → 아래처럼 정리된다
+            //   (1/r)∂Φ/∂θ = amp·sin·m / r
+            const float dPhi_dr  = -amp * (1.0f / r - 1.0f / 0.30f) * c - amp * s * km / r;
+            const float dPhi_rdth = amp * s * m / r;
+            const float ar = -dPhi_dr, at = -dPhi_rdth;
+            a.x += ar * (dx / r) - at * (dy / r);
+            a.y += ar * (dy / r) + at * (dx / r);
+        }
     }
 
     // 블랙홀 — 휘어진 시공간의 최단경로. 슈바르츠실트 해의 운동을 그대로 적분한다.
@@ -1312,7 +1344,9 @@ void Sim::step() {
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
         d.bh.active ? 1 : 0, bhGM, d.bh.rs, d.bh.x, d.bh.y, 0.5f,
         d.cfg.lightSpeedSq, d.eaten, haloV2, haloCore2,
-        d.cfg.contactEnabled ? d.accContact : nullptr);
+        d.cfg.contactEnabled ? d.accContact : nullptr,
+        d.cfg.spiralWaveEnabled ? d.cfg.spiralWaveStrength : 0.f,
+        d.cfg.spiralWavePattern, d.cfg.spiralWavePitch, (float)d.simTime);
     CK(cudaGetLastError());
 
     // 삼킨 만큼 지평선이 자란다.

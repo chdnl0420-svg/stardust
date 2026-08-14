@@ -448,8 +448,10 @@ void DrawShapeDrawer(App& app, int viewW, int viewH) {
                     const float A = 0.95f * expf(-(rn - 0.35f) * (rn - 0.35f) / 0.45f);
                     const float th0 = u2 * 6.2831853f;
                     const float th = th0 - (A * 0.5f) * sinf(2.0f * (th0 - psi));
-                    const float rad = r * rr * 0.62f;
-                    dl->AddCircleFilled(ImVec2(m.x + cosf(th) * rad, m.y + sinf(th) * rad * 0.62f),
+                    // 실제 배치는 원반이라 위에서 보면 원이다. 여기서 y 만 눌러 타원으로
+                    // 그리면 놓아 보고 「사진과 다르다」가 된다.
+                    const float rad = r * rr * 0.56f;
+                    dl->AddCircleFilled(ImVec2(m.x + cosf(th) * rad, m.y + sinf(th) * rad),
                                         1.25f, dot, 4);
                 }
                 break;
