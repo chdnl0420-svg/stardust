@@ -9,7 +9,7 @@
 ; 사용자 폴더에 깐다.
 
 #define AppName    "Stardust"
-#define AppVersion "0.2.0"
+#define AppVersion "0.3.0"
 #define AppExe     "Stardust.exe"
 #define AppPublisher "JustKim"
 
