@@ -154,8 +154,18 @@ __global__ void kPlace(float2* pos, float2* vel, float* temp, int n, int preset,
 
 // 측정한 중력으로 원 궤도 속도를 채운다. v = sqrt(|구심가속도| * r).
 // 중력 세기를 모른 채 속도를 넣으면 원반이 부풀거나 붕괴한다.
+// 원반에 궤도 속도를 넣는다. dispersion 은 그 속도에 섞는 흩어짐의 크기(비율)다.
+//
+// 흩어짐이 왜 필요한가: 모두에게 정확한 원 궤도 속도만 주면 이웃끼리의 상대속도가 0 이라
+// 원반이 국소 중력에 아무 저항도 못 한다. 그러면 나선팔이 자라기 전에 원반이 통째로
+// 조각조각 뭉쳐 버린다(2026-08-14 실측: t=0.2 에 덩어리 여남은 개로 부서졌다).
+//
+// 흩어짐이 그 자리에서 압력 노릇을 해 파편화를 막고, 그 대신 원반 전체를 도는 큰 무늬 —
+// 나선팔 — 이 자란다. 은하 원반이 실제로 그 언저리(Toomre Q ≈ 1~2)에 놓여 있어서
+// 팔이 생기고 유지된다. 너무 작으면 부서지고, 너무 크면 아무 무늬도 안 생긴 채 퍼진다.
 __global__ void kSetOrbit(const float2* accG, const float2* pos, float2* vel,
-                          int n, int G, int periodic, int preset, float fudge) {
+                          int n, int G, int periodic, int preset, float fudge,
+                          float dispersion, float haloV2, float haloCore2) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float2 p = pos[i];
@@ -175,10 +185,25 @@ __global__ void kSetOrbit(const float2* accG, const float2* pos, float2* vel,
     float g = p.x * G;  (void)g;
     int ix = (int)floorf(p.x * G), iy = (int)floorf(p.y * G);
     float2 a = accG[gidx(ix, iy, G, periodic)];
+    // 보이지 않는 무게가 만드는 중력도 함께 센다.
+    // 격자에는 알갱이의 무게만 실려 있어서, 이걸 빠뜨리면 실제보다 약한 중력으로 속도를
+    // 정하게 되고 원반이 처음부터 안쪽으로 무너진다.
+    // 헤일로 중심은 판 한가운데라 은하 중심과 다를 수 있으므로 벡터로 더한 뒤 성분을 뽑는다.
+    if (haloV2 > 0.f) {
+        const float hx = p.x - 0.5f, hy = p.y - 0.5f;
+        const float hd = hx * hx + hy * hy + haloCore2;
+        a.x -= haloV2 * hx / hd;
+        a.y -= haloV2 * hy / hd;
+    }
     float ar = -(a.x * dx + a.y * dy) / r;          // 중심을 향하는 성분(양수면 인력)
     float v = (ar > 0.f) ? sqrtf(ar * r) * fudge : 0.f;
     float2 base = vel[i];
-    vel[i] = make_float2(-dy / r * v + base.x, dx / r * v + base.y);
+    // 흩어짐은 궤도 속도에 비례해 준다 — 안쪽이 빠르니 그만큼 더 흔들려야 균형이 맞는다.
+    // 난수 둘을 더해 종 모양에 가깝게 만든다(고른 난수 하나면 가장자리 값이 지나치게 흔하다).
+    const float g1 = rnd01((unsigned)i * 11u + 101u) + rnd01((unsigned)i * 11u + 103u) - 1.f;
+    const float g2 = rnd01((unsigned)i * 11u + 107u) + rnd01((unsigned)i * 11u + 109u) - 1.f;
+    vel[i] = make_float2(-dy / r * v + g1 * v * dispersion + base.x,
+                          dx / r * v + g2 * v * dispersion + base.y);
 }
 
 __global__ void kClearF(float* g, int n) {
@@ -341,6 +366,8 @@ __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* 
                            int n, int G, float dt, int periodic, int trackTemp,
                            int cooling, float coolRate, float hubble,
                            int blackHole, float bhGM, float bhRs,
+                           float bhX, float bhY, float c2, int* eaten,
+                           float haloV2, float haloCore2,
                            const float2* accContact) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -351,6 +378,19 @@ __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* 
     // 알갱이끼리 부딪혀 생긴 가속도를 격자 중력 위에 얹는다.
     // 격자는 멀리 있는 것끼리의 힘을, 이쪽은 맞닿은 것끼리의 힘을 맡는다.
     if (accContact) { a.x += accContact[i].x; a.y += accContact[i].y; }
+
+    // 보이지 않는 무게가 만드는 중력. 알갱이로 깔지 않고 식으로 바로 더한다 —
+    // 헤일로는 원반보다 훨씬 넓게 퍼져 있어 알갱이로 표현하려면 그 대부분을
+    // 화면 밖에 두어야 하고, 그러면 정작 보고 싶은 원반에 쓸 알갱이가 줄어든다.
+    //
+    // 유사등온구:  a = −v₀² · r⃗ / (r² + rc²)
+    // 바깥으로 갈수록 회전 속도가 v₀ 로 수렴해 회전곡선이 평평해진다.
+    if (haloV2 > 0.f) {
+        const float hx = p.x - 0.5f, hy = p.y - 0.5f;
+        const float denom = hx * hx + hy * hy + haloCore2;
+        a.x -= haloV2 * hx / denom;
+        a.y -= haloV2 * hy / denom;
+    }
 
     // 블랙홀 — 뉴턴 중력이 아니라 휘어진 시공간의 최단경로(측지선)를 따라간다.
     //
@@ -363,18 +403,20 @@ __global__ void kIntegrate(const float2* accG, float2* pos, float2* vel, float* 
     //   · r = 1.5rs 에서 원궤도 속도가 광속으로 발산한다(광자 구면)
     // 셋 다 저절로 나온다 — 따로 넣은 규칙이 아니다.
     //
-    // c² 는 지평선 정의 rs = 2GM/c² 에서 되찾는다. 화면 가운데가 블랙홀 자리다.
+    // 블랙홀의 자리와 세기는 밖에서 넘어온다 — 처음부터 놓인 것일 수도 있고,
+    // 판 어딘가가 무너져 생긴 것일 수도 있다. 둘은 여기서 구별되지 않는다.
+    // 삼킨 알갱이는 개수를 세어 돌려준다(그만큼 블랙홀이 무거워진다).
     if (blackHole) {
-        const float dx = p.x - 0.5f, dy = p.y - 0.5f;
+        const float dx = p.x - bhX, dy = p.y - bhY;
         const float r2 = dx * dx + dy * dy;
         const float r  = sqrtf(fmaxf(r2, 1e-12f));
         if (r < bhRs) {                       // 지평선 안으로 들어갔다 — 다시 나오지 못한다
             pos[i] = make_float2(-1.f, -1.f);
             vel[i] = make_float2(0.f, 0.f);
+            if (eaten) atomicAdd(eaten, 1);
             return;
         }
         const float L    = dx * v.y - dy * v.x;
-        const float c2   = 2.0f * bhGM / fmaxf(bhRs, 1e-6f);
         const float corr = 1.0f + 3.0f * L * L / fmaxf(c2 * r2, 1e-12f);
         const float k    = -bhGM / (r2 * r) * corr;
         a.x += k * dx;  a.y += k * dy;
@@ -503,6 +545,22 @@ __global__ void kContact(const float2* pos, const float2* vel, float2* accOut,
         }
     }
     accOut[i] = a;
+}
+
+// 가장 눌린 칸 하나를 찾는다.
+//
+// 밀도와 그 칸 번호를 64비트 하나에 담아 atomicMax 로 겨룬다 — 위쪽 32비트가 밀도라
+// 그냥 큰 값을 고르면 「가장 빽빽한 칸」이 뽑히고, 아래쪽에 실려 온 번호가 그 자리다.
+// 밀도는 항상 양수라 float 비트를 그대로 정수로 견주어도 순서가 뒤집히지 않는다.
+__global__ void kFindDensestCell(const float* rho, int G, int stride, unsigned long long* best) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= G || y >= G) return;
+    const float d = rho[y * stride + x];
+    if (!(d > 0.f)) return;
+    const unsigned long long packed =
+        ((unsigned long long)__float_as_uint(d) << 32) | (unsigned)(y * G + x);
+    atomicMax(best, packed);
 }
 
 __global__ void kCellKey(const float2* pos, unsigned* key, unsigned* val, int n, int G) {
@@ -831,6 +889,18 @@ struct Sim::Impl {
     int    *cellStart = nullptr, *cellEnd = nullptr;   // 각 G×G
     float2 *accP = nullptr;                            // 알갱이별 접촉 가속도
 
+    // 블랙홀 — 처음부터 놓인 것이거나, 판 어딘가가 무너져 생긴 것이다.
+    BlackHoleState bh;
+    int  *bhEaten = nullptr;                 // 이번 스텝에 지평선이 삼킨 알갱이 수
+    unsigned long long *densest = nullptr;   // 가장 눌린 칸(밀도<<32 | 칸번호)
+
+    // 지평선 반지름을 질량에서 낸다 — rs = 2·G·M / c².
+    // M 은 정규화 질량이라 삼킨 알갱이 수를 전체 수로 나눈 값이다.
+    float horizonOf(float eatenCount) const {
+        const float M = eatenCount / (float)(allocN > 0 ? allocN : 1);
+        return 2.0f * cfg.gravity * M / fmaxf(cfg.lightSpeedSq, 1e-6f);
+    }
+
     int  stride() const { return (cfg.boundary == Boundary::Isolated) ? allocG * 2 : allocG; }
     int  padCells() const { int s = stride(); return s * s; }
     bool periodic() const { return cfg.boundary == Boundary::Periodic; }
@@ -879,6 +949,8 @@ void Sim::Impl::releaseParticles() {
     cudaFree(sortTmp); cudaFree(spdTmp); cudaFree(spdOut);
     cudaFree(alive); cudaFree(selIdx); cudaFree(selNum); cudaFree(selTmp);
     cudaFree(accP); accP = nullptr;
+    cudaFree(bhEaten); cudaFree(densest);
+    bhEaten = nullptr; densest = nullptr; bh = BlackHoleState{};
     cudaFree(isStar); cudaFree(isStar2); cudaFree(starCnt);
     isStar = nullptr; isStar2 = nullptr; starCnt = nullptr; starN = 0;
     pos = vel = pos2 = vel2 = nullptr; temp = temp2 = nullptr;
@@ -1009,6 +1081,10 @@ void Sim::Impl::allocate() {
     CK(cudaMemset(cellEnd,   0, sizeof(int) * allocG * allocG));
     CK(cudaMalloc(&accP, sizeof(float2) * n));
     CK(cudaMemset(accP, 0, sizeof(float2) * n));
+    CK(cudaMalloc(&bhEaten, sizeof(int)));
+    CK(cudaMemset(bhEaten, 0, sizeof(int)));
+    CK(cudaMalloc(&densest, sizeof(unsigned long long)));
+    CK(cudaMemset(densest, 0, sizeof(unsigned long long)));
 
     if (!evA) { cudaEventCreate(&evA); cudaEventCreate(&evB); }
     allocSoft = -1.f;   // 그린함수 재생성 강제
@@ -1088,8 +1164,11 @@ void Sim::Impl::integrateOnce(float dt) {
                                       periodic() ? 1 : 0,
                                       cfg.temperatureEnabled ? 1 : 0,
                                       cfg.coolingEnabled ? 1 : 0, cfg.coolingRate, hub,
-                                      cfg.blackHoleEnabled ? 1 : 0,
-                                      cfg.blackHoleGM, cfg.blackHoleRs,
+                                      bh.active ? 1 : 0,
+                                      cfg.gravity * (bh.mass / (float)(allocN > 0 ? allocN : 1)),
+                                      bh.rs, bh.x, bh.y, cfg.lightSpeedSq, bhEaten,
+                                      cfg.haloEnabled ? cfg.haloSpeed * cfg.haloSpeed : 0.f,
+                                      cfg.haloCore * cfg.haloCore,
                                       (cfg.contactEnabled && contactFits()) ? accP : nullptr);
 }
 
@@ -1267,8 +1346,32 @@ void Sim::reset() {
     const int n = d->allocN, G = d->allocG, S = d->stride();
     d->time = 0.0; d->steps = 0;
 
+    // 블랙홀을 **배치보다 먼저** 세운다.
+    //
+    // 블랙홀 장면의 초기 속도는 그 자리에서 원궤도가 되도록 계산해 넣는데, 그 계산에
+    // 중력 세기가 들어간다. 세기가 질량에서 나오도록 바꾼 뒤에도 배치에는 옛 설정값을
+    // 넘기고 있었다 — 실제보다 백 배 작은 세기로 속도를 넣은 셈이라 원반이 통째로
+    // 중심에 떨어져 판이 비었다(2026-08-14 실측: 1000만 개가 t=1.2 만에 전부 사라졌다).
+    d->bh = BlackHoleState{};
+    if (d->cfg.blackHoleEnabled) {
+        d->bh.active = true;
+        d->bh.x = 0.5f; d->bh.y = 0.5f;
+        // 지평선 크기를 정해 놓고 그것을 만드는 질량을 역산한다(rs = 2GM/c² 의 역).
+        // 세기를 따로 적어 두면 그 값과 지평선이 어긋나 — 화면에 보이는 원과 물질이 느끼는
+        // 힘이 다른 것을 가리키게 된다. 크기 하나만 정하고 나머지는 여기서 나온다.
+        d->bh.rs   = d->cfg.blackHoleRs;
+        d->bh.mass = d->bh.rs * fmaxf(d->cfg.lightSpeedSq, 1e-6f)
+                   / (2.0f * fmaxf(d->cfg.gravity, 1e-6f)) * (float)n;
+        d->bh.born = false;
+    }
+    CK(cudaMemset(d->bhEaten, 0, sizeof(int)));
+    CK(cudaMemset(d->densest, 0, sizeof(unsigned long long)));
+
+    // 방금 세운 블랙홀의 실제 세기로 배치한다.
+    const float bhGM = d->bh.active
+                     ? d->cfg.gravity * (d->bh.mass / (float)(n > 0 ? n : 1)) : 0.f;
     kPlace<<<grid1(n), BS>>>(d->pos, d->vel, d->temp, n, (int)d->cfg.preset,
-                             d->cfg.blackHoleGM, d->cfg.blackHoleRs);
+                             bhGM, d->bh.rs);
     // 빈 판은 살아 있는 파티클이 0 이고 전 슬롯이 비어 있다 — 마우스로 채워 나간다.
     d->activeN = (d->cfg.preset == Preset::Empty) ? 0 : n;
     // 새 장면이므로 형태를 넣을 자리도 처음으로 되돌린다.
@@ -1276,6 +1379,7 @@ void Sim::reset() {
     // 리셋하면 별도 천체도 사라진다
     CK(cudaMemset(d->isStar, 0, sizeof(unsigned char) * n));
     d->starN = 0;
+
     CK(cudaDeviceSynchronize());
 
     // 회전 프리셋은 중력을 한 번 풀어 그 세기에 맞는 궤도 속도를 넣는다.
@@ -1291,7 +1395,10 @@ void Sim::reset() {
         // 서로에게 다가가지 않아 꼬리가 생기지 않는다.
         const float fudge = (d->cfg.preset == Preset::TidalPair) ? 0.90f : 0.97f;
         kSetOrbit<<<grid1(n), BS>>>(d->accG, d->pos, d->vel, n, G,
-                                    d->periodic() ? 1 : 0, (int)d->cfg.preset, fudge);
+                                    d->periodic() ? 1 : 0, (int)d->cfg.preset, fudge,
+                                    d->cfg.orbitDispersion,
+                                    d->cfg.haloEnabled ? d->cfg.haloSpeed * d->cfg.haloSpeed : 0.f,
+                                    d->cfg.haloCore * d->cfg.haloCore);
         CK(cudaDeviceSynchronize());
     }
 }
@@ -1455,6 +1562,37 @@ void Sim::step() {
         dtUse = dtWanted / (float)sub;
         if (dtUse > dtLimit) dtUse = dtLimit;     // 상한에 걸렸으면 한계값으로 자른다
     }
+    // (6-b) 무너질 만큼 눌린 곳이 있는지 본다.
+    //
+    // 알갱이끼리 부딪히게 해 두면 한 칸에 한 개 남짓밖에 못 들어간다. 그 한계를 크게 넘어
+    // 쌓였다는 것은 버티던 힘이 중력에 졌다는 뜻이고, 그 자리가 무너진다.
+    // 접촉을 꺼 둔 판에서는 무너뜨리지 않는다 — 버틴 것이 없으면 「졌다」는 말이 성립하지 않는다.
+    if (d->cfg.collapseEnabled && !d->bh.active && contactOn) {
+        CK(cudaMemset(d->densest, 0, sizeof(unsigned long long)));
+        kFindDensestCell<<<gG, b>>>(d->rho, G, S, d->densest);
+        unsigned long long packed = 0;
+        CK(cudaMemcpy(&packed, d->densest, sizeof(packed), cudaMemcpyDeviceToHost));
+        if (packed != 0) {
+            const unsigned bits = (unsigned)(packed >> 32);
+            float density;
+            memcpy(&density, &bits, sizeof(float));
+            const int cell = (int)(packed & 0xFFFFFFFFu);
+            // 평균의 몇 배인가로 견준다 — 알갱이 수를 바꿔도 문턱의 뜻이 그대로다.
+            const float meanRho = (float)n / (float)(G * G);
+            if (density > d->cfg.collapseDensity * meanRho) {
+                d->bh.active = true;
+                d->bh.born   = true;
+                d->bh.x = ((float)(cell % G) + 0.5f) / (float)G;
+                d->bh.y = ((float)(cell / G) + 0.5f) / (float)G;
+                // 처음 질량은 **그 칸에 실제로 쌓여 있던 양**이다. 지어낸 값을 넣으면
+                // 그만큼 우주의 질량이 늘어난다. 지평선은 거기서 나오고, 다음 스텝부터
+                // 실제로 삼킨 것이 더해지면서 자란다.
+                d->bh.mass = density;
+                d->bh.rs   = d->horizonOf(d->bh.mass);
+            }
+        }
+    }
+
     for (int s = 0; s < sub; ++s) {
         if (s > 0) {
             // 두 번째 서브스텝부터는 위치가 바뀌었으니 격자·중력을 다시 푼다.
@@ -1471,6 +1609,18 @@ void Sim::step() {
         d->integrateOnce(dtUse);
     }
     const float dt = dtUse * (float)sub;
+
+    // 지평선이 삼킨 만큼 무거워지고, 무거워진 만큼 지평선이 커진다.
+    // 커진 지평선이 더 삼키므로 한번 시작하면 스스로 자란다 — 이것도 규칙이 아니라 식의 결과다.
+    if (d->bh.active) {
+        int eaten = 0;
+        CK(cudaMemcpy(&eaten, d->bhEaten, sizeof(int), cudaMemcpyDeviceToHost));
+        if (eaten > 0) {
+            CK(cudaMemset(d->bhEaten, 0, sizeof(int)));
+            d->bh.mass += (float)eaten;
+            d->bh.rs = d->horizonOf(d->bh.mass);
+        }
+    }
 
     cudaEventRecord(d->evB);
     cudaEventSynchronize(d->evB);
@@ -1546,6 +1696,7 @@ void Sim::Impl::refreshAccel() {
 
 int Sim::activeCount() const { return impl_->activeN; }
 int Sim::starCount() const   { return impl_->starN; }
+BlackHoleState Sim::blackHole() const { return impl_->bh; }
 
 
 int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, bool autoOrbit) {

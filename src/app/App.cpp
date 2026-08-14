@@ -212,11 +212,30 @@ void RememberLook(App& app) {
 void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     cfg.preset = preset;
 
-    // 블랙홀 장면은 중심의 휘어진 시공간이 주인공이라, 파티클끼리 끌어당기는 힘은 꺼 둔다.
-    // 켜 두면 원반이 스스로 뭉쳐 덩어리가 되면서 궤도 이야기가 묻힌다.
+    // 블랙홀 장면은 **이미 있는** 블랙홀 둘레를 보는 장면이다.
+    // 다른 장면에서는 판 어딘가가 무너지면 그때 생긴다 — 물질이 따라가는 길은 둘이 같다.
+    //
+    // 무너져 생기는 쪽은 알갱이끼리 부딪히게 해 두었을 때만 뜻이 있다. 버티는 힘이 있어야
+    // 「중력이 그것을 이겼다」는 말이 성립하기 때문이다. 그래서 접촉과 함께 켜고 끈다.
     cfg.blackHoleEnabled = (preset == Preset::BlackHole);
+    cfg.collapseEnabled  = (preset != Preset::BlackHole);
+
+    // 보이지 않는 무게는 은하 장면에서만 켠다.
+    //  · 은하 둘 — 판 한가운데 하나를 두어 둘이 그 둘레를 돌게 한다(은하군이 그렇다)
+    //  · 우주 거미줄 — 반대편으로 이어지는 우주라 「중심」이 없다
+    //  · 블랙홀 — 중심의 휘어진 시공간이 주인공이라 다른 중력을 더하면 궤도 이야기가 흐려진다
+    cfg.haloEnabled = (preset == Preset::SpiralDisk || preset == Preset::TidalPair);
+    if (cfg.haloEnabled) {
+        // 보이지 않는 무게가 회전을 맡으면 원반 자신의 무게는 그만큼 가벼워야 한다.
+        // 실제 은하도 원반은 전체 질량의 10~20% 뿐이다. 여기를 안 낮추면 원반이 제 무게로
+        // 국소 붕괴해 나선팔이 자라기 전에 조각조각 뭉친다(2026-08-14 실측).
+        cfg.gravity = 0.22f;
+    }
     if (preset == Preset::BlackHole) {
-        cfg.gravity = 0.0f;          // 자기중력 끔 — 중심 블랙홀만 남긴다
+        // 자기중력을 살려 둔다. 지평선 크기는 이제 삼킨 질량에서 나오고(rs = 2GM/c²),
+        // 그 G 가 곧 여기 있는 중력 세기다 — 0 으로 두면 블랙홀도 함께 사라진다.
+        // 낮게 잡아 알갱이끼리 뭉치는 것보다 중심이 주인공이 되게 한다.
+        cfg.gravity = 0.15f;
         cfg.boundary = Boundary::Isolated;
         cfg.pressureEnabled = false;
         cfg.expansionEnabled = false;

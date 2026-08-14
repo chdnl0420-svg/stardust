@@ -620,6 +620,14 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
             ImGui::Separator();
             if (ImGui::Checkbox("알갱이끼리 부딪힘", &app.cfg.contactEnabled))
                 ApplyAutoGrid(app.cfg);
+            ImGui::Checkbox("보이지 않는 무게", &app.cfg.haloEnabled);
+            Tip("암흑물질 헤일로입니다. 실제 은하는 질량의 80~90% 가 여기 있고,\n"
+                "그것이 원반을 감싸 붙잡아 나선팔이 자라게 합니다.\n\n"
+                "끄면 원반이 제 무게만으로 버텨야 해서 조각조각 뭉칩니다.\n"
+                "장면을 바꾸면 그 장면에 맞는 값으로 다시 정해집니다.");
+            ImGui::Checkbox("블랙홀 경계 그리기", &app.showHorizon);
+            Tip("지평선·광자 구면·최소 안정 궤도를 원으로 겹쳐 그립니다.\n"
+                "계산 결과가 아니라 어디서 무슨 일이 일어나는지 알려 주려고 얹는 그림입니다.");
             if (app.cfg.contactEnabled
                 && !ContactFitsCount(app.cfg.particleCount, app.cfg.gridSize)) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.64f, 0.29f, 1.0f));

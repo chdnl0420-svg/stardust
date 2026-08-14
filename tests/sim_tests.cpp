@@ -613,10 +613,11 @@ static void testBlackHoleGeodesic() {
         cfg.particleCount = 200000;
         cfg.gridSize = 256;
         cfg.preset = Preset::BlackHole;
-        cfg.gravity = 0.0f;                 // 파티클끼리의 중력은 끈다 — 중심 블랙홀만 본다
+        // 지평선 크기는 이제 질량에서 나오고(rs = 2GM/c²) 그 G 가 여기 있는 중력 세기다.
+        // 0 으로 두면 블랙홀도 함께 사라지므로, 낮게 두어 중심이 주인공이 되게만 한다.
+        cfg.gravity = 0.15f;
         cfg.pressureEnabled = false;
         cfg.blackHoleEnabled = curvature;
-        cfg.blackHoleGM = 0.02f;
         cfg.blackHoleRs = 0.01f;
         sim.init(cfg);
         massBefore = sim.measureTotalGridMass();
@@ -636,12 +637,13 @@ static void testBlackHoleGeodesic() {
              "곡률 켬: %.0f -> %.0f (%.1f%% 삼켜짐) · 곡률 끔: %.0f -> %.0f (%.1f%%)",
              curvedBefore, curvedAfter, curvedLost * 100.0,
              flatBefore, flatAfter, flatLost * 100.0);
-    // 삼켜질 양은 기하학으로 미리 계산된다 — 원반에서 최소 안정 궤도 안쪽이 차지하는 면적 비율이다.
-    //   원반 2rs(0.02) ~ 0.30, 최소 안정 궤도 3rs(0.03)
-    //   ((0.03)² − (0.02)²) / ((0.30)² − (0.02)²) = 0.558 %
-    // 실측 0.62 % 로 이 값과 맞는다 = 그 안쪽이 전부 떨어졌다는 뜻이다.
-    // 판정선은 그 절반(0.3 %)에 두어, 아예 안 떨어지거나 반대로 원반이 통째로 무너지는 경우를 가른다.
-    check(curvedLost > 0.003 && curvedLost < 0.05 && flatLost < 0.001,
+    // 보는 것은 「곡률을 켰을 때만 삼킨다」는 갈림이다.
+    //
+    // 얼마나 삼키는지는 위쪽 판정선을 두지 않는다. 지평선이 질량에 비례해 커지므로
+    // (rs = 2GM/c²) 한번 삼키기 시작하면 스스로 자라고, 오래 돌리면 원반을 다 먹는 것이
+    // 이 식의 정상적인 귀결이다 — 그것까지 결함으로 세면 물리를 테스트가 막는 꼴이 된다.
+    // 곡률을 끄면 중심에 아무것도 없으므로 한 알도 사라지면 안 된다.
+    check(curvedLost > 0.003 && flatLost < 0.001,
           "곡률을 켤 때만 지평선이 물질을 삼킨다", buf);
 }
 

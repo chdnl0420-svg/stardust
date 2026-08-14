@@ -317,6 +317,10 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
         if (has(kv, "contact"))        app.cfg.contactEnabled = getInt(kv, "contact", 0) != 0;
         if (has(kv, "drawer"))         app.drawerOpen         = getInt(kv, "drawer", 0) != 0;
+        if (has(kv, "horizon"))        app.showHorizon        = getInt(kv, "horizon", 0) != 0;
+        if (has(kv, "dispersion"))
+            app.cfg.orbitDispersion = clampF(getFloat(kv, "dispersion", app.cfg.orbitDispersion),
+                                             0.0f, 1.0f, app.cfg.orbitDispersion);
         if (has(kv, "contactStiffness"))
             app.cfg.contactStiffness = clampF(getFloat(kv, "contactStiffness", app.cfg.contactStiffness),
                                               1.0e3f, 1.0e8f, app.cfg.contactStiffness);

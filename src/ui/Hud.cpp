@@ -6,7 +6,9 @@
 // 숫자로만 알려주면 어디서 무슨 일이 벌어지는지 볼 수 없다 — 파티클이 어느 원을 넘을 때
 // 나선으로 꺾이는지가 이 장면의 핵심이다.
 void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
-    if (!app.cfg.blackHoleEnabled || app.uiHidden) return;
+    // 처음부터 놓인 것이든 무너져 생긴 것이든 똑같이 그린다.
+    const BlackHoleState bh = app.sim.blackHole();
+    if (!bh.active || app.uiHidden || !app.showHorizon) return;
     if (viewW <= 0 || viewH <= 0) return;
 
     // 시뮬 좌표 -> 화면 픽셀. 렌더 셰이더(kShade·kSplatPoints)와 같은 변환이라야 자리가 맞는다.
@@ -25,14 +27,14 @@ void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
         return ImVec2(u * viewW, v * viewH);
     };
 
-    const ImVec2 c = toScreen(0.5f, 0.5f);
+    const ImVec2 c = toScreen(bh.x, bh.y);
     // 반지름은 중심에서 한 칸 옆으로 옮긴 점까지의 화면 거리로 잰다(줌·화면비가 저절로 반영된다).
     auto radiusPx = [&](float r) {
         const ImVec2 e = toScreen(0.5f + r, 0.5f);
         return e.x - c.x;
     };
 
-    const float rs = app.cfg.blackHoleRs;
+    const float rs = bh.rs;
     struct Ring { float r; unsigned col; const char* label; };
     const Ring rings[3] = {
         { rs,        IM_COL32(230,  80,  60, 210), "지평선" },
@@ -40,16 +42,22 @@ void DrawBlackHoleRings(const App& app, int viewW, int viewH) {
         { 3.0f * rs, IM_COL32(120, 200, 255, 140), "최소 안정 궤도" },
     };
 
+    // 지평선이 화면에서 몇 픽셀도 안 될 때가 많다 — 실제 블랙홀도 은하에 견주면 점 하나다.
+    // 그래도 어디에 있는지는 보여야 하므로 그릴 때만 최소 크기를 준다.
+    // 물질이 삼켜지는 반지름은 어디까지나 위의 rs 이고, 이 확대는 화면에만 쓴다.
+    const float rsPxRaw = radiusPx(rs);
+    const float scale = (rsPxRaw < 6.0f && rsPxRaw > 0.0f) ? (6.0f / rsPxRaw) : 1.0f;
+
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     for (const Ring& g : rings) {
-        const float px = radiusPx(g.r);
+        const float px = radiusPx(g.r) * scale;
         if (px < 2.0f || px > (float)viewW * 4.0f) continue;   // 너무 작거나 화면을 벗어나면 생략
         dl->AddCircle(c, px, g.col, 96, 1.6f);
         dl->AddText(ImVec2(c.x + px * 0.70f, c.y - px * 0.70f - 14.0f), g.col, g.label);
     }
     // 지평선 안쪽은 빛도 못 나오는 곳이라 까맣게 덮는다.
-    const float rsPx = radiusPx(rs);
-    if (rsPx > 2.0f) dl->AddCircleFilled(c, rsPx, IM_COL32(0, 0, 0, 255), 96);
+    const float rsPx = rsPxRaw * scale;
+    if (rsPx > 2.0f && rsPx < (float)viewW) dl->AddCircleFilled(c, rsPx, IM_COL32(0, 0, 0, 255), 96);
 }
 
 void DrawHud(const App& app) {
@@ -100,7 +108,9 @@ void DrawHud(const App& app) {
     // 접촉은 켜졌는데 알갱이가 많아 못 도는 경우만 알린다. 잘 돌 때는 조용하다.
     const bool contactNote = app.cfg.contactEnabled
                           && !ContactFitsCount(app.sim.particleCount(), app.sim.gridSize());
-    if (!contactNote && app.running) return;
+    // 무너져 생긴 블랙홀은 알린다. 처음부터 놓인 것(블랙홀 장면)은 당연한 것이라 알리지 않는다.
+    const bool bornNote = app.sim.blackHole().born;
+    if (!contactNote && !bornNote && app.running) return;
 
     ImGui::SetNextWindowPos(ImVec2(12, 34), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.55f);
@@ -116,6 +126,15 @@ void DrawHud(const App& app) {
         ImGui::PopStyleColor();
         ImGui::TextDisabled("최대 개수를 %d 이하로 낮추면 켜집니다",
                             (int)(0.764 * (double)app.sim.gridSize() * app.sim.gridSize()));
+    }
+
+    // 무너져 생긴 블랙홀은 이 판에서 일어난 사건이라 한 번은 알려 준다.
+    if (bornNote) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 0.72f, 0.42f, 1.0f));
+        ImGui::TextUnformatted("중력이 버티는 힘을 이겨 블랙홀이 되었습니다");
+        ImGui::PopStyleColor();
+        const BlackHoleState b2 = app.sim.blackHole();
+        ImGui::TextDisabled("삼킨 알갱이 %.0f · 지평선 반지름 %.4f", b2.mass, b2.rs);
     }
 
     if (!app.running) {

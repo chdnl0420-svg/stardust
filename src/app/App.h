@@ -107,6 +107,11 @@ struct App {
     // 고르면 한 번만 놓이고 도구는 화면 옮기기로 돌아간다.
     bool  shapeDrawerOpen = false;
 
+    // 블랙홀의 지평선·광자 구면·최소 안정 궤도를 원으로 겹쳐 그릴지.
+    // 계산 결과가 아니라 설명하려고 얹는 그림이라 기본은 꺼 둔다 — 물질이 그리는 모양만으로도
+    // 어디가 중심인지는 보인다.
+    bool  showHorizon = false;
+
 
     // 「보기」가 고르는 표현 방식. 나머지 색 설정(컬러맵·온도 추적)은 여기에 맞춰 자동으로 정한다.
     enum class Look { Density, Temperature };
