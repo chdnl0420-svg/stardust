@@ -339,6 +339,10 @@ void TabGravity(App& app) {
                &app.cfg.contactEnabled, fits))
         ApplyAutoGrid(app.cfg);
     if (!fits) UnderNote("알갱이가 너무 많아 지금은 켤 수 없다 \xE2\x80\x94 상한을 낮추면 켜진다.");
+    // 세 힘이 켜져 있으면 코어가 접촉을 물린다(Sim.cu 의 doContact 참조). 켰는데 아무 일도
+    // 안 일어나는 것처럼 보이지 않게 그 사실을 적는다.
+    if (app.cfg.contactEnabled && (app.cfg.strongForceEnabled || app.cfg.emForceEnabled))
+        UnderNote("아래 강한핵력\xEF\xBC\x8F전자기력이 켜져 있어 지금은 물러나 있다 \xE2\x80\x94 그쪽이 같은 일을 한다.");
 
     // **덩어리를 만드는 것은 이것이다.** 끄면 중력으로 모인 자리가 데워져 도로 흩어지고,
     // 모였다 흩어졌다만 되풀이한다. 오래 UI 에 없어 켤 방법조차 없었다.
@@ -348,6 +352,32 @@ void TabGravity(App& app) {
     SliderLine("coolingRate", "식는 빠르기", &app.cfg.coolingRate, 0.0f, 1.0f, "%.2f",
                false, app.cfg.coolingEnabled);
     UnderNote("높이면 빨리 뭉치고, 0 이면 끈 것과 같다.");
+
+    // ── 나머지 세 가지 기본 힘 ──────────────────────────────────────────────
+    // 이 판의 알갱이는 별과 가스라 핵력의 실제 크기(10⁻¹⁵ m)와는 열다섯 자리가 어긋난다.
+    // 크기가 아니라 거동을 옮겨 담았다 — 자세한 것은 Sim.h 의 그 자리 주석에 있다.
+    // 셋 다 접촉력과 같은 이웃 훑기 위에서 돌므로 값이 같다 — 켤 수 있는 알갱이 수도 같다.
+    GroupLabel("나머지 세 가지 힘");
+    Toggle("strong", "강한핵력",
+           "아주 가까울 때만 세게 당기고 더 붙으면 밀어낸다 \xE2\x80\x94 붙은 것끼리 덩어리로 굳는다",
+           &app.cfg.strongForceEnabled, fits);
+    SliderLine("strongK", "강한핵력 세기", &app.cfg.strongForceK, 1000.0f, 300000.0f, "%.0f",
+               true, app.cfg.strongForceEnabled && fits);
+
+    Toggle("em", "전자기력",
+           "알갱이마다 +/- 가 있어 같은 부호는 밀고 다른 부호는 당긴다 \xE2\x80\x94 뭉치지 않고 늘어선다",
+           &app.cfg.emForceEnabled, fits);
+    SliderLine("emK", "전자기력 세기", &app.cfg.emForceK, 0.001f, 0.5f, "%.3f",
+               true, app.cfg.emForceEnabled);
+
+    Toggle("weak", "약한핵력",
+           "부호가 이따금 뒤집힌다(베타 붕괴) \xE2\x80\x94 굳어 있던 배치가 스스로 풀린다",
+           &app.cfg.weakForceEnabled, app.cfg.emForceEnabled);
+    if (!app.cfg.emForceEnabled) UnderNote("전자기력을 켜야 뒤집힌 부호가 뜻을 갖는다.");
+
+    SliderLine("newDamp", "이 힘들의 감쇠", &app.cfg.newForceDamping, 0.3f, 2.0f, "%.2f",
+               false, app.cfg.strongForceEnabled || app.cfg.emForceEnabled);
+    UnderNote("1 이 임계 감쇠다. 낮추면 더 오래 출렁이고, 너무 낮추면 에너지가 쌓여 튄다.");
 
     // 판 전체 회전. 다시 시작해야 얹히므로 그 사실을 밑줄로 알린다.
     SliderLine("spin", "판 전체 회전", &app.cfg.spin, -1.0f, 1.0f, "%.2f");

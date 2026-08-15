@@ -321,6 +321,13 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
         if (has(kv, "spin"))           app.cfg.spin = clampF(getFloat(kv, "spin", app.cfg.spin), -3.0f, 3.0f, app.cfg.spin);
+        if (has(kv, "strongForce"))    app.cfg.strongForceEnabled = getInt(kv, "strongForce", 0) != 0;
+        if (has(kv, "emForce"))        app.cfg.emForceEnabled     = getInt(kv, "emForce", 0) != 0;
+        if (has(kv, "weakForce"))      app.cfg.weakForceEnabled   = getInt(kv, "weakForce", 0) != 0;
+        if (has(kv, "strongForceK"))
+            app.cfg.strongForceK = clampF(getFloat(kv, "strongForceK", app.cfg.strongForceK), 1000.0f, 300000.0f, app.cfg.strongForceK);
+        if (has(kv, "emForceK"))
+            app.cfg.emForceK = clampF(getFloat(kv, "emForceK", app.cfg.emForceK), 0.001f, 0.5f, app.cfg.emForceK);
         if (has(kv, "blackHoleMassScale"))
             app.cfg.blackHoleMassScale = clampF(getFloat(kv, "blackHoleMassScale", app.cfg.blackHoleMassScale),
                                                 0.002f, 1.0f, app.cfg.blackHoleMassScale);

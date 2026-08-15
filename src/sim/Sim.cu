@@ -695,9 +695,21 @@ __global__ void kBuildCellRange(const int* keys, int n, int* start, int* end) {
 // 칸당 평균 알갱이가 1 을 크게 넘으면 이 커널이 프레임을 통째로 먹으므로,
 // 접촉을 켤 수 있는 알갱이 수를 밖에서 제한한다(App::ContactFitsCount).
 // 안전을 위해 한 칸에서 보는 상대 수에도 상한을 둔다 — 뭉친 자리에서 폭주하지 않게.
+// 세 가지 힘을 얹어 넘기는 묶음. 인자를 늘리는 대신 하나로 묶는다.
+struct ForcePack {
+    int   contact;      // 겹치면 밀어내기(강체)
+    int   strong;       // 강한핵력 — 아주 가까울 때만 세게 당기고, 더 붙으면 민다
+    int   em;           // 전자기력 — 같은 부호끼리 밀고 다른 부호끼리 당긴다
+    float strongK;
+    float emK;
+    float damp;         // 임계 감쇠에 대한 비율(1 = 임계). 새 두 힘에만 쓴다
+    const float* charge;   // 알갱이마다의 부호(+1/-1). em 을 켤 때만 쓴다
+};
+
 __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int S,
                          int periodic, const int* cellStart, const int* cellEnd,
-                         float radius, float stiffness, float damping, float4* accOut) {
+                         float radius, float stiffness, float damping, ForcePack fp,
+                         float4* accOut) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -715,6 +727,8 @@ __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int
     // 스레드 하나를 수천 번 돌게 만들어 프레임이 통째로 멎는다.
     const int kMaxPeers = 96;
     int seen = 0;
+    // 새로 더한 두 힘(강한핵력·전자기력)이 만든 몫만 따로 쌓는다. 아래에서 상한을 건다.
+    float ax2 = 0.f, ay2 = 0.f, az2 = 0.f;
 
     for (int dz = -1; dz <= 1 && seen < kMaxPeers; ++dz)
     for (int dy = -1; dy <= 1 && seen < kMaxPeers; ++dy)
@@ -733,16 +747,135 @@ __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int
                 if (ey >  0.5f) ey -= 1.f; else if (ey < -0.5f) ey += 1.f;
                 if (ez >  0.5f) ez -= 1.f; else if (ez < -0.5f) ez += 1.f;
             }
+            // **도달 거리는 접촉과 같게 둔다 — 넓히면 작용·반작용이 깨진다.**
+            //
+            // 처음에는 이 두 힘만 두 배 멀리 보게 했다. 반경이 두 배면 이웃이 여덟 배라
+            // 한 알갱이가 볼 수 있는 상한(kMaxPeers=96)에 쉽게 걸리는데, **걸리는 순간
+            // i 는 j 를 보지만 j 는 i 를 못 보는 짝이 생긴다.** 그러면 힘이 한쪽에만 걸려
+            // 두 알갱이가 나란히 밀려나고, 감쇠는 상대 속도에 비례하므로 아무 일도 하지
+            // 못한다 — 3초 만에 광속에 닿은 것이 이것이다(2026-08-15 실측).
+            // 실제 핵력도 닿을 만큼 가까울 때만 듣는 힘이라 이쪽이 물리적으로도 맞다.
             const float dd = ex * ex + ey * ey + ez * ez;
             if (dd >= d02 || dd < 1e-16f) continue;
             const float d = sqrtf(dd);
             const float nx = ex / d, ny = ey / d, nz = ez / d;
             const float4 vj = vel[j];
-            // 다가오는 속도 성분만 감쇠한다 — 멀어지는 것을 붙잡으면 끈끈이가 된다.
+
+            float f = 0.f;                      // 접촉(강체) 몫 — 양수면 민다
+            float fx = 0.f;                     // 새로 더한 두 힘의 몫. 따로 모아 상한을 건다
+            bool  touched = false;              // 이 짝에 무슨 힘이든 걸렸는가
+
             const float vn = (v.x - vj.x) * nx + (v.y - vj.y) * ny + (v.z - vj.z) * nz;
-            float f = stiffness * (d0 - d) - damping * vn;
-            if (f < 0.f) f = 0.f;               // 밀기만 한다
-            a.x += f * nx; a.y += f * ny; a.z += f * nz;
+
+            // 겹치면 밀어내기(강체).
+            //
+            // **감쇠까지 더한 뒤에 자른다.** 이 순서가 뒤집히면 접촉이 끈끈이가 된다 —
+            // 멀어지는 짝(vn>0)에 -damping·vn 이 붙어 힘이 음수가 되고, 그것을 자르지
+            // 않으면 접촉이 당기는 힘이 되어 그대로 발산한다. 감쇠를 아래 새 힘 쪽으로
+            // 옮기며 절단이 감쇠 앞으로 가버렸고, 접촉만 켜도 광속에 닿았다
+            // (2026-08-15 실측: peak 11.45). 원래 코드는 한 줄에서 둘을 함께 했다.
+            if (fp.contact && d < d0) {
+                float fc = stiffness * (d0 - d) - damping * vn;
+                if (fc < 0.f) fc = 0.f;
+                f += fc;
+                touched = true;
+            }
+
+            // **강한핵력** — 닿을 만큼 가까울 때만 세게 당기고, 더 붙으면 밀어낸다.
+            // 이 두 겹이 있어야 한 점으로 무너지지 않고 「덩어리」로 굳는다. 실제
+            // 핵자가 뭉치는 방식이 그렇고, 중력과 달리 멀리 새지 않아 붙은 것끼리만 묶인다.
+            if (fp.strong) {
+                // **평형 거리에서 0 이고 양쪽으로 이어지는 힘이어야 한다.**
+                //
+                // 전에는 「core 안쪽이면 밀고 그 밖이면 당긴다」로 나눠 두었는데, 그 경계에서
+                // 힘이 0 에서 -18.7 로 **점프**했다. 알갱이가 그 선을 지날 때마다 없던 에너지를
+                // 주고받아, 세기를 낮추든 감쇠를 임계로 올리든 3초면 광속에 닿았다.
+                // 게다가 그 인력은 가까울수록 세서, 당길수록 더 당기는 되먹임이었다.
+                //
+                // 지금은 eq 에서 0 이고 가까우면 밀고 멀면 당긴다. 바깥은 창(w)으로 부드럽게
+                // 0 이 되어 닿는 거리에서도 끊기지 않는다 — 실제 핵자 사이 퍼텐셜의 모양이다.
+                const float eq = d0 * 0.7f;
+                const float w  = 1.0f - d / d0;      // d=d0 에서 정확히 0
+                fx += fp.strongK * (eq - d) * fmaxf(w, 0.f);
+                touched = true;
+            }
+
+            // **전자기력** — 부호가 같으면 밀고 다르면 당긴다. 거리 제곱에 반비례하는
+            // 것은 중력과 같지만, 양쪽 부호가 있어 뭉치기만 하지 않고 격자처럼 늘어선다.
+            //
+            // 나누는 값에 바닥을 둔다. 두 알갱이가 겹칠 만큼 가까우면 1/r² 이 발산해
+            // 그 짝만으로 판이 터진다 — 바닥 없이 두었더니 점유 칸이 4만에서 격자 전체인
+            // 204만으로 벌어지고 속력이 이 우주의 광속에 붙었다(2026-08-14 실측).
+            if (fp.em && fp.charge) {
+                const float q = fp.charge[i] * fp.charge[j];
+                fx += fp.emK * q / fmaxf(dd, d02);
+                touched = true;
+            }
+
+            // **감쇠는 「세기」에 맞춰야 한다. 이 자리가 세 힘이 폭주한 진짜 원인이었다.**
+            //
+            // 용수철 상수 k 인 진동자의 임계 감쇠는 2√k 다. 여기서는 힘이 곧 가속도이므로
+            // ω = √k 이고, 감쇠가 그보다 한참 작으면 명시적 적분에서 **에너지가 매 스텝
+            // (1 + (ω·dt)²) 배로 늘어난다.** 강한핵력 k = 9600 이면 ω = 98, dt = 0.0016 이라
+            // 한 바퀴에 1.0246 배 — 1초(60스텝)에 4.3배, 5초면 1500배다. 실측에서 몇 초 만에
+            // 이 우주의 광속(17.3)에 닿은 것이 정확히 이 값이었고, 세기를 2.5분의 1로 낮춰도
+            // 여섯 경우 모두 닿은 것도 이것으로 설명된다 — 세기를 낮추면 늘어나는 속도만
+            // 조금 느려질 뿐 방향은 그대로다.
+            //
+            // 접촉력이 오래 무사했던 것은 밀기만 해서(f<0 절단) **애초에 진동자가 아니었기**
+            // 때문이다. 인력을 넣는 순간 무감쇠 진동자가 되었고, 그때 감쇠 0.35 는 필요한
+            // 값의 560분의 1이었다.
+            // 새 두 힘의 감쇠. 접촉의 감쇠는 위에서 그 힘과 함께 계산해 잘랐다.
+            if (touched) {
+                if (fp.strong || fp.em) {
+                    // **감쇠는 「한 쌍당」 값이라 이웃 수만큼 쌓인다.**
+                    //
+                    // 임계 감쇠 2√k 를 쌍마다 걸었더니, 이웃이 아흔여섯이면 합이 그 아흔여섯
+                    // 배가 됐다. 세기를 천분의 1 로 낮춰도(K=8, c=6.2) 합이 595 라 한 스텝에
+                    // 속도가 0.95 씩 늘어 열여덟 스텝이면 광속이다 — 세기를 낮추든 알갱이를
+                    // 줄이든 3초 만에 터진 것이 이것이었다(2026-08-15 실측).
+                    //
+                    // 그래서 이웃 수로 나눠 「이 알갱이가 받는 감쇠」의 총량을 임계에 맞춘다.
+                    // 그리고 이 몫도 fx 에 넣어 아래 가속도 상한이 함께 잡게 한다 — 예전에는
+                    // f 에 들어가 상한 밖에 있었다.
+                    float k = 0.f;
+                    if (fp.strong) k = fmaxf(k, fp.strongK);
+                    // 전자기력의 실효 강성은 |df/dr| = 2·emK/r³ 이고 가장 가까운 r = d0 에서 세다.
+                    if (fp.em)     k = fmaxf(k, 2.0f * fp.emK / fmaxf(d02 * d0, 1e-12f));
+                    const float cPair = 2.0f * sqrtf(k) * fp.damp / (float)(seen > 0 ? seen : 1);
+                    fx -= cPair * vn;
+                }
+            }
+
+            a.x += (f + fx) * nx; a.y += (f + fx) * ny; a.z += (f + fx) * nz;
+            // 새 힘이 만든 몫만 따로 쌓아 둔다(아래에서 상한을 건다).
+            ax2 += fx * nx; ay2 += fx * ny; az2 += fx * nz;
+        }
+    }
+
+    // **새 힘이 만든 가속도에 상한을 건다.**
+    //
+    // 세기를 2.5분의 1로 낮춰도 여섯 경우 모두 알갱이가 이 우주의 광속(17.3)에 닿았다
+    // (2026-08-14 실측). 세기 문제가 아니다 — 두 알갱이가 충분히 가까워지면 어떤 세기로도
+    // 힘이 커지고, 그 자리를 한 번 지난 알갱이는 계속 빨라진다. 상한이 있으면 그 경로가
+    // 원천적으로 막힌다.
+    //
+    // 값의 근거: 한 스텝에 속도가 광속의 1% 넘게 바뀌지 않도록 잡았다.
+    //   dt 최대 0.0016, 광속 17.3 → a ≤ 0.01·17.3 / 0.0016 ≈ 108
+    // 접촉력(강체)은 이 상한 밖에 둔다 — 그쪽은 예전부터 이 값 위에서 제대로 돌았고,
+    // 깎으면 알갱이가 서로 파고든다.
+    {
+        // 100 은 너무 헐거웠다 — 한 스텝에 0.16 씩이면 108 스텝(1.8초)에 광속이다.
+        // 5 면 2100 스텝(36초)이 걸려, 그 전에 광속 감시(30초)가 먼저 손을 댄다.
+        // 정상 판에서는 이웃 힘이 서로 상쇄돼 순 가속도가 이 값 근처에도 못 간다.
+        const float kMaxNewAcc = 5.0f;
+        const float m2 = ax2 * ax2 + ay2 * ay2 + az2 * az2;
+        if (m2 > kMaxNewAcc * kMaxNewAcc) {
+            const float s = kMaxNewAcc * rsqrtf(fmaxf(m2, 1e-20f));
+            // 넘친 만큼만 되돌린다(합에서 빼고 잘린 값을 다시 더한다).
+            a.x += ax2 * (s - 1.f);
+            a.y += ay2 * (s - 1.f);
+            a.z += az2 * (s - 1.f);
         }
     }
     accOut[i] = a;
@@ -827,6 +960,27 @@ __global__ void kCountAlive(const float4* pos, int n, int* out) {
     if (i < n && pos[i].x >= 0.f) atomicAdd(&s, 1);
     __syncthreads();
     if (threadIdx.x == 0 && s > 0) atomicAdd(out, s);
+}
+
+// 알갱이마다 +/- 부호를 준다(전자기력용). temp 배열을 그대로 쓴다 —
+// 온도는 이 판에서 계산하지 않고, 정렬·압축이 이미 이 배열을 함께 옮겨 주기 때문이다.
+__global__ void kInitCharge(float* charge, int n, unsigned seed) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned h = (unsigned)i * 2654435761u + seed;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    charge[i] = (h & 1u) ? 1.0f : -1.0f;
+}
+
+// **약한핵력** — 힘이 아니라 바뀜이다. 부호가 이따금 뒤집힌다(베타 붕괴가 하는 일).
+// 전자기력으로 굳어 있던 배치가 스스로 풀려 다시 자리를 잡는 것이 이 힘의 얼굴이다.
+__global__ void kWeakDecay(float* charge, const float4* pos, int n, float p, unsigned seed) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (pos[i].x < 0.f) return;
+    unsigned h = (unsigned)i * 2654435761u + seed;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    if ((h & 0xFFFFu) < (unsigned)(p * 65535.0f)) charge[i] = -charge[i];
 }
 
 // 판 전체에 회전을 얹는다 — 세로축(z) 을 중심으로 통째로 돈다.
@@ -1633,8 +1787,18 @@ void Sim::Impl::sortParticles() {
 }
 
 void Sim::Impl::doContact() {
-    if (g_failed || !cfg.contactEnabled) return;
+    // 세 힘 중 하나라도 켜져 있으면 이웃을 훑는다 — 넷이 같은 이웃 목록을 나눠 쓴다.
+    const bool wantAny = cfg.contactEnabled || cfg.strongForceEnabled || cfg.emForceEnabled;
+    if (g_failed || !wantAny) return;
     const int G = allocG;
+
+    // **밖에서 켜 달라고 해도 코어가 자른다.**
+    //
+    // 이 이웃 훑기는 매 스텝 알갱이를 줄 세우고 27칸을 뒤진다. 알갱이가 판을 꽉 채우면
+    // 그 값이 감당 못 할 만큼 오르는데, 설정 창은 그 선을 알고 막아도(ContactFitsCount)
+    // 제어 채널로 들어오는 값은 그 창을 지나지 않는다. 같은 선을 여기서 다시 건다
+    // — 한계를 아는 쪽이 코어다. (기준: N ≤ 0.764·G³, 격자 128 이면 160만)
+    if ((double)allocN > 0.764 * (double)G * (double)G * (double)G) return;
     const size_t cells = (size_t)G * G * G;
     // 정렬해 둬야 칸별 구간을 뽑을 수 있다.
     sortParticles();
@@ -1643,10 +1807,32 @@ void Sim::Impl::doContact() {
     kBuildCellRange<<<(allocN + 255) / 256, 256>>>(keys, allocN, cellStart, cellEnd);
     // 반지름은 격자 칸의 절반. 지름이 정확히 한 칸이라 이웃 27칸만 보면 충분하다.
     const float radius = 0.5f / (float)G;
+    ForcePack fp{};
+    // **새 힘이 켜져 있으면 접촉은 물러난다.**
+    //
+    // 강한핵력이 이미 「가까우면 밀어낸다」를 하므로 하는 일이 겹치고, 무엇보다 접촉의
+    // 강성 1e6 은 명시적 적분에 과하다 — 겹침이 깊어지면 한 스텝에 속도가 11 씩 뛰어
+    // 어떤 감쇠로도 못 잡는다(2026-08-15 실측: 접촉만 켜도 광속의 절반을 넘겼고, 이는
+    // 세 힘이 없는 0.6.2 에서도 같다). 겹치지 않게 하는 일은 강한핵력에 맡긴다.
+    const bool contactOn = cfg.contactEnabled
+                        && !cfg.strongForceEnabled && !cfg.emForceEnabled;
+    fp.contact = contactOn ? 1 : 0;
+    fp.strong  = cfg.strongForceEnabled ? 1 : 0;
+    fp.em      = cfg.emForceEnabled     ? 1 : 0;
+    fp.strongK = cfg.strongForceK;
+    fp.emK     = cfg.emForceK;
+    fp.damp    = cfg.newForceDamping;
+    fp.charge  = cfg.emForceEnabled ? temp : nullptr;
     kContact<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, G, G, periodic() ? 1 : 0,
                                             cellStart, cellEnd, radius,
                                             cfg.contactStiffness, cfg.contactDamping,
-                                            accContact);
+                                            fp, accContact);
+    // 약한핵력은 부호를 뒤집을 뿐이라 힘 계산과 따로 돈다. 전자기력이 꺼져 있으면
+    // 부호를 아무도 보지 않으므로 돌릴 까닭이 없다.
+    if (cfg.weakForceEnabled && cfg.emForceEnabled)
+        kWeakDecay<<<(allocN + 255) / 256, 256>>>(temp, pos, allocN,
+                                                  cfg.weakForceRate * 0.02f,
+                                                  (unsigned)(stepCount * 7919 + 13));
     CK(cudaGetLastError());
 }
 
@@ -1943,6 +2129,11 @@ void Sim::reset() {
     CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
     CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
     d.placeInitial();
+    // 전자기력이 쓸 +/- 부호를 깐다. 켜져 있지 않아도 미리 깔아 두어야, 켜는 순간
+    // 부호가 0 인 알갱이만 잔뜩 있는 판이 되지 않는다.
+    if (d.temp)
+        kInitCharge<<<(d.allocN + 255) / 256, 256>>>(d.temp, d.allocN,
+                                                     (unsigned)((int)d.cfg.preset * 2917 + 7));
     d.giveOrbits();
     // 판 전체 회전은 궤도를 준 **뒤에** 얹는다. 먼저 얹으면 giveOrbits 가 속도를
     // 통째로 덮어써 사라진다.
@@ -1973,6 +2164,21 @@ void Sim::step() {
     float dt = 0.0016f * d.cfg.timeScale;
     const float dtMax = (vmax > 1e-6f) ? (0.8f * cell / vmax) : dt;
     if (dt > dtMax) dt = dtMax;
+
+    // **CFL 은 속도만 본다. 힘이 정하는 시간 폭은 따로 지켜야 한다.**
+    //
+    // 용수철 상수 k 인 힘을 명시적으로 적분하려면 dt < 2/√k 여야 한다. 접촉의 강성은
+    // 1e6 이라 그 한계가 0.002 인데 기본 dt 가 0.0016 이었다 — 여유가 거의 없었고,
+    // 식히기로 뭉쳐 겹침이 깊어지자 한 스텝에 속도가 11 씩 뛰었다(f = 1e6·0.007 = 7000,
+    // ×dt = 11.2). 어떤 감쇠로도 막을 수 없는 자리다 — 감쇠를 5700배로 올렸더니
+    // 오히려 나빠졌다(9.97 → 12.20, 2026-08-15 실측).
+    //
+    // 한계의 4분의 1 로 잡아 여유를 둔다. 접촉을 켜면 그만큼 시간이 느리게 흐르지만,
+    // 그것이 이 힘을 쓰는 값이다.
+    if (d.cfg.contactEnabled) {
+        const float dtStiff = 0.5f / sqrtf(fmaxf(d.cfg.contactStiffness, 1.0f));
+        if (dt > dtStiff) dt = dtStiff;
+    }
     // **바닥을 두지 않는다.**
     //
     // 「블랙홀을 놓으면 시간이 멎는다」를 고치려고 여기에 dt 하한을 넣은 적이 있다.
@@ -2022,7 +2228,9 @@ void Sim::step() {
     kIntegrate<<<(d.allocN + 255) / 256, 256>>>(
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
         bhPack, d.cfg.lightSpeedSq, d.eaten, haloV2, haloCore2,
-        d.cfg.contactEnabled ? d.accContact : nullptr,
+        // 세 힘 중 하나라도 켜져 있으면 그 가속도를 함께 넘긴다.
+        (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
+            ? d.accContact : nullptr,
         d.cfg.spiralWaveEnabled ? d.cfg.spiralWaveStrength : 0.f,
         d.cfg.spiralWavePattern, d.cfg.spiralWavePitch, (float)d.simTime);
     CK(cudaGetLastError());
