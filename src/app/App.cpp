@@ -154,6 +154,40 @@ void App::guardPerformance() {
         }
     }
 
+    // ── 광속에 눌어붙는 것을 본다 ─────────────────────────────────────────
+    //
+    // **위의 감시는 스텝 시간만 본다. 그것으로는 이번 사고를 못 잡았다.**
+    //
+    // 2026-08-14 23:48, 알갱이가 이 우주의 광속(17.3)에 3분 넘게 붙어 있는 채로 스텝은
+    // 10 ms 였다 — 위 감시에는 아무 일도 없는 판으로 보였고, 그러다 커널 자료구조가 깨져
+    // 시스템이 재부팅됐다(BugCheck 0x139, 같은 서명이 세 번째다).
+    //
+    // 속력이 상한에 오래 눌어붙는 것은 그 자체가 「힘이 폭주하고 있다」는 신호다. CFL 이
+    // dt 를 깎아 격자를 건너뛰는 것은 막지만, 그만큼 시간이 안 흐르고 같은 자리에 원자
+    // 연산이 계속 몰린다. 잠깐 닿는 것은 정상이므로(지평선 가까이서는 늘 그렇다) 5초는
+    // 두고 보다가 기록만 남기고, 30초를 넘기면 멈춘다.
+    {
+        const SimTimings t = sim.timings();
+        const float c = sqrtf(cfg.lightSpeedSq > 0.0f ? cfg.lightSpeedSq : 1.0f);
+        if (running && t.maxSpeed > c * 0.98f) ++speedPinnedFrames;
+        else                                    speedPinnedFrames = 0;
+
+        if (speedPinnedFrames == 300) {          // 5초 — 기록만 남긴다
+            fx::mark("!! 최고속도가 광속(%.3g)에 5초째 붙어 있다 — 힘이 폭주하는 중이다. "
+                     "스텝 %.1f ms, dt %.6g, 알갱이 %d, 격자 %d",
+                     c, t.totalMs, t.dtUsed, sim.activeCount(), cfg.gridSize);
+        }
+        if (running && speedPinnedFrames > 1800) {   // 30초 — 멈춘다
+            running = false;
+            speedPinnedFrames = 0;
+            fx::mark("!! 위험: 최고속도가 광속(%.3g)에 30초째 붙어 있다 — 멈춤. "
+                     "이 상태가 이어지면 커널 자료구조가 깨진다(2026-08-14 BugCheck 0x139). "
+                     "스텝 %.1f ms, dt %.6g, 알갱이 %d/%d",
+                     c, t.totalMs, t.dtUsed, sim.activeCount(), cfg.particleCount);
+            return;
+        }
+    }
+
     if (guardCooldown > 0) { --guardCooldown; overBudgetMs = 0.0f; return; }
     if (!running || frameMs <= 0.0f) return;
 
