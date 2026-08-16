@@ -389,6 +389,9 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);
         if (has(kv, "ashCoolK"))       app.cfg.ashCoolK       = clampF(getFloat(kv, "ashCoolK", app.cfg.ashCoolK), 0.0f, 10.0f, app.cfg.ashCoolK);
         if (has(kv, "nebulaK"))        app.cfg.nebulaK        = clampF(getFloat(kv, "nebulaK", app.cfg.nebulaK), 0.0f, 5.0f, app.cfg.nebulaK);
+        // 별 후광 — 밝은 별이 얼마나 넓게 보이나. 0 이면 옛 그림(전부 같은 크기)이라
+        // 켠 것과 끈 것을 견줄 수 있어야 한다.
+        if (has(kv, "starGlowK"))      app.cfg.starGlowK      = clampF(getFloat(kv, "starGlowK", app.cfg.starGlowK), 0.0f, 5.0f, app.cfg.starGlowK);
         if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
         if (has(kv, "temperature"))    app.cfg.temperatureEnabled = getInt(kv, "temperature", 1) != 0;
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;

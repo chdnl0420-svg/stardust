@@ -160,7 +160,18 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
                       + rho[y1 * G + x0] * (1.f - tx) * ty
                       + rho[y1 * G + x1] * tx * ty;
         // 밀도는 범위가 매우 넓어(빈 곳 0, 중심 수천) 로그로 눌러야 구조가 보인다.
-        float t = __powf(fminf(fmaxf(__logf(1.f + d * bright) * 0.30f, 0.f), 1.f), invGamma);
+        //
+        // **자르지 않고 눌러 담는다(Reinhard).** 전에는 `log(1+d·bright)·0.30` 을 1 에서
+        // 잘랐는데, 그 지점이 `d·bright = 27` 이다. 별 밝기가 `L = M^3.5` 라 **질량이 2.5배만
+        // 차이나도 27배**가 되므로 웬만한 별이 전부 `t = 1` 로 포화돼 같은 색이 됐다 —
+        // 화면에서 어느 별이 더 무거운지 눈으로 구분이 안 된다는 지적이 여기서 나왔다.
+        //
+        // `x/(1+x)` 는 **절대 1 에 닿지 않으므로 잘리는 정보가 없다.** x=1 이면 0.5,
+        // 10 이면 0.91, 100 이면 0.99 — 아무리 밝아도 차이가 계속 색으로 남는다.
+        // 앞의 계수를 0.30 에서 0.6 으로 올린 것은 이 압축이 전체를 어둡게 만드는 몫을
+        // 되돌리려는 것이다(x 가 두 배가 되면 어두운 쪽이 그만큼 올라온다).
+        const float x = fmaxf(__logf(1.f + d * bright) * 0.60f, 0.f);
+        float t = __powf(x / (1.f + x), invGamma);
         float3 c = (cmapKind == 3) ? cmapBlackbody(t)
                  : (cmapKind == 2) ? cmapThermal(t)
                  : (cmapKind == 1) ? make_float3(t, t, t)
@@ -509,8 +520,20 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     constexpr int kBins = 64;
                     if (!devStat_) cudaMalloc(&devStat_, sizeof(int) * kBins);
                     if (devStat_) {
+                        // **빛 모드에서는 후광을 입히기 전 격자로 기준을 잡는다.**
+                        //
+                        // 그리는 것은 후광이 붙은 `grid` 지만, 그것으로 기준을 잡으면
+                        // 빛이 퍼진 만큼 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고,
+                        // 후광으로 더한 만큼 도로 깎인다 — 2026-08-16 실측에서
+                        // `starGlowK` 를 0 → 1.5 로 올리자 켜진 픽셀이 2.78% → 0.4% 로
+                        // **줄었다**(에너지를 보존하게 고친 뒤에도 그대로였다).
+                        const float* statGrid = grid;
+                        if (f == Sim::Field::Light) {
+                            const float* raw = app.sim.lightBeforeGlowDevicePtr();
+                            if (raw) statGrid = raw;
+                        }
                         cudaMemset(devStat_, 0, sizeof(int) * kBins);
-                        kHistLog<<<(cells + 255) / 256, 256>>>(grid, cells, (int*)devStat_, kBins);
+                        kHistLog<<<(cells + 255) / 256, 256>>>(statGrid, cells, (int*)devStat_, kBins);
                         int h[kBins] = {};
                         if (cudaMemcpy(h, devStat_, sizeof(int) * kBins, cudaMemcpyDeviceToHost)
                             == cudaSuccess) {

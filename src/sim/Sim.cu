@@ -1802,6 +1802,40 @@ __global__ void kAddNebula(const float* starLight, const float* spread, const fl
     out[i] = starLight[i] + gas[i] * spread[i] * k;
 }
 
+// 별에 후광을 입힌다 — **밝은 별일수록 넓게 보이게 하는 자리다.**
+//
+//   최종 = 별빛(그대로) + 퍼진별빛 × 계수
+//
+// **왜 필요한가.** `kScatterLight` 는 모든 별을 CIC 4칸에만 뿌린다. 밝기만 다르고 크기는
+// 전부 같아서, 화면에서 어느 별이 더 무거운지 눈으로 구분이 안 된다는 지적을 받았다.
+// 실제 밤하늘은 밝은 별이 더 크게 보인다 — 대기 산란과 렌즈 회절 때문이고, 눈으로도
+// 그렇다. 「빛의 범위」가 밝기의 신호다.
+//
+// **왜 별마다 넓게 칠하지 않나 — 그것이 이 프로젝트를 죽인 경로라서.**
+// 「밝을수록 큰 원을 그린다」는 자연스러운 발상인데, 2026-08-14 에 알갱이 하나가 625 픽셀을
+// 칠해 한 프레임에 9억 회 원자연산이 되었고 시스템이 재부팅됐다(BugCheck 0x139).
+// 반경이 밝기를 따라가면 그 곱의 최댓값에 상한이 없다.
+//
+// **격자를 한 번 흐리는 것은 다르다.** 비용이 화면 격자 칸 수에만 비례하고 알갱이 수와
+// 무관하다 — 128² × 13 × 2 = 43만 회로 고정이다. 그러면서도 효과는 원하는 그대로다:
+// 밝은 별은 값이 크니 흐린 뒤에도 주변이 밝게 남아 **밝기에 비례해 후광이 넓어 보인다.**
+// **총 밝기를 유지한다 — 더하기가 아니라 섞기다.**
+//
+// 그냥 더하면(`src + k·blur`) 화면 전체의 값이 올라가고, 밝기 정규화가 상위 5% 지점을
+// 기준으로 잡으므로 **그 기준도 같이 올라가 더한 만큼 도로 깎인다.** 2026-08-16 실측:
+// `starGlowK` 를 0 → 1.5 로 올리자 켜진 픽셀이 2.63% → 0.96% 로 **줄었다.**
+// round-20·21 에서 성운(`kAddNebula`)이 안 보이던 것과 같은 함정이다.
+//
+// `(src + k·blur)/(1+k)` 로 나누면 총량이 그대로다. 실제 광학도 그렇다 — 빛은 퍼질 뿐
+// 늘지 않는다. 밝은 별의 빛이 자기 자리에서 둘레로 나뉘어, **정규화 기준을 안 올리면서**
+// 주변이 밝아진다.
+__global__ void kAddGlow(const float* starLight, const float* spread,
+                         float* out, int n, float k) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = (starLight[i] + spread[i] * k) * (1.f / (1.f + k));
+}
+
 __global__ void kDivideInto(const float* num, const float* den, float* out, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -2050,6 +2084,11 @@ struct Sim::Impl {
     float  *pot = nullptr;           // 퍼텐셜(패딩 포함) S³
     float  *proj = nullptr;          // 화면에 넘길 2D 투영 G²
     float  *projA = nullptr, *projB = nullptr;   // 속도 분산을 구할 때 쓰는 두 격자 G²
+    // **후광을 입히기 전의 별빛** G². 화면에 그리는 것은 후광이 붙은 `proj` 지만,
+    // 밝기 정규화의 기준은 이쪽에서 잡아야 한다 — 후광이 붙은 격자로 기준을 잡으면
+    // 빛이 퍼진 만큼 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고, 그러면 더한 만큼
+    // 도로 깎여 **후광을 켤수록 화면이 어두워진다**(2026-08-16 실측: 켜진 픽셀 2.78% → 0.4%).
+    float  *projLight = nullptr;
     float  *accMag = nullptr;        // 궤도 속도용 N
 
     // ── 압력 (속도 분산 텐서의 대각 성분) ──────────────────────────────────
@@ -2392,7 +2431,7 @@ void Sim::Impl::freeAll() {
     F((void*&)pos); F((void*&)vel); F((void*&)posTmp); F((void*&)velTmp);
     F((void*&)temp); F((void*&)tempTmp);
     F((void*&)accG); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
-    F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)accMag);
+    F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)projLight); F((void*&)accMag);
     F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
     F((void*&)velSumX); F((void*&)velSumY); F((void*&)velSumZ);
     F((void*&)ashGrid);
@@ -2460,6 +2499,9 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&proj, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&projA, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&projB, sizeof(float) * (size_t)G * G));
+    // 후광 전 별빛(정규화 기준용). 화면 격자라 128² × 4B = 65 KB 밖에 안 든다.
+    CK(cudaMalloc(&projLight, sizeof(float) * (size_t)G * G));
+    CK(cudaMemset(projLight, 0, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&specRho, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&specGreen, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&keys, sizeof(int) * N));
@@ -3788,6 +3830,16 @@ double Sim::measureForceErrorVsDirect(int, int, float) { return 0.0; }
 
 const float* Sim::densityDevicePtr() const { return impl_->rho; }
 
+// 후광을 입히기 전의 별빛 격자. **밝기 정규화의 기준은 이것으로 잡는다.**
+//
+// 화면에 그리는 것은 후광이 붙은 `fieldDevicePtr(Field::Light)` 지만, 그 격자로 기준을
+// 잡으면 안 된다 — 빛이 퍼지면 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고, 후광으로
+// 더한 만큼 도로 깎인다. 2026-08-16 실측에서 `starGlowK` 를 0 → 1.5 로 올리자 켜진 픽셀이
+// 2.78% → 0.4% 로 **줄었다**(에너지를 보존하게 고친 뒤에도 그대로였다).
+//
+// `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다 — 그 안에서 채워진다.
+const float* Sim::lightBeforeGlowDevicePtr() const { return impl_->projLight; }
+
 // 보는 방향을 정한다(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그림 그대로다.
 void Sim::setViewAngles(float yaw, float pitch) {
     impl_->viewYaw   = yaw;
@@ -3823,23 +3875,40 @@ const float* Sim::fieldDevicePtr(Field field) {
             d.pos, d.allocN, G, d.proj, rot,
             fmaxf(d.cfg.starSunMass, 1.0f), nova);
 
-        // ── 성운: 별빛을 퍼뜨려 가스에 입힌다 ─────────────────────────
+        // ── 후광과 성운 — 둘 다 「퍼진 별빛」을 재료로 쓴다 ────────────────
         //
         // 화면 격자 셋을 돌려 쓴다(`proj`·`projA`·`projB`) — 새로 잡지 않는다.
         //   1) projA ← 별빛을 가로로 흐림
         //   2) projB ← 그것을 세로로 흐림 = **퍼진 별빛**
-        //   3) projA ← 가스 밀도(재사용, 위 값은 이미 projB 로 넘어갔다)
-        //   4) proj  ← 별빛 + 가스 × 퍼진빛
-        if (d.cfg.nebulaK > 0.f && d.projA && d.projB) {
+        //   3) proj  ← 별빛 + 퍼진빛 × glowK              (후광: 밝은 별이 넓어 보인다)
+        //   4) projA ← 가스 밀도(재사용, 위 값은 이미 projB 로 넘어갔다)
+        //   5) proj  ← 그 결과 + 가스 × 퍼진빛 × nebulaK  (성운: 가스가 별빛을 받는다)
+        //
+        // **흐리기는 한 번만 하고 둘이 나눠 쓴다** — 후광과 성운이 필요로 하는 것이
+        // 같은 값(퍼진 별빛)이라 두 번 흐릴 이유가 없다.
+        const bool wantGlow   = (d.cfg.starGlowK > 0.f);
+        const bool wantNebula = (d.cfg.nebulaK  > 0.f);
+        // **후광을 입히기 전 별빛을 남겨 둔다** — 밝기 정규화의 기준은 이쪽에서 잡아야
+        // 한다. 후광이 붙은 격자로 기준을 잡으면 퍼진 만큼 중간 밝기가 늘어 상위 5%
+        // 지점이 올라가고, 더한 만큼 도로 깎여 후광을 켤수록 화면이 어두워진다.
+        if (d.projLight) {
+            CK(cudaMemcpy(d.projLight, d.proj, sizeof(float) * cells, cudaMemcpyDeviceToDevice));
+        }
+        if ((wantGlow || wantNebula) && d.projA && d.projB) {
             const dim3 b2(16, 16), g2((G + 15) / 16, (G + 15) / 16);
             const int radius = 6;
             kBlurLine<<<g2, b2>>>(d.proj,  d.projA, G, radius, 1);
             kBlurLine<<<g2, b2>>>(d.projA, d.projB, G, radius, 0);
-            // 가스 밀도는 기존 밀도 격자를 그대로 투영해 쓴다. 별도 「가스만」 격자를
-            // 만들지 않는 이유는 별이 이미 밝아 더해져도 눈에 안 띄기 때문이다.
-            kClearF<<<blocks, 256>>>(d.projA, cells);
-            kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.projA, G, d.stride(), rot);
-            kAddNebula<<<blocks, 256>>>(d.proj, d.projB, d.projA, d.proj, cells, d.cfg.nebulaK);
+            if (wantGlow) {
+                kAddGlow<<<blocks, 256>>>(d.proj, d.projB, d.proj, cells, d.cfg.starGlowK);
+            }
+            if (wantNebula) {
+                // 가스 밀도는 기존 밀도 격자를 그대로 투영해 쓴다. 별도 「가스만」 격자를
+                // 만들지 않는 이유는 별이 이미 밝아 더해져도 눈에 안 띄기 때문이다.
+                kClearF<<<blocks, 256>>>(d.projA, cells);
+                kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.projA, G, d.stride(), rot);
+                kAddNebula<<<blocks, 256>>>(d.proj, d.projB, d.projA, d.proj, cells, d.cfg.nebulaK);
+            }
         }
         CK(cudaGetLastError());
         return d.proj;
