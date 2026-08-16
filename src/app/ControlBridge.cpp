@@ -366,6 +366,10 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         // 상한을 크게 잡는다: σ² 가 잘 식은 자리에서 0.0002 까지 내려가므로 문턱을 올리려면
         // 그만큼 큰 수가 필요하다.
         if (has(kv, "starJeansK"))     app.cfg.starJeansK     = clampF(getFloat(kv, "starJeansK", app.cfg.starJeansK), 0.0f, 1.0e7f, app.cfg.starJeansK);
+        // 별 형성 효율 — 가스가 남는 비율을 정하는 값이라 밖에서 스캔할 수 있어야 한다.
+        // 1 이면 옛 동작(조건을 만족하면 즉시 전부 별)이라 상한을 거기 둔다.
+        if (has(kv, "starFormEfficiency"))
+            app.cfg.starFormEfficiency = clampF(getFloat(kv, "starFormEfficiency", app.cfg.starFormEfficiency), 0.0f, 1.0f, app.cfg.starFormEfficiency);
         // 수명·최후를 가르는 값들. 별 비율이 평형에 드는지는 이 넷의 균형이 정하므로
         // 밖에서 돌려 볼 수 있어야 한다.
         if (has(kv, "starSunMass"))    app.cfg.starSunMass    = clampF(getFloat(kv, "starSunMass", app.cfg.starSunMass), 1.0f, 1.0e6f, app.cfg.starSunMass);

@@ -1098,7 +1098,8 @@ __global__ void kPressure(const float* dispX, const float* dispY, const float* d
 // 「재가 많으면 작은 별을 만들어라」라는 줄을 코드에 적을 필요가 없다 — 그것이 연출이다.
 __global__ void kStarForm(float4* pos, int n, int G, int periodic,
                           const float* dispX, const float* dispY, const float* dispZ,
-                          const float* dispCnt, float kJeans, float sunMass) {
+                          const float* dispCnt, float kJeans, float sunMass,
+                          float formEff, float dt, unsigned seed) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -1121,6 +1122,26 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
     // ρ > k_J · σ². σ² 가 0 에 가까우면(잘 식은 자리) 문턱이 0 으로 내려가는데,
     // 그때는 cnt >= 2 조건이 바닥 노릇을 한다.
     if (cnt > kJeans * s2) {
+        // **조건을 만족해도 그 스텝에 별이 되는 것은 일부다 — 별 형성 효율.**
+        //
+        // 실제 거대 분자운은 **1~5% 만** 별이 되고 나머지는 가스로 남는다. 별이 켜지면
+        // 그 복사와 항성풍이 둘레를 흩어 다음 별이 되는 것을 막기 때문이다.
+        //
+        // 이것이 없으면 조건을 만족한 알갱이가 **그 자리에서 100% 별이 된다.** 그러면
+        // 별이 되는 속도가 사실상 무한대라, 별이 죽어 가스로 돌아오는 속도가 아무리
+        // 빨라도 평형이 「전부 별」에 선다 — 2026-08-16 실측에서 100초에 가스가 100만 중
+        // 623 개, IMF 를 넣은 뒤에도 0% 였다. **속도를 유한하게 만들어야 평형점이 생긴다.**
+        //
+        // `dt` 를 곱해 배속을 바꿔도 같은 속도로 별이 되게 한다(`kCool` 의 `k` 와 같은 규칙).
+        // 씨앗에 스텝 번호를 섞는다 — 알갱이 번호만 쓰면 매 스텝 같은 값이 나와 어떤
+        // 알갱이는 영원히 별이 안 되고 어떤 알갱이는 즉시 된다.
+        if (formEff > 0.f) {
+            unsigned g = (unsigned)i * 747796405u + seed;
+            g ^= g >> 16; g *= 2246822519u; g ^= g >> 13;
+            const float r = (float)(g & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+            if (r > formEff * dt * 60.0f) return;
+        }
+
         // **별 질량에 상한을 건다 — 이 상한이 없어 2026-08-16 에 시스템이 죽었다.**
         //
         // 전에는 `p.w = cnt` 였다. `cnt` 는 그 칸에 모인 알갱이 수라 **상한이 없다** —
@@ -2685,7 +2706,9 @@ void Sim::Impl::doCooling(float dt) {
         kStarForm<<<(allocN + 255) / 256, 256>>>(pos, allocN, G, periodic() ? 1 : 0,
                                                  dispX, dispY, dispZ, dispCnt,
                                                  cfg.starJeansK,
-                                                 fmaxf(cfg.starSunMass, 1.0f));
+                                                 fmaxf(cfg.starSunMass, 1.0f),
+                                                 cfg.starFormEfficiency, dt,
+                                                 (unsigned)(stepCount * 2246822519u + 374761393u));
         CK(cudaGetLastError());
     }
 }
