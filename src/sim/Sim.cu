@@ -2003,11 +2003,23 @@ __global__ void kBlurLine(const float* src, float* dst, int G, int radius, int h
 // **가스는 스스로 안 빛나므로 곱셈이다** — 별빛이 없는 자리의 가스는 아무리 짙어도 검다.
 // 그것이 실제 반사성운의 성질이고, 그래서 같은 구름이 근처에 별이 있으면 빛나고 없으면
 // 안 보인다.
+// **정체로 내렸다가 round-35 에서 풀었다 — 원인은 두 값의 자릿수였다.**
+//
+// 전에는 `starLight + gas·spread·k` 로 그냥 더했다. 그런데 `gas` 는 밀도 격자 값이라
+// 10만 단위인데 `starLight` 는 훨씬 작아서, 곱한 결과가 별빛을 완전히 압도한다. 밝기
+// 정규화가 그 큰 값을 기준으로 잡으니 **`nebulaK` 를 올릴수록 화면이 어두워졌다**
+// (round-20·21 실측: 흐린 픽셀 15.2% → 10.6%).
+//
+// 고친 것 둘. **①`gas` 를 평균으로 나눠 「평균의 몇 배인가」로 바꾼다** — 그러면 별빛과
+// 같은 자릿수에서 섞인다. **②후광과 같은 에너지 보존을 쓴다**(`/(1+k)`) — 빛은 퍼질 뿐
+// 늘지 않으므로 총량이 그대로여야 정규화 기준이 안 올라간다. 후광(`kAddGlow`)에서 같은
+// 함정을 만나 먼저 푼 수법이고, 여기가 그 원본이 되는 자리였다.
 __global__ void kAddNebula(const float* starLight, const float* spread, const float* gas,
-                           float* out, int n, float k) {
+                           float* out, int n, float k, float invMeanGas) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    out[i] = starLight[i] + gas[i] * spread[i] * k;
+    const float g = gas[i] * invMeanGas;          // 평균이 1 이 되게
+    out[i] = (starLight[i] + g * spread[i] * k) * (1.f / (1.f + k));
 }
 
 // 별에 후광을 입힌다 — **밝은 별일수록 넓게 보이게 하는 자리다.**
@@ -4208,11 +4220,18 @@ const float* Sim::fieldDevicePtr(Field field) {
                 // 만들지 않는 이유는 별이 이미 밝아 더해져도 눈에 안 띄기 때문이다.
                 kClearF<<<blocks, 256>>>(d.projA, cells);
                 kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.projA, G, d.stride(), rot);
-                kAddNebula<<<blocks, 256>>>(d.proj, d.projB, d.projA, d.proj, cells, d.cfg.nebulaK);
+                // 가스 밀도를 **평균의 몇 배인가**로 바꿔 넘긴다. 2D 로 투영한 격자라
+                // 칸당 평균이 「알갱이 수 ÷ 화면 칸 수」다. 이 정규화가 없으면 밀도 값
+                // (10만 단위)이 별빛을 압도해 화면이 도로 어두워진다(위 커널 주석).
+                const float invMeanGas = (d.allocN > 0)
+                                       ? ((float)cells / (float)d.allocN) : 1.0f;
+                kAddNebula<<<blocks, 256>>>(d.proj, d.projB, d.projA, d.proj,
+                                            cells, d.cfg.nebulaK, invMeanGas);
                 // 성운도 온도를 함께 받는다 — 반사광의 색은 비추는 별의 색이다.
+                // **같은 계수로 나누므로** `온도합 ÷ 밝기` 의 비는 그대로다.
                 if (d.projT && d.projTB) {
                     kAddNebula<<<blocks, 256>>>(d.projT, d.projTB, d.projA, d.projT,
-                                                cells, d.cfg.nebulaK);
+                                                cells, d.cfg.nebulaK, invMeanGas);
                 }
             }
         }

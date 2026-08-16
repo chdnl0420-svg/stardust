@@ -228,7 +228,10 @@ std::string ControlBridge::statusBody(const App& app) const {
         "bornAsh=%.3f\ncellAsh=%.6f\n"
         // 회전곡선 — 반지름 네 구간의 평균 접선 속도. 바깥 둘이 안 떨어지면 평평한 것이고,
         // 그것이 암흑물질 헤일로가 실제로 일하고 있다는 신호다.
-        "rot1=%.5f\nrot2=%.5f\nrot3=%.5f\nrot4=%.5f\n",
+        "rot1=%.5f\nrot2=%.5f\nrot3=%.5f\nrot4=%.5f\n"
+        // 코어가 실제로 들고 있는 값. **밖에서 보낸 설정이 여기까지 왔는지**를 보는 창이다 —
+        // `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다(round-06 리뷰 P1 #2).
+        "coreNebulaK=%.4f\ncoreGlowK=%.4f\ncoreIonizeK=%.4f\ncoreDark=%.4f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -270,7 +273,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         sim.bornAshMean(),
         // 판 전체의 칸당 재 평균. 격자는 패딩 없이 G³ 다.
         (double)sim.totalAsh() / (double)((double)sim.gridSize() * sim.gridSize() * sim.gridSize()),
-        rot[0], rot[1], rot[2], rot[3]);
+        rot[0], rot[1], rot[2], rot[3],
+        sim.config().nebulaK, sim.config().starGlowK,
+        sim.config().starIonizeK, sim.config().darkMatterFraction);
     return buf;
 }
 
