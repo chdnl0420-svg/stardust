@@ -691,6 +691,11 @@ public:
     // 보이는 물질만 있으면 바깥으로 갈수록 `v ∝ 1/√r` 로 떨어지고, 암흑물질 헤일로가
     // 있으면 안 떨어지고 평평해진다 — 실제 은하가 그렇고 그것이 암흑물질의 첫 증거였다.
     void rotationCurve(float* out4) const;
+    // **퍼진 별빛** 격자와 그 온도(G²). 점 렌더가 반사성운을 그릴 때 가스 알갱이가
+    // 자기 자리의 별빛을 **읽는다** — 이웃을 훑지 않으므로 비용이 알갱이 수와 무관하다.
+    // `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다.
+    const float* lightSpreadDevicePtr() const;
+    const float* lightSpreadTempDevicePtr() const;
 
     // 보는 방향(라디안). 좌우로 도는 각과 위아래로 기우는 각.
     // 둘 다 0 이면 위에서 곧장 내려다보던 그림 그대로이고, 그때는 회전 계산도 건너뛴다.

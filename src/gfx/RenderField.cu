@@ -262,7 +262,9 @@ struct BHDisk {
 __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* temp,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
-                             float sizePx, float sunMass, float pulsePhase, BHDisk bh) {
+                             float sizePx, float sunMass, float pulsePhase, BHDisk bh,
+                             const float* spread, const float* spreadT, int gridG,
+                             float nebulaK) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -337,7 +339,28 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
         } else if (p.w < 0.f) {
             L = 1.0e4f; TK = 30000.f;                              // 폭발 중
         } else {
-            L = 0.f; TK = 0.f;                                      // 가스는 스스로 안 빛난다
+            // ── 반사성운 — **가스는 스스로 안 빛나지만 별빛을 받아 산란한다** ──────
+            //
+            // 같은 구름이 근처에 별이 있으면 빛나고 없으면 안 보인다. 그것이 반사성운의
+            // 성질이라 **곱셈**이다(더하기가 아니다).
+            //
+            // 알갱이가 이웃을 훑어 「내 둘레에 별이 얼마나 있나」를 세면 그 비용이
+            // 2026-08-14 에 드라이버를 죽인 자리다. 대신 **격자를 한 번 만들어 읽기만**
+            // 한다 — `kScatterLight` 가 뿌리고 `kBlurLine` 이 흐린 「퍼진 별빛」이 이미
+            // 있으므로, 가스 알갱이는 자기 자리의 값을 한 번 읽으면 된다. 비용이
+            // 알갱이 수에 정비례하는 읽기 두 번이고 원자 연산이 없다.
+            //
+            // 격자 좌표는 회전을 안 거친 `p.x, p.y` 를 쓴다 — 이 커널 자체가 회전을
+            // 안 하므로(위 투영 코드) 그쪽과 일관된다.
+            L = 0.f; TK = 0.f;
+            if (!spread || nebulaK <= 0.f || gridG <= 0) return;
+            const int gx = min(max((int)(p.x * gridG), 0), gridG - 1);
+            const int gy = min(max((int)(p.y * gridG), 0), gridG - 1);
+            const float sp = spread[gy * gridG + gx];
+            if (sp <= 1e-12f) return;                    // 별빛이 없는 자리의 가스는 검다
+            L  = sp * nebulaK;
+            // 반사광의 색은 **비추는 별의 색**이다. 퍼진 온도합을 퍼진 밝기로 나눈다.
+            TK = spreadT ? (spreadT[gy * gridG + gx] / sp) : 6500.f;
         }
 
         // ── 블랙홀 강착원반 ────────────────────────────────────────────────
@@ -783,6 +806,21 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     bhDisk.p[bhDisk.n++] = make_float4(s.x, s.y, s.z, s.rs);
                 }
             }
+            // **반사성운을 점 렌더에서도 그리려면 「퍼진 별빛」 격자가 있어야 한다.**
+            // 그 격자는 `fieldDevicePtr(Field::Light)` 안에서 만들어지는데, 배율이 크면
+            // `wantField` 가 거짓이라 아예 안 불린다 — 그래서 지금까지 성운이 격자 렌더
+            // 구간에서만 뜻이 있었고 실사용 배율에서는 통째로 안 보였다(round-35).
+            // 빛 모드에서 점을 그릴 때는 여기서 한 번 불러 격자를 확보한다.
+            const bool pointsLight = (view.colorBy == ColorBy::Light);
+            const float* nebSpread = nullptr;
+            const float* nebSpreadT = nullptr;
+            float nebK = 0.f;
+            if (pointsLight && app.sim.config().nebulaK > 0.f) {
+                if (!wantField) (void)app.sim.fieldDevicePtr(Sim::Field::Light);
+                nebSpread  = app.sim.lightSpreadDevicePtr();
+                nebSpreadT = app.sim.lightSpreadTempDevicePtr();
+                nebK       = app.sim.config().nebulaK;
+            }
             if (n > 0) {
                 kSplatPoints<<<(n + 255) / 256, 256>>>(
                     (const float4*)app.sim.particlePosDevicePtr(),
@@ -792,7 +830,8 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     app.zoom, app.panX, app.panY, app.ui.pointSizePx,
                     fmaxf(app.sim.config().starSunMass, 1.0f),
                     // 펄서 위상. 90 프레임이 한 바퀴라 60fps 에서 약 1.5초 주기다.
-                    (float)(drawTick_ % 90u) * (6.2831853f / 90.0f), bhDisk);
+                    (float)(drawTick_ % 90u) * (6.2831853f / 90.0f), bhDisk,
+                    nebSpread, nebSpreadT, gridG, nebK);
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //

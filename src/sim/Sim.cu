@@ -4135,6 +4135,14 @@ const float* Sim::lightBeforeGlowDevicePtr() const { return impl_->projLight; }
 // `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다.
 const float* Sim::lightTempDevicePtr() const { return impl_->projT; }
 
+// **퍼진 별빛** 격자(G²) — 별빛을 가로·세로로 흐린 것. 후광과 성운이 나눠 쓰는 재료다.
+// 점 렌더가 반사성운을 그리려면 이것이 필요하다: 가스 알갱이가 **자기 자리의 별빛을
+// 읽어** 밝기로 쓴다. 알갱이마다 이웃을 훑는 대신 격자를 한 번 만들어 읽기만 하는 것이라
+// 비용이 알갱이 수와 무관하다 — 2026-08-14 에 시스템을 죽인 경로를 피한다.
+// `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다.
+const float* Sim::lightSpreadDevicePtr() const { return impl_->projB; }
+const float* Sim::lightSpreadTempDevicePtr() const { return impl_->projTB; }
+
 // 「폭발 자리에서 새 별이 태어나는가」 — 새로 태어난 별이 있던 칸의 **재 평균**이다.
 // 판 전체의 칸당 재 평균과 견주면 답이 나온다: 이쪽이 크면 재가 쌓인 자리(별이 터진
 // 자리)에서 별이 더 잘 태어난다는 뜻이다.
