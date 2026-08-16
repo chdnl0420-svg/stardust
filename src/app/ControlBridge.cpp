@@ -337,16 +337,6 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starCollapseToBH")) app.cfg.starCollapseToBH = getInt(kv, "starCollapseToBH", 0) != 0;
         // 무엇으로 볼지. 「빛」은 별이 실제로 내는 밝기(L = M^3.5)로 그린다 —
         // 밀도 그림과 대비가 통째로 다르다.
-        // `app.look` 도 함께 바꾼다 — `ApplyLook` 이 매 프레임 `look` 을 보고 `colorBy` 를
-        // 다시 정하므로, `colorBy` 만 바꾸면 다음 프레임에 지워진다.
-        if (has(kv, "colorBy")) {
-            const bool wantLight = (kv["colorBy"] == "light");
-            app.look = wantLight ? App::Look::Light : App::Look::Density;
-            app.view.colorBy = wantLight            ? ColorBy::Light
-                             : (kv["colorBy"] == "dispersion") ? ColorBy::Dispersion
-                             : (kv["colorBy"] == "speed")      ? ColorBy::Speed
-                                                               : ColorBy::Density;
-        }
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);
         if (has(kv, "ashCoolK"))       app.cfg.ashCoolK       = clampF(getFloat(kv, "ashCoolK", app.cfg.ashCoolK), 0.0f, 10.0f, app.cfg.ashCoolK);
         if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
@@ -390,8 +380,15 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "colorBy")) {
             const std::string& c = kv["colorBy"];
             // "temperature" 도 받아 준다 — 밖에서 부르던 이름이라 그대로 두면 조용히 무시된다.
-            app.view.colorBy = (c == "dispersion" || c == "temperature") ? ColorBy::Dispersion
-                             : (c == "speed")     ? ColorBy::Speed : ColorBy::Density;
+            app.view.colorBy = (c == "light")                             ? ColorBy::Light
+                             : (c == "dispersion" || c == "temperature")  ? ColorBy::Dispersion
+                             : (c == "speed")                             ? ColorBy::Speed
+                                                                          : ColorBy::Density;
+            // **`app.look` 도 함께 바꾼다.** 설정 보드가 `ApplyLook` 을 부르면 그것이
+            // `look` 을 보고 `colorBy` 를 다시 정하므로, 여기서 `colorBy` 만 바꾸면
+            // 보드를 건드리는 순간 되돌아간다.
+            app.look = (app.view.colorBy == ColorBy::Light) ? App::Look::Light
+                                                            : App::Look::Density;
         }
         if (has(kv, "colormap")) {
             const std::string& c = kv["colormap"];
