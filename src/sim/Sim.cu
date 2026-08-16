@@ -1187,6 +1187,53 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
     }
 }
 
+// 젊고 무거운 별의 자외선이 둘레 가스를 데운다 — **HII 영역.**
+//
+// **왜 필요한가 — 이것이 없으면 판이 통째로 별이 된다.**
+// 2026-08-17 실측: 시뮬 시간 6 에 이미 98.6%가 별이고, 가스가 4,557 → 235 로 한 번도
+// 안 늘고 준다. 무거운 별이 한꺼번에 태어나 한꺼번에 죽고 나면 작은 별만 남는데
+// `T ∝ M^-2.5` 라 그것들은 사실상 안 죽는다 — **가스가 돌아올 길이 없어 사슬이 멎는다.**
+//
+// 실제 은하에서 별 형성 효율이 1~5% 에 묶이는 주된 이유가 이것이다. 갓 태어난 O·B형 별은
+// 자외선을 쏟아 둘레 수소를 이온화하고, 이온화된 가스는 1만 K 로 데워진다. 그러면
+// Jeans 질량 `M_J ∝ σ³/√ρ` 이 크게 올라 **그 자리에서는 다음 별이 못 생긴다.**
+// 별이 자기 재료를 스스로 태워 없애는 셈이다.
+//
+// **규칙을 적지 않는다.** 「별이 많으면 별을 그만 만든다」고 쓰는 것이 아니라 분산 격자에
+// 열을 넣을 뿐이고, 별 형성을 막는 것은 이미 있는 Jeans 조건이다.
+//
+// **비용**: 별 스레드 × 3 atomicAdd. 그나마 `ratio ≥ 8` 인 것만 지나므로(초기질량함수에서
+// 0.27%) 100만 알갱이에 8천 번 남짓이다. 문턱 아래 별은 첫 줄에서 반환한다.
+//
+// 문턱 8 은 실제 값이다 — 태양 8배 아래 별은 자외선이 약해 의미 있는 HII 영역을 못 만든다.
+// 그 위는 이온화 광자 수가 질량에 급격히 붙지만, **여기서는 선형으로 둔다** — 곱의 최댓값에
+// 상한이 있어야 하고(`kEddingtonRatio`=150 에서 잘린다), 지수를 올리면 그 상한이 흐려진다.
+__global__ void kIonize(const float4* pos, const float4* vel, int n, int G, int periodic,
+                        float* dispX, float* dispY, float* dispZ, const float* cellCnt,
+                        float sunMass, float sigma2) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f || p.w <= 0.f) return;          // 가스·폭발중·빈 자리는 아니다
+    if (vel[i].w < 0.f) return;                   // 잔해는 자외선을 안 낸다(핵융합이 끝났다)
+    const float ratio = p.w / fmaxf(sunMass, 1e-6f);
+    if (ratio < 8.0f) return;                     // O·B형만 이온화한다
+
+    const int cx = min(max((int)(p.x * G), 0), G - 1);
+    const int cy = min(max((int)(p.y * G), 0), G - 1);
+    const int cz = min(max((int)(p.z * G), 0), G - 1);
+    const int c  = gidx3(cx, cy, cz, G, G, periodic);
+
+    // `kPressure` 와 `kStarForm` 은 `dispX / dispCnt` 로 **평균**을 읽는다. 그래서 평균에
+    // `sigma2` 만큼을 더하려면 그 칸의 개수를 곱해 넣어야 한다.
+    const float cnt = cellCnt ? cellCnt[c] : 0.f;
+    if (cnt < 1.f) return;
+    const float add = sigma2 * cnt * fminf(ratio / 8.0f, 20.0f);   // 곱의 최댓값을 여기서 자른다
+    atomicAdd(&dispX[c], add);
+    atomicAdd(&dispY[c], add);
+    atomicAdd(&dispZ[c], add);
+}
+
 // 별이 늙고, 수명이 다하면 터지고, 터진 것이 가스로 돌아온다. **사슬을 닫는 커널이다.**
 //
 // **비용**: N 스레드 × O(1). 이웃도 격자도 안 본다 — 자기 알갱이 하나만 읽고 쓴다.
@@ -2903,6 +2950,16 @@ void Sim::Impl::doCooling(float dt) {
                                              ashGrid, cfg.ashCoolK);
     std::swap(vel, velTmp);
     CK(cudaGetLastError());
+
+    // 광전리 되먹임 — 젊고 무거운 별이 둘레 가스를 데운다. **별 판정보다 먼저 돌아야**
+    // 그 열이 이번 스텝의 Jeans 문턱에 반영된다(자세한 근거는 `kIonize` 주석).
+    if (wantPressure && cfg.starIonizeK > 0.f) {
+        kIonize<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, G, periodic() ? 1 : 0,
+                                               dispX, dispY, dispZ, dispCnt,
+                                               fmaxf(cfg.starSunMass, 1.0f),
+                                               cfg.starIonizeK * 1.85e-4f);
+        CK(cudaGetLastError());
+    }
 
     // 별 판정. **방금 갱신한 분산을 그대로 읽으므로 이웃을 다시 훑지 않는다** — O(N) 이다.
     // 압력이 꺼져 있으면 σ² 가 없어 Jeans 조건을 세울 수 없으므로 함께 켜져 있을 때만 돈다.
