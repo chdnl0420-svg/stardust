@@ -1137,7 +1137,9 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
 __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
                          float sunMass, float sunLifeSim, float explodeSim,
                          float kickSpeed, unsigned seed,
-                         float* ashGrid, int G, int periodic, float ashYield) {
+                         float* ashGrid, int G, int periodic, float ashYield,
+                         float4* bhCand, int* bhCandN, int* bhBlocked, int bhSlots,
+                         float bhRatio) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -1182,6 +1184,24 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
                 const int ay_ = min(max((int)(p.y * G), 0), G - 1);
                 const int az_ = min(max((int)(p.z * G), 0), G - 1);
                 atomicAdd(&ashGrid[gidx3(ax_, ay_, az_, G, G, periodic)], p.w * ashYield);
+            }
+
+            // **가장 무거운 것만 블랙홀이 된다.** 중심이 무너져 심만 남고 바깥층은 날아간다.
+            //
+            // 커널은 `addBlackHole` 을 못 부르므로(호스트 함수) 자리와 질량만 남기고,
+            // 호스트가 스텝 끝에서 읽어 만든다. **자리가 여덟뿐이라 넘치면 만들지 않고
+            // 중성자별로 남긴다** — 기존 `addBlackHole` 처럼 가장 가벼운 것을 밀어내면
+            // 그 블랙홀이 삼킨 질량이 소리 없이 사라져 보존이 깨진다.
+            if (ratio >= bhRatio && bhCand && bhCandN) {
+                const int slot = atomicAdd(bhCandN, 1);
+                if (slot < bhSlots) {
+                    bhCand[slot] = make_float4(p.x, p.y, p.z, p.w);
+                    // 이 알갱이는 블랙홀의 씨앗이 되어 자리에서 빠진다.
+                    pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
+                    return;
+                }
+                // 자리가 없다. 세어 두고 아래로 떨어져 중성자별처럼 터지기만 한다.
+                if (bhBlocked) atomicAdd(bhBlocked, 1);
             }
 
             p.w = -explodeSim;                // 폭발 시작 — 이 시간 동안 보인다
@@ -1677,6 +1697,21 @@ struct Sim::Impl {
     // 128³ × 4B = 8 MB.
     float  *ashGrid = nullptr;
 
+    // ── 블랙홀 후보 (커널 → 호스트 다리) ──────────────────────────────────
+    //
+    // **커널은 `addBlackHole` 을 부를 수 없다** — 그것은 호스트 함수이고 `bhs[]` 배열과
+    // `bhCount` 를 만진다. 그래서 커널은 「여기 블랙홀이 될 별이 있다」고 자리와 질량만
+    // 남기고, 호스트가 스텝 끝에서 읽어 실제로 만든다.
+    //
+    // 한 스텝에 여러 개가 동시에 수명을 다할 수 있어 배열로 받되, 자리가 여덟뿐이라
+    // 그 이상은 받지 않는다. 넘친 것은 `bhBlockedCount` 로 세어 **중성자별로 남긴다** —
+    // 기존 `addBlackHole` 처럼 가장 가벼운 것을 밀어내면 그 블랙홀이 삼킨 질량이
+    // 소리 없이 사라져 보존이 깨진다(설계 2.4).
+    float4 *bhCand = nullptr;        // [kMaxBlackHoles] 자리(xyz) + 질량(w)
+    int    *bhCandN = nullptr;       // 이번 스텝의 후보 수
+    int    *bhBlockedCount = nullptr;// 자리가 없어 중성자별로 남은 누적 횟수
+    int     bhBlockedHost = 0;       // 호스트 쪽 사본(사고 기록·상태 표시용)
+
     cufftComplex *specRho = nullptr, *specGreen = nullptr;
     cufftHandle planR2C = 0, planC2R = 0;
     bool planReady = false;
@@ -1961,6 +1996,7 @@ void Sim::Impl::freeAll() {
     F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)accMag);
     F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
     F((void*&)ashGrid);
+    F((void*&)bhCand); F((void*&)bhCandN); F((void*&)bhBlockedCount);
     F((void*&)specRho); F((void*&)specGreen);
     F((void*&)keys); F((void*&)order); F((void*&)cellStart); F((void*&)cellEnd);
     F((void*&)flag); F((void*&)scan);
@@ -2004,6 +2040,14 @@ void Sim::Impl::allocate() {
         CK(cudaMalloc(&ashGrid, sizeof(float) * gcells));
         CK(cudaMemset(ashGrid, 0, sizeof(float) * gcells));
     }
+    // 블랙홀 후보 다리. 잡은 직후 반드시 비운다 — 미초기화 후보 수를 읽으면
+    // 쓰레기 좌표로 블랙홀이 생긴다.
+    CK(cudaMalloc(&bhCand, sizeof(float4) * kMaxBlackHoles));
+    CK(cudaMalloc(&bhCandN, sizeof(int)));
+    CK(cudaMalloc(&bhBlockedCount, sizeof(int)));
+    CK(cudaMemset(bhCand, 0, sizeof(float4) * kMaxBlackHoles));
+    CK(cudaMemset(bhCandN, 0, sizeof(int)));
+    CK(cudaMemset(bhBlockedCount, 0, sizeof(int)));
     CK(cudaMalloc(&rho, sizeof(float) * cells));
     CK(cudaMalloc(&pot, sizeof(float) * cells));
     CK(cudaMalloc(&proj, sizeof(float) * (size_t)G * G));
@@ -2682,8 +2726,35 @@ void Sim::step() {
             fmaxf(d.cfg.starSunMass, 1.0f), fmaxf(d.cfg.starSunLifeSim, 1e-3f),
             fmaxf(d.cfg.starExplodeSim, 1e-4f), d.cfg.starKickSpeed,
             (unsigned)(d.stepCount * 2654435761u + 7919u),
-            d.ashGrid, d.allocG, d.periodic() ? 1 : 0, d.cfg.starAshYield);
+            d.ashGrid, d.allocG, d.periodic() ? 1 : 0, d.cfg.starAshYield,
+            d.bhCand, d.bhCandN, d.bhBlockedCount, kMaxBlackHoles,
+            fmaxf(d.cfg.starBHRatio, 1.0f));
         CK(cudaGetLastError());
+
+        // 커널이 남긴 블랙홀 후보를 호스트가 실제로 만든다.
+        //
+        // **후보 수를 먼저 읽고 0 이면 아무것도 안 한다** — 매 스텝 float4 8개를 복사하면
+        // 그 복사가 GPU 를 세운다. 별이 블랙홀이 되는 것은 드문 일이라 대부분 여기서 끝난다.
+        int nCand = 0;
+        CK(cudaMemcpy(&nCand, d.bhCandN, sizeof(int), cudaMemcpyDeviceToHost));
+        if (nCand > 0) {
+            float4 cand[kMaxBlackHoles];
+            const int take = (nCand < kMaxBlackHoles) ? nCand : kMaxBlackHoles;
+            CK(cudaMemcpy(cand, d.bhCand, sizeof(float4) * take, cudaMemcpyDeviceToHost));
+            for (int c = 0; c < take; ++c) {
+                // **자리가 있을 때만 만든다.** `addBlackHole` 은 자리가 차면 가장 가벼운 것을
+                // 밀어내는데, 그건 사용자가 마우스로 놓을 때의 규칙이다. 저절로 생기는 쪽이
+                // 남의 자리를 빼앗으면 삼킨 질량이 사라진다.
+                if (d.bhCount < kMaxBlackHoles) {
+                    d.addBlackHole(cand[c].x, cand[c].y, cand[c].z, cand[c].w, true);
+                } else {
+                    ++d.bhBlockedHost;
+                }
+            }
+            CK(cudaMemset(d.bhCandN, 0, sizeof(int)));
+            fx::mark("별이 무너져 블랙홀 %d 개 — 자리 %d/%d, 밀려난 후보 누적 %d",
+                     take, d.bhCount, kMaxBlackHoles, d.bhBlockedHost);
+        }
     }
 
     d.simTime += dt;
