@@ -155,6 +155,9 @@ std::string ControlBridge::statusBody(const App& app) const {
     // 미리 받아 둔다.
     double dxx = 0.0, dyy = 0.0, dzz = 0.0;
     app.sim.measureDispersionAxes(dxx, dyy, dzz);
+    // 원반의 공간 두께도 커널을 돌리고 `redD` 를 위 셋과 나눠 쓴다 — 포맷 인자 안에서
+    // 부르면 평가 순서가 정해져 있지 않아 서로의 축소 버퍼를 덮는다.
+    const double diskSigmaZ = app.sim.measureDiskThickness();
     // 보존량도 같은 이유로 미리 받는다 — 커널을 여럿 돌리므로 포맷 인자 안에서 부르면
     // 평가 순서가 정해져 있지 않아 값이 섞인다.
     const Sim::Conservation cons = app.sim.measureConservation();
@@ -197,6 +200,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 방향별 분산. zz 가 xx·yy 보다 작으면 원반이 스스로 납작해지는 중이다.
         "vramFreeMB=%.0f\ndangerStepMs=%.1f\nmeanStarMass=%.3f\ntotalAsh=%.1f\n"
         "dispXX=%.8f\ndispYY=%.8f\ndispZZ=%.8f\n"
+        // 그래서 판이 실제로 얼마나 두꺼운가. 씨앗 diskThickness 보다 크게 자라면
+        // 두께를 만든 것은 초기 배치가 아니라 압력이다.
+        "diskSigmaZ=%.6f\ndiskSeed=%.6f\n"
         // 보존량. **gas + star + nova + remnant + 삼킨 수 = 총 알갱이 수** 여야 한다.
         // badValues 는 NaN·무한대 개수로 하나라도 0 이 아니면 실패다.
         "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\nbadValues=%d\n"
@@ -238,6 +244,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
         Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
         app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz,
+        diskSigmaZ, app.cfg.diskThickness,
         cons.gas, cons.stars, cons.exploding, cons.remnants, cons.bad,
         cons.maxCellCount, cons.momentum,
         emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter,
@@ -350,6 +357,11 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "sortInterval"))   app.cfg.sortInterval   = clampI(getInt(kv, "sortInterval", app.cfg.sortInterval), 1, 120);
         if (has(kv, "pressure"))       app.cfg.pressureEnabled = getInt(kv, "pressure", 1) != 0;
         if (has(kv, "pressureK"))      app.cfg.pressureK      = clampF(getFloat(kv, "pressureK", app.cfg.pressureK), 0.0f, 2.0f, app.cfg.pressureK);
+        // 원반을 처음 깔 때 주는 두께 **씨앗**이다. 「두께를 손으로 안 정해도 두께가
+        // 생기는가」를 대조하려면 이 값을 밖에서 0 과 0.001 로 바꿔 볼 수 있어야 한다.
+        // 0 을 허용한다 — 완전 평면이면 z 속도가 전부 0 이라 압력이 부풀릴 것도 없고,
+        // 그 대칭이 안 깨지는 것 자체가 결과다(round-10 판단).
+        if (has(kv, "diskThickness"))  app.cfg.diskThickness  = clampF(getFloat(kv, "diskThickness", app.cfg.diskThickness), 0.0f, 0.3f, app.cfg.diskThickness);
         // Jeans 상수 — 별 비율을 5% 안팎으로 맞추려면 밖에서 돌려 볼 수 있어야 한다.
         // 상한을 크게 잡는다: σ² 가 잘 식은 자리에서 0.0002 까지 내려가므로 문턱을 올리려면
         // 그만큼 큰 수가 필요하다.

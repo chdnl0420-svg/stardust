@@ -433,6 +433,9 @@ public:
     double           totalAsh() const;
     // 방향별 속도 분산. zz 가 xx·yy 보다 작으면 원반이 스스로 납작해지고 있다는 뜻이다.
     void             measureDispersionAxes(double& xx, double& yy, double& zz) const;
+    // 원반의 **공간** 두께(z 표준편차). 위와 짝이지만 다른 것을 잰다 — 저기는 속도가
+    // 흩어진 정도, 여기는 그래서 판이 실제로 얼마나 두꺼운가다.
+    double           measureDiskThickness() const;
 
     // 보존량 — **이 판이 물리가 아니라 회계에서 틀리지 않았는지 보는 창.**
     // `gas + stars + exploding + remnants + 삼킨 수 = 총 알갱이 수` 여야 한다.

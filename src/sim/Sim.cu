@@ -1377,6 +1377,30 @@ __global__ void kMomentumAccum(const float4* pos, const float4* vel, int n, doub
     atomicAdd(&out[2], (double)v.z);
 }
 
+// 원반이 실제로 얼마나 두꺼운지 — **공간** 두께다.
+//
+// 방향별 속도 분산(`dispZZ`)이 「위아래로 덜 밀린다」를 말한다면 이 값은 그래서
+// **판이 실제로 얼마나 얇은가**를 말한다. 둘은 다른 것이라 하나가 다른 하나를 대신하지
+// 못한다 — 속도가 작아도 처음부터 두껍게 깔았으면 두껍고, 속도가 커도 중력이 되당기면
+// 얇을 수 있다. 「`diskThickness` 를 손으로 안 정해도 두께가 생기는가」는 공간 쪽 질문이다.
+//
+// 표준편차라 √(E[z²] − E[z]²) 이고, 그러려면 z 합·z² 합·개수 셋이 필요하다.
+// **평균을 0.5 로 가정하지 않는다** — 판이 통째로 위아래로 옮겨 가도 두께는 그대로여야
+// 하고, round-19 에서 은하가 실제로 판 밖으로 나가는 것을 봤다.
+//
+// 비용: N 스레드 × 3 atomicAdd = 3N. N=100만이면 300만 회.
+__global__ void kDiskThickness(const float4* pos, int n, double* out) {
+    // 위 `kCountStates`·`kMomentumAccum` 과 같은 이유로 shared 배열을 안 쓴다.
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f || !isfinite(p.z)) return;
+    const double z = (double)p.z;
+    atomicAdd(&out[0], z);
+    atomicAdd(&out[1], z * z);
+    atomicAdd(&out[2], 1.0);
+}
+
 // 개수와 **질량 합**을 함께 센다. 평균 별 질량이 있어야 「1세대가 나중 세대보다 무거운가」를
 // 볼 수 있고, 그것이 재 사슬이 실제로 도는지를 보여 주는 유일한 수치다.
 __global__ void kCountStars(const float4* pos, int n, int* outCount, double* outMass) {
@@ -3205,6 +3229,26 @@ void Sim::measureDispersionAxes(double& xx, double& yy, double& zz) const {
     xx = sumOf(d.dispX) / cnt;
     yy = sumOf(d.dispY) / cnt;
     zz = sumOf(d.dispZ) / cnt;
+}
+
+// 원반의 공간 두께(z 표준편차). 위 `measureDispersionAxes` 와 짝이지만 **다른 것을 잰다** —
+// 저기는 속도가 위아래로 얼마나 흩어졌나, 여기는 그래서 판이 실제로 얼마나 두꺼운가다.
+// `diskThickness` 를 씨앗 0.001 로 두고 시작해 이 값이 그보다 크게 자라면, 두께를 만든 것은
+// 초기 배치가 아니라 압력이다.
+double Sim::measureDiskThickness() const {
+    Impl& d = *impl_;
+    if (g_failed || d.allocN <= 0) return 0.0;
+    CK(cudaMemset(d.redD, 0, sizeof(double) * 3));   // redD 는 4칸 — 셋을 쓴다
+    kDiskThickness<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.allocN, d.redD);
+    CK(cudaGetLastError());
+    double h[3] = {0.0, 0.0, 0.0};
+    CK(cudaMemcpy(h, d.redD, sizeof(double) * 3, cudaMemcpyDeviceToHost));
+    if (h[2] < 2.0) return 0.0;
+    const double mean = h[0] / h[2];
+    // 알갱이가 수백만이라 표본분산(n−1)과 모분산(n)의 차이는 유효숫자 밖이다.
+    // 음수는 부동소수 오차로만 나오므로 0 으로 자른다.
+    const double var = h[1] / h[2] - mean * mean;
+    return var > 0.0 ? sqrt(var) : 0.0;
 }
 
 // 판 전체에 쌓인 재의 총량. 사슬이 도는지 밖에서 확인할 창이다.
