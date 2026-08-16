@@ -430,6 +430,19 @@ public:
     // 방향별 속도 분산. zz 가 xx·yy 보다 작으면 원반이 스스로 납작해지고 있다는 뜻이다.
     void             measureDispersionAxes(double& xx, double& yy, double& zz) const;
 
+    // 보존량 — **이 판이 물리가 아니라 회계에서 틀리지 않았는지 보는 창.**
+    // `gas + stars + exploding + remnants + 삼킨 수 = 총 알갱이 수` 여야 한다.
+    struct Conservation {
+        int    gas = 0;           // 아직 별이 안 된 것
+        int    stars = 0;         // 빛나는 별
+        int    exploding = 0;     // 폭발 중
+        int    remnants = 0;      // 백색왜성·중성자별
+        int    bad = 0;           // NaN·무한대 — **하나라도 있으면 실패다**
+        int    maxCellCount = 0;  // 한 칸에 몰린 최대 수(원자 연산 경합의 선행 지표)
+        double momentum = 0.0;    // 총 운동량 크기
+    };
+    Conservation     measureConservation() const;
+
     // CUDA 가 한 번이라도 실패했는가. 실패하면 그 뒤로 스텝이 멈춰 화면이 그대로 굳는다 —
     // 왜 굳었는지 사용자가 알 수 있어야 하므로 밖에서 읽을 수 있게 연다.
     static bool        failed();

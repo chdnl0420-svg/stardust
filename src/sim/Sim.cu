@@ -1219,6 +1219,69 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
 // 별이 몇 개인지 센다. `starCount()` 가 불릴 때만 돈다 — 매 스텝 세면 그 자체가 비용이다.
 //
 // 블록 안에서 모으고 블록마다 한 번만 전역에 더한다(kCountAlive 와 같은 수법).
+// 알갱이를 상태별로 세고, 못 쓰게 된 값(NaN·무한대)도 함께 잡는다.
+//
+// **비용**: N 스레드 × O(1). `starCount()` 처럼 부를 때만 돈다.
+//
+// **이 커널이 「알갱이가 사라지거나 생기지 않는다」를 증명하는 유일한 수단이다.**
+// 가스 + 별 + 폭발중 + 잔해 + 삼킨 수 = 총 알갱이 수 여야 한다. 이 등식이 깨지면
+// 어딘가에서 상태 판정이 겹치거나(두 번 세거나) 빈다는 뜻이고, 그것은 곧 물리가 아니라
+// 회계가 틀렸다는 신호다.
+//
+// 상태는 두 축으로 갈린다(design.md 1장):
+//   pos.w   0 = 가스 · >0 = 별 · <0 = 폭발 중
+//   vel.w   ≥0 = 나이 · <0 = 잔해
+// **잔해를 먼저 본다** — 잔해는 `pos.w > 0` 이기도 해서 별과 겹치기 때문이다.
+__global__ void kCountStates(const float4* pos, const float4* vel, int n,
+                             int* out /* [5]: 가스·별·폭발·잔해·못쓸값 */) {
+    // **블록 안에 모으지 않고 전역에 바로 더한다.**
+    //
+    // 처음에는 `kCountAlive` 처럼 shared 배열에 모아 블록마다 한 번씩 전역에 더했는데,
+    // 값이 전부 0 으로 나왔다(2026-08-16 실측). shared 배열 다섯 칸을 앞 다섯 스레드가
+    // 초기화하고 나머지 251개가 거기 원자 연산을 하는 구조였다.
+    //
+    // 여기서는 그 최적화를 포기한다. `starCount()` 처럼 **부를 때만 도는 커널**이라
+    // 매 프레임 비용이 아니고, 전역 원자 연산 100만 회는 그 자리에서 감당된다.
+    // 정확한 값이 안 나오는 최적화보다 느려도 맞는 쪽이 낫다.
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;                         // 삼켜졌거나 빈 자리는 세지 않는다
+
+    const float4 v = vel[i];
+    if (!isfinite(p.x) || !isfinite(p.y) || !isfinite(p.z) ||
+        !isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) {
+        atomicAdd(&out[4], 1);                     // 못 쓸 값 — 하나라도 있으면 실패다
+    } else if (v.w < 0.f)      atomicAdd(&out[3], 1);   // 잔해(별보다 먼저 본다)
+    else if (p.w < 0.f)        atomicAdd(&out[2], 1);   // 폭발 중
+    else if (p.w > 0.f)        atomicAdd(&out[1], 1);   // 별
+    else                       atomicAdd(&out[0], 1);   // 가스
+}
+
+// 한 칸에 알갱이가 얼마나 몰렸는지 — **원자 연산 경합의 선행 지표다.**
+// 이 값이 치솟는 순간이 곧 커널 하나가 수십 배 느려지는 순간이고, 그것이 드라이버
+// 타임아웃으로 이어진 것이 2026-08-14 재부팅의 경로였다.
+__global__ void kMaxCellCount(const int* cellStart, const int* cellEnd, int cells, int* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= cells) return;
+    const int s0 = cellStart[i], e0 = cellEnd[i];
+    if (s0 < 0 || e0 <= s0) return;
+    atomicMax(out, e0 - s0);
+}
+
+// 총 운동량. **폭발이 없던 운동량을 만들지 않는지** 보는 창이다.
+// 등방으로 뿌리므로 무리 전체의 합은 폭발 전후로 크게 안 변해야 한다.
+__global__ void kMomentumAccum(const float4* pos, const float4* vel, int n, double* out) {
+    // 위 `kCountStates` 와 같은 이유로 shared 배열을 안 쓴다.
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || pos[i].x < 0.f) return;
+    const float4 v = vel[i];
+    if (!isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) return;
+    atomicAdd(&out[0], (double)v.x);
+    atomicAdd(&out[1], (double)v.y);
+    atomicAdd(&out[2], (double)v.z);
+}
+
 // 개수와 **질량 합**을 함께 센다. 평균 별 질량이 있어야 「1세대가 나중 세대보다 무거운가」를
 // 볼 수 있고, 그것이 재 사슬이 실제로 도는지를 보여 주는 유일한 수치다.
 __global__ void kCountStars(const float4* pos, int n, int* outCount, double* outMass) {
@@ -2093,8 +2156,11 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&scan, sizeof(int) * N));
     CK(cudaMalloc(&cellStart, sizeof(int) * (size_t)G * G * G));
     CK(cudaMalloc(&cellEnd, sizeof(int) * (size_t)G * G * G));
-    CK(cudaMalloc(&redD, sizeof(double) * 2));
-    CK(cudaMalloc(&redI, sizeof(int) * 2));
+    // **2 에서 4 로 늘렸다(2026-08-16).** 총 운동량이 x·y·z 세 칸을 쓴다 —
+    // 2칸짜리에 3칸을 `cudaMemset` 하면 범위 밖 쓰기이고, 그 뒤 커널들이 조용히 실패한다.
+    CK(cudaMalloc(&redD, sizeof(double) * 4));
+    // 상태별 개수 5칸 + 셀 최대 점유 1칸 + 여유. 늘려 두어도 32바이트다.
+    CK(cudaMalloc(&redI, sizeof(int) * 8));
     CK(cudaMalloc(&redU, sizeof(unsigned long long)));
     CK(cudaMalloc(&redF, sizeof(float)));
     // 삼킨 수와 블랙홀 자리의 가속도는 블랙홀마다 하나씩. 잡은 직후에 반드시 비운다 —
@@ -2844,6 +2910,39 @@ double Sim::meanStarMass() const {
     CK(cudaMemcpy(&cnt, d.redI, sizeof(int), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(&sum, d.redD, sizeof(double), cudaMemcpyDeviceToHost));
     return (cnt > 0) ? sum / (double)cnt : 0.0;
+}
+
+// 보존량을 한 번에 잰다. **이 판이 물리가 아니라 회계에서 틀리지 않았는지 보는 창이다.**
+//
+// 매 프레임 부르지 않는다 — 결과를 호스트로 가져오는 복사가 GPU 를 세우기 때문이고,
+// 이 값들은 바퀴마다 한 번 확인하면 충분하다.
+Sim::Conservation Sim::measureConservation() const {
+    Impl& d = *impl_;
+    Conservation c{};
+    if (g_failed || d.allocN <= 0) return c;
+
+    // 상태별 개수 + 못 쓸 값
+    CK(cudaMemset(d.redI, 0, sizeof(int) * 8));
+    kCountStates<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redI);
+    int h[5] = {0, 0, 0, 0, 0};
+    CK(cudaMemcpy(h, d.redI, sizeof(int) * 5, cudaMemcpyDeviceToHost));
+    c.gas = h[0]; c.stars = h[1]; c.exploding = h[2]; c.remnants = h[3]; c.bad = h[4];
+
+    // 총 운동량
+    CK(cudaMemset(d.redD, 0, sizeof(double) * 3));
+    kMomentumAccum<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redD);
+    double m[3] = {0.0, 0.0, 0.0};
+    CK(cudaMemcpy(m, d.redD, sizeof(double) * 3, cudaMemcpyDeviceToHost));
+    c.momentum = sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+
+    // 셀별 최대 점유수 — 정렬이 돌아 있을 때만 뜻이 있다(냉각·접촉이 켜져 있으면 돈다).
+    if (d.cellStart && d.cellEnd) {
+        const int cells = d.allocG * d.allocG * d.allocG;
+        CK(cudaMemset(d.redI + 5, 0, sizeof(int)));
+        kMaxCellCount<<<(cells + 255) / 256, 256>>>(d.cellStart, d.cellEnd, cells, d.redI + 5);
+        CK(cudaMemcpy(&c.maxCellCount, d.redI + 5, sizeof(int), cudaMemcpyDeviceToHost));
+    }
+    return c;
 }
 
 // 방향별 분산을 따로 돌려준다. **원반이 스스로 납작해지는지를 보는 창이다** —

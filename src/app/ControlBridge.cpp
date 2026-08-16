@@ -141,11 +141,23 @@ std::string ControlBridge::statusBody(const App& app) const {
 
     const UpdateInfo up = app.updater.status();
 
-    char buf[2100];
+    // **2100 에서 4096 으로 늘렸다(2026-08-16).**
+    //
+    // `snprintf` 는 버퍼가 모자라면 **조용히 잘라낸다.** 이 판에서 상태 항목을 열넷 더했더니
+    // (simYears·dangerStepMs·meanStarMass·totalAsh·disp 셋·보존량 일곱) 뒤쪽이 통째로
+    // 잘려 나갔고, 밖에서는 그 필드가 「없는」 것으로 보였다 — 값이 0 인 것과 구분이 안 된다.
+    // 실측에서 보존량이 전부 0 으로 나와 커널을 두 번이나 고쳤는데, 커널은 처음부터
+    // 멀쩡했고 잘린 것이 문제였다.
+    //
+    // **항목을 더할 때는 이 크기를 함께 본다.** 지금 출력이 약 2.4 KB 다.
+    char buf[4096];
     // 방향별 분산은 격자 셋을 각각 합치는 일이라 포맷 인자 안에서 부르면 순서가 꼬인다.
     // 미리 받아 둔다.
     double dxx = 0.0, dyy = 0.0, dzz = 0.0;
     app.sim.measureDispersionAxes(dxx, dyy, dzz);
+    // 보존량도 같은 이유로 미리 받는다 — 커널을 여럿 돌리므로 포맷 인자 안에서 부르면
+    // 평가 순서가 정해져 있지 않아 값이 섞인다.
+    const Sim::Conservation cons = app.sim.measureConservation();
 
     snprintf(buf, sizeof(buf),
         // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
@@ -183,7 +195,11 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 재 사슬이 도는지 밖에서 볼 창. meanStarMass 가 시간에 따라 내려가면 도는 것이다.
         // 방향별 분산. zz 가 xx·yy 보다 작으면 원반이 스스로 납작해지는 중이다.
         "vramFreeMB=%.0f\ndangerStepMs=%.1f\nmeanStarMass=%.3f\ntotalAsh=%.1f\n"
-        "dispXX=%.8f\ndispYY=%.8f\ndispZZ=%.8f\n",
+        "dispXX=%.8f\ndispYY=%.8f\ndispZZ=%.8f\n"
+        // 보존량. **gas + star + nova + remnant + 삼킨 수 = 총 알갱이 수** 여야 한다.
+        // badValues 는 NaN·무한대 개수로 하나라도 0 이 아니면 실패다.
+        "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\nbadValues=%d\n"
+        "maxCellCount=%d\ntotalMomentum=%.4f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -214,7 +230,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         centroidX, centroidY, meanTemp,
         bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
         Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
-        app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz);
+        app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz,
+        cons.gas, cons.stars, cons.exploding, cons.remnants, cons.bad,
+        cons.maxCellCount, cons.momentum);
     return buf;
 }
 
