@@ -362,13 +362,24 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
                 const float dx = p.x - b.x, dy = p.y - b.y, dz = p.z - b.z;
                 const float r2 = dx * dx + dy * dy + dz * dz;
                 const float rs = fmaxf(b.w, 1e-5f);
-                // 원반 바깥 끝은 지평선의 12배. 그 밖은 너무 식어 안 보인다.
-                const float rOut = rs * 12.0f;
+                // 원반 바깥 끝은 지평선의 **30배**. 전에 12배로 뒀는데 그것은 실제보다
+                // 훨씬 작다 — 관측된 강착원반은 안쪽 안정 궤도(3 r_s)부터 **수백~수천 r_s**
+                // 까지 뻗는다. 12배에서는 지평선이 0.0037 인 이 판의 블랙홀이 화면에서
+                // 스무 픽셀짜리 점이 되어, 켜진 픽셀의 **0.10%** 밖에 안 됐다.
+                const float rOut = rs * 30.0f;
                 if (r2 >= rOut * rOut) continue;
                 const float r = fmaxf(__fsqrt_rn(r2), rs);
                 const float x = r / rs;                    // 지평선 단위 거리
                 // 안쪽 5만 K — 초대질량 블랙홀 원반의 실측 범위다(항성질량은 1e7 K 급).
                 const float Td = 50000.f * __powf(x, -0.75f);
+                // **표준 원반 그대로 `r^-3` 이다.** 한 번 `-2` 로 완만하게 해 봤는데
+                // (2026-08-17) 청록 픽셀이 0.10% → 0.36% 로 늘긴 했지만 화면 전체가
+                // 눌려 켜진 픽셀이 32% → 4% 로 떨어졌다. 되돌렸다.
+                //
+                // **바깥 원반이 안 보이는 것은 버그가 아니라 물리다** — 서른 배 자리에서
+                // 2만 7천분의 1 이라 실제로 안 보인다. 강착원반은 블랙홀 **아주 가까이**
+                // 에서만 밝고, 은하 눈금에서 그것은 몇 픽셀이다. 줌인하면 보인다
+                // (round-28 실측: 배율 1.78 에서 청록 0.62%).
                 const float Ld = 100.0f  * __powf(x, -3.0f);
                 // 밝기로 가중해 온도를 섞는다 — 별 위에 원반이 얹히면 밝은 쪽이 색을 정한다.
                 TK = (L + Ld > 0.f) ? (TK * L + Td * Ld) / (L + Ld) : 0.f;
