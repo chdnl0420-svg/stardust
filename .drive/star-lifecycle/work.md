@@ -1,6 +1,11 @@
 # work — star-lifecycle
 
-DRIVE_STATUS: in_progress
+DRIVE_STATUS: done (2026-08-17 · round-44)
+
+**세 묶음이 전부 채워졌다.** ①사용자가 요청한 셋(넷을 눈으로 가른다) ②`spec.md`
+「이번 범위」 미충족 **0개** ③`report-deferred.md` 「미룬 것」 전부 처리(구현 셋 ·
+근거 있는 버림 셋 · 사유 갱신 둘). 보고 3종은 `report-done.md` · `report-deferred.md` ·
+`report-review-me.md`.
 
 ## 진행 상황 (2026-08-17 · round-33 까지)
 
