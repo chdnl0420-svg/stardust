@@ -1088,7 +1088,8 @@ __global__ void kPressure(const float* dispX, const float* dispY, const float* d
 __global__ void kStarForm(float4* pos, int n, int G, int periodic,
                           const float* dispX, const float* dispY, const float* dispZ,
                           const float* dispCnt, float kJeans, float sunMass,
-                          float formEff, float dt, unsigned seed) {
+                          float formEff, float dt, unsigned seed,
+                          const float* ashGrid, double* bornStat) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -1183,6 +1184,18 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
         if (m <= cnt) {
             p.w = m;
             pos[i] = p;
+            // **폭발 자리에서 새 별이 태어나는지 보는 창.**
+            //
+            // 「그 별이 태어난 칸에 재가 얼마나 있었나」를 모은다. 판 전체의 칸당 재 평균과
+            // 견주면 **재가 쌓인 자리(= 별이 터진 자리)에서 별이 더 잘 태어나는지**가 나온다.
+            // 이 수를 안 모으면 그 항목을 스크린샷 인상으로만 판정하게 된다.
+            //
+            // 비용: 별이 되는 순간에만 도는 원자 연산 둘. 태어나는 수는 한 스텝에 수천이라
+            // 셀 필요도 없는 양이다.
+            if (bornStat && ashGrid) {
+                atomicAdd(&bornStat[0], 1.0);
+                atomicAdd(&bornStat[1], (double)ashGrid[c]);
+            }
         }
     }
 }
@@ -2226,6 +2239,9 @@ struct Sim::Impl {
     // 이것을 밝기 합으로 나누면 그 픽셀의 대표 온도가 나온다. `projTB` 는 후광을 입힐 때
     // 온도도 함께 퍼뜨리는 데 쓰는 임시 격자다(밝기만 퍼뜨리면 후광 자리의 색이 없다).
     float  *projT = nullptr, *projTB = nullptr;
+    // 「폭발 자리에서 새 별이 태어나는가」를 보는 창. [0] 태어난 수, [1] 그 자리 재의 합.
+    // **누적이라 비우지 않는다** — 판이 열린 뒤 지금까지의 평균을 본다.
+    double *bornStat = nullptr;
     float  *accMag = nullptr;        // 궤도 속도용 N
 
     // ── 압력 (속도 분산 텐서의 대각 성분) ──────────────────────────────────
@@ -2582,7 +2598,7 @@ void Sim::Impl::freeAll() {
     F((void*&)temp); F((void*&)tempTmp);
     F((void*&)accG); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
     F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)projLight); F((void*&)accMag);
-    F((void*&)projT); F((void*&)projTB);
+    F((void*&)projT); F((void*&)projTB); F((void*&)bornStat);
     F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
     F((void*&)velSumX); F((void*&)velSumY); F((void*&)velSumZ);
     F((void*&)ashGrid);
@@ -2658,6 +2674,8 @@ void Sim::Impl::allocate() {
     CK(cudaMemset(projT, 0, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&projTB, sizeof(float) * (size_t)G * G));
     CK(cudaMemset(projTB, 0, sizeof(float) * (size_t)G * G));
+    CK(cudaMalloc(&bornStat, sizeof(double) * 2));
+    CK(cudaMemset(bornStat, 0, sizeof(double) * 2));
     CK(cudaMalloc(&specRho, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&specGreen, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&keys, sizeof(int) * N));
@@ -2969,7 +2987,8 @@ void Sim::Impl::doCooling(float dt) {
                                                  cfg.starJeansK,
                                                  fmaxf(cfg.starSunMass, 1.0f),
                                                  cfg.starFormEfficiency, dt,
-                                                 (unsigned)(stepCount * 2246822519u + 374761393u));
+                                                 (unsigned)(stepCount * 2246822519u + 374761393u),
+                                                 ashGrid, bornStat);
         CK(cudaGetLastError());
     }
 }
@@ -4015,6 +4034,17 @@ const float* Sim::lightBeforeGlowDevicePtr() const { return impl_->projLight; }
 // 밝기로 가중한 온도의 합 격자. **밝기 격자로 나누면 그 픽셀의 대표 온도(K)가 된다.**
 // `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다.
 const float* Sim::lightTempDevicePtr() const { return impl_->projT; }
+
+// 「폭발 자리에서 새 별이 태어나는가」 — 새로 태어난 별이 있던 칸의 **재 평균**이다.
+// 판 전체의 칸당 재 평균과 견주면 답이 나온다: 이쪽이 크면 재가 쌓인 자리(별이 터진
+// 자리)에서 별이 더 잘 태어난다는 뜻이다.
+double Sim::bornAshMean() const {
+    if (!impl_->bornStat) return 0.0;
+    double h[2] = {0.0, 0.0};
+    if (cudaMemcpy(h, impl_->bornStat, sizeof(double) * 2, cudaMemcpyDeviceToHost) != cudaSuccess)
+        return 0.0;
+    return (h[0] > 0.5) ? (h[1] / h[0]) : 0.0;
+}
 
 // 보는 방향을 정한다(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그림 그대로다.
 void Sim::setViewAngles(float yaw, float pitch) {

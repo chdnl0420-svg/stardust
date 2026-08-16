@@ -218,7 +218,11 @@ std::string ControlBridge::statusBody(const App& app) const {
         // spiralM2 가 0.1 을 넘으면 눈에 보이는 두 팔이고, ash 안쪽이 진하면 금속 기울기다.
         "spiralM2=%.4f\nashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n"
         // 위 재 분포가 착시인지 가르는 값들 — 재를 뿌린 칸 수와 알갱이 분포.
-        "ashCellsIn=%d\nashCellsOut=%d\nnInner=%d\nnMid=%d\nnOuter=%d\n",
+        "ashCellsIn=%d\nashCellsOut=%d\nnInner=%d\nnMid=%d\nnOuter=%d\n"
+        // 「폭발 자리에서 새 별이 태어나는가」 — 새로 난 별이 있던 칸의 재 평균과
+        // 판 전체의 칸당 재 평균. 앞이 뒤보다 크면 재가 쌓인 자리에서 더 잘 태어난다.
+        // cellAsh 는 판 전체 평균이라 매우 작다(128³ 칸으로 나눈다) — 자릿수를 넉넉히 준다.
+        "bornAsh=%.3f\ncellAsh=%.6f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -255,7 +259,10 @@ std::string ControlBridge::statusBody(const App& app) const {
         cons.gas, cons.stars, cons.exploding, cons.remnants, cons.neutronStars, cons.bad,
         cons.maxCellCount, cons.momentum,
         emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter,
-        emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter);
+        emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter,
+        sim.bornAshMean(),
+        // 판 전체의 칸당 재 평균. 격자는 패딩 없이 G³ 다.
+        (double)sim.totalAsh() / (double)((double)sim.gridSize() * sim.gridSize() * sim.gridSize()));
     return buf;
 }
 
