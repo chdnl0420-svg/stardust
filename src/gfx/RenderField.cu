@@ -255,7 +255,7 @@ __global__ void kShade(const float* rho, const float* tempSum, int G, uchar4* ou
 __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* temp,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
-                             float sizePx, float sunMass) {
+                             float sizePx, float sunMass, float pulsePhase) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -303,7 +303,28 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
         if (p.w > 0.f) {
             const float ratio = fmaxf(p.w / sunMass, 1e-3f);
             L = __powf(ratio, 3.5f);
-            if (vv.w < -1.5f)    { TK = 1000000.f; L *= 1e-6f; }   // 중성자별 — 10km 라 거의 안 보인다
+            if (vv.w < -1.5f) {
+                // ── 중성자별 = 펄서 ────────────────────────────────────────
+                //
+                // 표면은 백만 K 인데 반지름이 10km 라 열복사만 보면 태양의 1조분의 1 이라
+                // **화면에 한 점도 안 찍힌다.** 그런데 실제 펄서는 눈에 보인다(게 성운) —
+                // 그 빛은 열복사가 아니라 회전 에너지를 뽑아 쓰는 싱크로트론 복사이고,
+                // 자기극에서 좁은 빔으로 나온다. 그 빔이 우리 쪽을 스칠 때만 밝다.
+                //
+                // 그래서 밝기가 두 몫이다 — 거의 없는 열복사 + 빔이 스칠 때의 밝은 섬광.
+                // 지수 8 은 빔을 좁게 만든다(한 주기의 20% 남짓만 밝다). 위상은 알갱이
+                // 번호에서 뽑아 **같은 별이 늘 같은 박자로** 깜빡인다.
+                //
+                // 실제 주기는 밀리초~초라 그대로 쓰면 프레임보다 빨라 안 보인다. 폭발을
+                // 늘려 보여 주는 것과 같은 이유로 **보이는 길이로 늘린다**(약 1.5초).
+                TK = 1000000.f;
+                unsigned hp = (unsigned)i * 2654435761u + 40503u;
+                hp ^= hp >> 15; hp *= 2246822519u; hp ^= hp >> 13;
+                const float ph = (float)(hp & 0xFFFF) * (6.2831853f / 65536.0f);
+                const float s = __sinf(pulsePhase + ph);
+                const float beam = (s > 0.f) ? __powf(s, 8.0f) : 0.f;
+                L = L * 1e-6f + 1000.0f * beam;
+            }
             else if (vv.w < 0.f) { TK = 15000.f;   L *= 1e-3f; }   // 백색왜성 — 반지름이 태양의 100분의 1
             else                   TK = 5800.f * __fsqrt_rn(ratio);
         } else if (p.w < 0.f) {
@@ -520,6 +541,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     texW_ = viewW; texH_ = viewH;
 
     const ViewSettings& view = app.view;
+    ++drawTick_;                       // 펄서가 쓸 시계(위 멤버 선언 참조)
     const int npix = viewW * viewH;
     const int cmapKind = (view.cmap == ColorMap::Blackbody) ? 3
                        : (view.cmap == ColorMap::Thermal)   ? 2
@@ -701,7 +723,9 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     app.sim.particleTempDevicePtr(), n,
                     (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
                     app.zoom, app.panX, app.panY, app.ui.pointSizePx,
-                    fmaxf(app.sim.config().starSunMass, 1.0f));
+                    fmaxf(app.sim.config().starSunMass, 1.0f),
+                    // 펄서 위상. 90 프레임이 한 바퀴라 60fps 에서 약 1.5초 주기다.
+                    (float)(drawTick_ % 90u) * (6.2831853f / 90.0f));
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //

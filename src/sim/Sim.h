@@ -489,6 +489,10 @@ public:
         int    stars = 0;         // 빛나는 별
         int    exploding = 0;     // 폭발 중
         int    remnants = 0;      // 백색왜성·중성자별
+        // 그중 중성자별만. **`remnants` 에 이미 포함된 수라 총합 검사를 안 깬다.**
+        // 「작은 별·큰 별·중성자별·블랙홀을 눈으로 가른다」를 판정하려면 그것이 실제로
+        // 몇 개 남는지 밖에서 볼 수 있어야 한다.
+        int    neutronStars = 0;
         int    bad = 0;           // NaN·무한대 — **하나라도 있으면 실패다**
         int    maxCellCount = 0;  // 한 칸에 몰린 최대 수(원자 연산 경합의 선행 지표)
         double momentum = 0.0;    // 총 운동량 크기

@@ -211,7 +211,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         "atWall=%d\n"
         // 보존량. **gas + star + nova + remnant + 삼킨 수 = 총 알갱이 수** 여야 한다.
         // badValues 는 NaN·무한대 개수로 하나라도 0 이 아니면 실패다.
-        "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\nbadValues=%d\n"
+        // cNeutron 은 cRemnant 안에 든 수다(따로 더하면 총합이 안 맞는다).
+        "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\ncNeutron=%d\nbadValues=%d\n"
         "maxCellCount=%d\ntotalMomentum=%.4f\n"
         // 창발 — 코드에 「그렇게 되라」고 안 적은 것들이 나왔는지.
         // spiralM2 가 0.1 을 넘으면 눈에 보이는 두 팔이고, ash 안쪽이 진하면 금속 기울기다.
@@ -251,7 +252,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
         app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz,
         diskSigmaZ, app.cfg.diskThickness, atWall,
-        cons.gas, cons.stars, cons.exploding, cons.remnants, cons.bad,
+        cons.gas, cons.stars, cons.exploding, cons.remnants, cons.neutronStars, cons.bad,
         cons.maxCellCount, cons.momentum,
         emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter,
         emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter);

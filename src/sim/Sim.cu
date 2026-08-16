@@ -1206,7 +1206,18 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
     // ── 폭발 중이면 시간만 흘려보낸다 ──────────────────────────────────
     if (p.w < 0.f) {
         p.w += dt;                            // 음수가 0 을 향해 올라온다
-        if (p.w >= 0.f) p.w = 0.f;            // 다 타면 가스로 — 여기서 사슬이 닫힌다
+        if (p.w >= 0.f) {
+            // 다 탔다. **심이 남는지 아닌지는 터질 때 이미 정해져 `vel.w` 에 적혀 있다.**
+            //   -2 = 중성자별 심   ·   그 밖 = 가스로 돌아간다(사슬이 닫히는 자리)
+            // 커널 안에서 알갱이를 둘로 쪼갤 수 없어, 하나가 심이거나 바깥층이거나다.
+            if (vel[i].w < -1.5f) {
+                // 찬드라세카르 한계 위·TOV 한계 아래. 실제 중성자별이 1.4 M☉ 근처에
+                // 몰려 있는 것은 우연이 아니라 그 두 한계 사이가 좁기 때문이다.
+                p.w = sunMass * 1.4f;
+            } else {
+                p.w = 0.f;
+            }
+        }
         pos[i] = p;
         return;
     }
@@ -1263,7 +1274,22 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
             }
 
             p.w = -explodeSim;                // 폭발 시작 — 이 시간 동안 보인다
-            v.w = 0.f;
+
+            // **심이 남을지를 질량비가 정한다.** 실제 초신성은 1.4 M☉ 남짓의 심을 남기고
+            // 나머지를 통째로 뿌린다. 알갱이 하나는 둘 중 하나만 될 수 있으므로, 그 알갱이가
+            // 심이 될 확률을 **심 질량 ÷ 원래 질량**으로 둔다 — 무리 전체로 보면 남는 심의
+            // 총 질량이 실제 비율과 같아진다. 무거운 별일수록 뿌리는 양이 많아 확률이 낮은
+            // 것도 실제 그대로다(24 M☉ 이면 17.5%, 60 M☉ 이면 7%).
+            //
+            // **전부 남기면 안 되는 이유가 하나 더 있다** — 폭발이 가스로 돌아가는 것이
+            // 「사슬이 닫힌다」의 마지막 고리다. 다 심으로 남기면 다음 세대의 재료가 없다.
+            // 2026-08-17 실측에서 이미 `cGas` 가 0 까지 내려가 있었다.
+            unsigned hc = (unsigned)i * 1103515245u + 12345u;
+            hc ^= hc >> 16; hc *= 2246822519u; hc ^= hc >> 13;
+            const float rc = (float)(hc & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+            // `p.w` 는 바로 위에서 음수(남은 폭발 시간)로 덮였다 — 원래 질량은 `ratio` 에 있다.
+            const float coreFrac = fminf(1.4f / ratio, 1.0f);
+            v.w = (rc < coreFrac) ? -2.0f : 0.f;
 
             // 바깥 방향으로 튕긴다. **어느 쪽이 바깥인지 모르므로 알갱이 번호 해시로
             // 방향을 정한다** — 통계적으로 등방이라 무리 전체로 보면 사방으로 흩어진다.
@@ -1321,7 +1347,13 @@ __global__ void kCountStates(const float4* pos, const float4* vel, int n,
     if (!isfinite(p.x) || !isfinite(p.y) || !isfinite(p.z) ||
         !isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) {
         atomicAdd(&out[4], 1);                     // 못 쓸 값 — 하나라도 있으면 실패다
-    } else if (v.w < 0.f)      atomicAdd(&out[3], 1);   // 잔해(별보다 먼저 본다)
+    } else if (v.w < 0.f) {
+        atomicAdd(&out[3], 1);                          // 잔해(별보다 먼저 본다)
+        // 잔해 안에서 중성자별만 따로 센다 — 「넷을 눈으로 가른다」를 판정하려면
+        // 그것이 실제로 몇 개 남는지 밖에서 볼 수 있어야 한다. **out[3] 에 포함된
+        // 수라 총합 검사(가스+별+폭발+잔해=전체)를 깨지 않는다.**
+        if (v.w < -1.5f) atomicAdd(&out[5], 1);
+    }
     else if (p.w < 0.f)        atomicAdd(&out[2], 1);   // 폭발 중
     else if (p.w > 0.f)        atomicAdd(&out[1], 1);   // 별
     else                       atomicAdd(&out[0], 1);   // 가스
@@ -3468,9 +3500,10 @@ Sim::Conservation Sim::measureConservation() const {
     // 상태별 개수 + 못 쓸 값
     CK(cudaMemset(d.redI, 0, sizeof(int) * 8));
     kCountStates<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redI);
-    int h[5] = {0, 0, 0, 0, 0};
-    CK(cudaMemcpy(h, d.redI, sizeof(int) * 5, cudaMemcpyDeviceToHost));
+    int h[6] = {0, 0, 0, 0, 0, 0};
+    CK(cudaMemcpy(h, d.redI, sizeof(int) * 6, cudaMemcpyDeviceToHost));
     c.gas = h[0]; c.stars = h[1]; c.exploding = h[2]; c.remnants = h[3]; c.bad = h[4];
+    c.neutronStars = h[5];
 
     // 총 운동량. 네 칸을 비운다 — `kMomentumAccum` 이 넷째에 개수를 센다(그 커널 주석).
     // 여기서는 개수를 안 읽지만, 안 비우면 지난 스텝 값이 남아 다음에 읽는 쪽이 오염된다.
