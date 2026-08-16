@@ -264,7 +264,8 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
                              float sizePx, float sunMass, float pulsePhase, BHDisk bh,
                              const float* spread, const float* spreadT, int gridG,
-                             float nebulaK, const float* gasCol, float dustTau) {
+                             float nebulaK, const float* gasCol, float dustTau,
+                             const float* ashProj) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -295,7 +296,35 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
     }
 
     float3 c;
-    if (colorBy == 3) {
+    if (colorBy == 4) {
+        // ── 재 = **은하의 나이 지도** ──────────────────────────────────────────
+        //
+        // 별이 죽으며 뿌린 무거운 원소가 쌓인 곳이 곧 별이 많이 태어나고 많이 죽은 곳이다.
+        // 실제 은하는 중심이 진하고 바깥이 옅다(금속 기울기) — 이 판에서도 초기에
+        // 안쪽이 칸당 479~2365배 진하다(round-25).
+        //
+        // 격자 값을 알갱이가 **읽기만** 한다(성운·먼지와 같은 수법). 재는 알갱이가 아니라
+        // 격자에 있으므로 이 방법 말고는 알갱이 렌더에 실을 길이 없다.
+        // 회색으로 쌓아 두면 아래 `kAccumToRGBA` 가 컬러맵을 씌운다 — 밀도 모드와 같다.
+        if (!ashProj || gridG <= 0) return;
+        // **네 칸을 섞어 읽는다.** 가장 가까운 칸 하나만 읽으면 같은 칸의 알갱이가 모두
+        // 같은 값을 받아 **격자 무늬가 그대로 드러난다** — 재는 알갱이가 아니라 격자에
+        // 있는 값이라 이 이음매가 특히 눈에 걸린다(`kShade` 가 같은 이유로 같은 일을 한다).
+        const float agx = p.x * gridG - 0.5f, agy = p.y * gridG - 0.5f;
+        int ax0 = (int)floorf(agx), ay0 = (int)floorf(agy);
+        const float atx = agx - ax0, aty = agy - ay0;
+        int ax1 = ax0 + 1, ay1 = ay0 + 1;
+        ax0 = min(max(ax0, 0), gridG - 1); ax1 = min(max(ax1, 0), gridG - 1);
+        ay0 = min(max(ay0, 0), gridG - 1); ay1 = min(max(ay1, 0), gridG - 1);
+        const float a = ashProj[ay0 * gridG + ax0] * (1.f - atx) * (1.f - aty)
+                      + ashProj[ay0 * gridG + ax1] * atx * (1.f - aty)
+                      + ashProj[ay1 * gridG + ax0] * (1.f - atx) * aty
+                      + ashProj[ay1 * gridG + ax1] * atx * aty;
+        if (a <= 0.f) return;
+        // 재는 범위가 매우 넓다(빈 곳 0, 진한 곳 수억). 로그로 눌러야 구조가 보인다.
+        const float w = __logf(1.f + a);
+        c = make_float3(w, w, w);
+    } else if (colorBy == 3) {
         // ── 별빛 — **여기가 실제로 화면에 나오는 경로다** ────────────────────
         //
         // 격자 쪽(`kShade`)에도 같은 계산이 있는데, 배율이 조금만 커지면 격자 한 칸이
@@ -679,6 +708,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             const Sim::Field f = (view.colorBy == ColorBy::Dispersion) ? Sim::Field::Dispersion
                                : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
                                : (view.colorBy == ColorBy::Light)       ? Sim::Field::Light
+                               : (view.colorBy == ColorBy::Ash)         ? Sim::Field::Ash
                                                                         : Sim::Field::Density;
             const float* grid = app.sim.fieldDevicePtr(f);
             // 빛 모드에서만 온도 격자가 있다. 다른 모드는 nullptr 이라 `kShade` 가
@@ -828,6 +858,13 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             // `wantField` 가 거짓이라 아예 안 불린다 — 그래서 지금까지 성운이 격자 렌더
             // 구간에서만 뜻이 있었고 실사용 배율에서는 통째로 안 보였다(round-35).
             // 빛 모드에서 점을 그릴 때는 여기서 한 번 불러 격자를 확보한다.
+            // 재 보기는 격자에 있는 값이라 알갱이가 **읽을** 격자를 확보해야 한다.
+            // 배율이 크면 `wantField` 가 거짓이라 안 만들어지므로 여기서 한 번 부른다
+            // (성운이 같은 이유로 같은 일을 한다 — round-40).
+            const float* ashProj = nullptr;
+            if (view.colorBy == ColorBy::Ash) {
+                ashProj = app.sim.fieldDevicePtr(Sim::Field::Ash);
+            }
             const bool pointsLight = (view.colorBy == ColorBy::Light);
             const float* nebSpread = nullptr;
             const float* nebSpreadT = nullptr;
@@ -857,7 +894,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     fmaxf(app.sim.config().starSunMass, 1.0f),
                     // 펄서 위상. 90 프레임이 한 바퀴라 60fps 에서 약 1.5초 주기다.
                     (float)(drawTick_ % 90u) * (6.2831853f / 90.0f), bhDisk,
-                    nebSpread, nebSpreadT, gridG, nebK, gasCol, dustTau);
+                    nebSpread, nebSpreadT, gridG, nebK, gasCol, dustTau, ashProj);
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //

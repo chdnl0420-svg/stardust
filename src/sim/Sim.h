@@ -674,7 +674,7 @@ public:
     //  **Light**   별이 실제로 내는 빛. 밝기 L = (M/M_sun)^3.5 이라 무거운 별 하나가
     //              가벼운 별 수만 개보다 밝다. 그것이 실제 밤하늘이 보이는 방식이고,
     //              밀도 그림과는 대비가 통째로 다르다
-    enum class Field { Density, Dispersion, Speed, Light };
+    enum class Field { Density, Dispersion, Speed, Light, Ash };
 
     // 렌더가 읽어 갈 격자(디바이스 포인터). gridSize()² 개의 float.
     // 온도·속도는 밀도로 가중 평균한 값이라 빈 칸은 0 이다.

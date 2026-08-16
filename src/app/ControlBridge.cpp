@@ -464,6 +464,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
             app.view.colorBy = (c == "light")                             ? ColorBy::Light
                              : (c == "dispersion" || c == "temperature")  ? ColorBy::Dispersion
                              : (c == "speed")                             ? ColorBy::Speed
+                             : (c == "ash" || c == "metal")               ? ColorBy::Ash
                                                                           : ColorBy::Density;
             // **`app.look` 도 함께 바꾼다.** 설정 보드가 `ApplyLook` 을 부르면 그것이
             // `look` 을 보고 `colorBy` 를 다시 정하므로, 여기서 `colorBy` 만 바꾸면

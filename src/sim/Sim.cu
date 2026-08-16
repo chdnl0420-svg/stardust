@@ -4258,6 +4258,20 @@ const float* Sim::fieldDevicePtr(Field field) {
         return d.proj;
     }
 
+    // **재 = 은하의 나이 지도.** 별이 죽으며 뿌린 무거운 원소가 쌓인 곳이 곧 별이 많이
+    // 태어나고 많이 죽은 곳이다. 실제 은하는 중심이 진하고 바깥이 옅다(금속 기울기).
+    //
+    // `ashGrid` 는 **패딩 없이 G³** 이라 밀도 격자(`rho`, 고립 경계에서 (2G)³)와 stride 가
+    // 다르다 — 그것을 섞으면 엉뚱한 자리를 읽는다. 그래서 stride 에 G 를 넘긴다.
+    if (field == Field::Ash) {
+        kClearF<<<blocks, 256>>>(d.proj, cells);
+        if (d.ashGrid) {
+            kProjectXY<<<grd3(G), blk3()>>>(d.ashGrid, d.proj, G, G, rot);
+            CK(cudaGetLastError());
+        }
+        return d.proj;
+    }
+
     if (field == Field::Light) {
         // 별빛은 **나누지 않는다.** 분산·속력은 「평균」이라 개수로 나눠야 하지만, 빛은
         // 합이 곧 그 자리의 밝기다 — 별 열 개가 모이면 열 배 밝은 것이 맞다.
