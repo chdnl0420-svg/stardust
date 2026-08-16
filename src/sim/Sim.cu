@@ -1283,6 +1283,25 @@ __global__ void kAshRadial(const float* ash, int G, float* outSum, float* outCnt
     if (a > 0.f) { atomicAdd(&outSum[b], a); atomicAdd(&outCnt[b], 1.0f); }
 }
 
+// 모든 알갱이에서 평균 속도를 뺀다 — **무게중심을 정지시킨다.**
+//
+// 판을 깔 때 궤도 속도·회전·난수를 주고 나면 그 합이 정확히 0 이 되지 않는다. 그 나머지가
+// **판 전체를 한 방향으로 밀어**, 은하가 통째로 흘러가 판 모서리에 붙는다.
+// 2026-08-16 실측: 70초에 은하 중심이 (0.5,0.5) 에서 **(0.983, 0.859)** 까지 갔다.
+//
+// 그때 화면으로는 「판이 퍼졌다」처럼 보이지만 실제로는 **뭉친 채로 이사한 것**이고,
+// 판 중앙을 기준으로 재는 모든 값(반지름 분포·금속 기울기)이 통째로 어긋난다.
+//
+// N체 시뮬레이션에서 무게중심을 정지시키는 것은 표준 관행이다 — 전체가 등속으로 움직이는
+// 것은 물리적으로 아무 뜻이 없고(갈릴레이 불변) 화면만 망친다.
+__global__ void kSubtractMeanVel(float4* vel, const float4* pos, int n, float3 mean) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || pos[i].x < 0.f) return;
+    float4 v = vel[i];
+    v.x -= mean.x; v.y -= mean.y; v.z -= mean.z;
+    vel[i] = v;
+}
+
 // 알갱이를 반지름 구간별로 센다.
 //
 // **재 분포가 「진짜 역전」인지 「측정 착시」인지 가르는 판별식이다.**
@@ -2770,6 +2789,28 @@ void Sim::reset() {
     // 통째로 덮어써 사라진다.
     if (d.cfg.spin != 0.0f)
         kAddSpin<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.cfg.spin);
+
+    // **무게중심을 정지시킨다.** 궤도 속도·회전·난수를 다 주고 나면 그 합이 정확히 0 이
+    // 되지 않고, 그 나머지가 판 전체를 한 방향으로 민다. 2026-08-16 실측: 70초에 은하
+    // 중심이 (0.5,0.5) → **(0.983, 0.859)** 로 판 모서리까지 갔다. 화면으로는 「퍼졌다」로
+    // 보이지만 실제로는 뭉친 채 이사한 것이고, 판 중앙 기준으로 재는 값이 전부 어긋난다.
+    if (!g_failed && d.allocN > 0) {
+        CK(cudaMemset(d.redD, 0, sizeof(double) * 3));
+        kMomentumAccum<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redD);
+        double m[3] = {0.0, 0.0, 0.0};
+        CK(cudaMemcpy(m, d.redD, sizeof(double) * 3, cudaMemcpyDeviceToHost));
+        // 살아 있는 수로 나눈다. 삼킨 자리는 `kMomentumAccum` 이 이미 건너뛰었다.
+        const int alive = (d.aliveShown > 0) ? d.aliveShown : d.active;
+        if (alive > 0) {
+            const float3 mean = make_float3((float)(m[0] / alive),
+                                            (float)(m[1] / alive),
+                                            (float)(m[2] / alive));
+            kSubtractMeanVel<<<(d.allocN + 255) / 256, 256>>>(d.vel, d.pos, d.allocN, mean);
+            CK(cudaGetLastError());
+            fx::mark("무게중심 정지: 평균 속도 (%.5f, %.5f, %.5f) 를 뺐다", mean.x, mean.y, mean.z);
+        }
+    }
+
     d.computeAccel();
 }
 
