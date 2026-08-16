@@ -349,12 +349,23 @@ void App::tick() {
             const char* how = spike ? "!! 갑자기 무거워짐" : "상태";
             // 튀는 순간만 디스크까지 민다. 평소 줄까지 밀면 5초마다 수 ms 를 버린다.
             auto put = spike ? &fx::mark : &fx::line;
+            // **한 칸 점유를 함께 남긴다(2026-08-16 사고 뒤 추가).**
+            //
+            // 그날 시스템이 죽었을 때 남은 줄에 이 값이 없어서 「원자 연산이 한 칸에
+            // 몰렸나」를 뒤에서 확인할 수 없었다. 스텝 시간은 죽기 직전까지 10~14 ms 로
+            // 멀쩡했고 `nvlddmkm` 경고도 0 건이라, 남은 단서가 하나도 없었다.
+            //
+            // 이 값은 격자 칸 수만큼만 도는 커널이라 알갱이가 몇이든 비용이 같다.
+            // 5초에 한 번이면 부담이 없고, 튀는 순간에는 그 줄이 디스크까지 간다.
+            const int peak = sim.peakCellCount();
             put("%s: 스텝 %.1f ms (뿌리기 %.1f 푸아송 %.1f 거두기 %.1f 정렬 %.1f), "
                 "프레임 %.1f ms, 알갱이 %d/%d, dt %.6g, 최고속도 %.3g, "
+                "한칸최대 %d, 별 %d, "
                 "블랙홀 %s 질량 %.0f 지평선 %.5f, 여유 VRAM %.0f MB",
                 how, t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.sortMs,
                 frameMs, sim.activeCount(), cfg.particleCount,
                 t.dtUsed, t.maxSpeed,
+                peak, sim.starCount(),
                 bh.active ? "있음" : "없음", bh.mass, bh.rs,
                 Sim::deviceFreeBytes() / 1048576.0);
         }

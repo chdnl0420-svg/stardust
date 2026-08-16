@@ -1098,7 +1098,7 @@ __global__ void kPressure(const float* dispX, const float* dispY, const float* d
 // 「재가 많으면 작은 별을 만들어라」라는 줄을 코드에 적을 필요가 없다 — 그것이 연출이다.
 __global__ void kStarForm(float4* pos, int n, int G, int periodic,
                           const float* dispX, const float* dispY, const float* dispZ,
-                          const float* dispCnt, float kJeans) {
+                          const float* dispCnt, float kJeans, float sunMass) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -1121,7 +1121,26 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
     // ρ > k_J · σ². σ² 가 0 에 가까우면(잘 식은 자리) 문턱이 0 으로 내려가는데,
     // 그때는 cnt >= 2 조건이 바닥 노릇을 한다.
     if (cnt > kJeans * s2) {
-        p.w = cnt;                       // 별 질량 = 그 칸에 모인 알갱이 수
+        // **별 질량에 상한을 건다 — 이 상한이 없어 2026-08-16 에 시스템이 죽었다.**
+        //
+        // 전에는 `p.w = cnt` 였다. `cnt` 는 그 칸에 모인 알갱이 수라 **상한이 없다** —
+        // 한 칸에 100만이 몰리면 별 하나가 질량 100만이 되고, 그 값이 네 곳으로 번진다:
+        //   · `kScatterLight` 의 `lum = (p.w/sunMass)^3.5` → 33만^3.5 ≈ 1e19
+        //   · `kStarAge` 의 수명 `sunLifeSim · ratio^-2.5` → 사실상 0, 태어나자마자 터진다
+        //     (2026-08-16 실측: 알갱이의 33% 가 언제나 폭발 중, 가스는 100만 중 623개)
+        //   · `ashGrid` 에 한 번에 100만씩 쌓임
+        //   · 블랙홀 문턱 `ratio >= 200` 을 모든 별이 넘음
+        //
+        // **상한은 연출이 아니라 빠진 현실이다.** 실제 별에는 질량 상한이 있다 —
+        // 너무 무거우면 자기 복사압이 자기 바깥층을 날려 버린다(에딩턴 한계). 관측된
+        // 가장 무거운 별이 태양의 150~300배다. 그리고 **거대 분자운 하나가 별 하나가
+        // 되지 않는다** — 여럿으로 쪼개져 성단이 된다. `cnt` 를 통째로 한 알갱이에
+        // 몰아주던 것이 그 사실을 무시하고 있었다.
+        //
+        // 코어가 자른다(CLAUDE.md 3번) — 설정으로 열지 않는다. 밖에서 올릴 수 있으면
+        // 이 안전장치가 안전장치가 아니게 된다.
+        const float kEddingtonRatio = 150.0f;    // 태양질량 몇 배까지
+        p.w = fminf(cnt, sunMass * kEddingtonRatio);
         pos[i] = p;
     }
 }
@@ -2633,7 +2652,8 @@ void Sim::Impl::doCooling(float dt) {
     if (wantPressure && cfg.starFormationEnabled) {
         kStarForm<<<(allocN + 255) / 256, 256>>>(pos, allocN, G, periodic() ? 1 : 0,
                                                  dispX, dispY, dispZ, dispCnt,
-                                                 cfg.starJeansK);
+                                                 cfg.starJeansK,
+                                                 fmaxf(cfg.starSunMass, 1.0f));
         CK(cudaGetLastError());
     }
 }
@@ -3158,6 +3178,30 @@ bool Sim::failed() { return g_failed; }
 std::string Sim::failMessage() { return g_failMsg; }
 int Sim::gridSize() const { return impl_->allocG; }
 int Sim::particleCount() const { return impl_->allocN; }
+
+// 한 칸에 알갱이가 얼마나 몰렸는지 — **워치독이 매번 볼 수 있게 따로 낸다.**
+//
+// **왜 `measureConservation` 으로 부족한가.** 거기에도 같은 값이 들어 있지만 그 함수는
+// 상태 다섯 가지와 총 운동량까지 함께 세어 알갱이 수만큼 도는 커널이 둘 붙는다. 매 프레임
+// 부를 물건이 아니다. 여기 있는 것은 **격자 칸 수만큼만** 도는 커널 하나뿐이고 알갱이가
+// 몇이든 같은 시간에 끝난다.
+//
+// **이 값이 워치독에 필요한 이유는 그것이 선행 지표라서다.** 스텝 시간을 보는 감시는
+// 스텝이 끝나야 잴 수 있어, 한 스텝이 갑자기 드라이버 타임아웃(2초)을 넘기면 재 볼
+// 기회 자체가 없다. 한 칸에 몰리는 것은 그 폭주가 **일어나기 전에** 커지므로 먼저 보인다.
+//
+// 정렬이 안 돌았으면(`cellStart` 가 없거나 냉각·접촉이 꺼져 있으면) −1 을 돌려준다 —
+// 0 을 돌려주면 「안전하다」로 잘못 읽힌다.
+int Sim::peakCellCount() const {
+    Impl& d = *impl_;
+    if (g_failed || !d.cellStart || !d.cellEnd || d.allocG <= 0) return -1;
+    const int cells = d.allocG * d.allocG * d.allocG;
+    CK(cudaMemset(d.redI, 0, sizeof(int)));
+    kMaxCellCount<<<(cells + 255) / 256, 256>>>(d.cellStart, d.cellEnd, cells, d.redI);
+    int h = 0;
+    CK(cudaMemcpy(&h, d.redI, sizeof(int), cudaMemcpyDeviceToHost));
+    return h;
+}
 int Sim::activeCount() const {
     // 삼킨 뒤에는 센 값을 보여 준다. active 는 자리 관리용이라 삼킨 만큼 줄지 않아,
     // 그대로 두면 블랙홀이 판을 다 먹어도 화면에는 「399만 / 399만」이 뜬다.
