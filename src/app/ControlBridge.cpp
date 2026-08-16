@@ -165,6 +165,8 @@ std::string ControlBridge::statusBody(const App& app) const {
     // 평가 순서가 정해져 있지 않아 값이 섞인다.
     const Sim::Conservation cons = app.sim.measureConservation();
     const Sim::Emergence    emg  = app.sim.measureEmergence();
+    float rot[4] = {0.f, 0.f, 0.f, 0.f};
+    app.sim.rotationCurve(rot);
 
     snprintf(buf, sizeof(buf),
         // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
@@ -212,7 +214,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 보존량. **gas + star + nova + remnant + 삼킨 수 = 총 알갱이 수** 여야 한다.
         // badValues 는 NaN·무한대 개수로 하나라도 0 이 아니면 실패다.
         // cNeutron 은 cRemnant 안에 든 수다(따로 더하면 총합이 안 맞는다).
-        "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\ncNeutron=%d\nbadValues=%d\n"
+        // cDark 는 다섯째 갈래라 총합에 **더해야** 알갱이 수와 맞는다.
+        "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\ncNeutron=%d\ncDark=%d\nbadValues=%d\n"
         "maxCellCount=%d\ntotalMomentum=%.4f\n"
         // 창발 — 코드에 「그렇게 되라」고 안 적은 것들이 나왔는지.
         // spiralM2 가 0.1 을 넘으면 눈에 보이는 두 팔이고, ash 안쪽이 진하면 금속 기울기다.
@@ -222,7 +225,10 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 「폭발 자리에서 새 별이 태어나는가」 — 새로 난 별이 있던 칸의 재 평균과
         // 판 전체의 칸당 재 평균. 앞이 뒤보다 크면 재가 쌓인 자리에서 더 잘 태어난다.
         // cellAsh 는 판 전체 평균이라 매우 작다(128³ 칸으로 나눈다) — 자릿수를 넉넉히 준다.
-        "bornAsh=%.3f\ncellAsh=%.6f\n",
+        "bornAsh=%.3f\ncellAsh=%.6f\n"
+        // 회전곡선 — 반지름 네 구간의 평균 접선 속도. 바깥 둘이 안 떨어지면 평평한 것이고,
+        // 그것이 암흑물질 헤일로가 실제로 일하고 있다는 신호다.
+        "rot1=%.5f\nrot2=%.5f\nrot3=%.5f\nrot4=%.5f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -256,13 +262,15 @@ std::string ControlBridge::statusBody(const App& app) const {
         Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
         app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz,
         diskSigmaZ, app.cfg.diskThickness, atWall,
-        cons.gas, cons.stars, cons.exploding, cons.remnants, cons.neutronStars, cons.bad,
+        cons.gas, cons.stars, cons.exploding, cons.remnants, cons.neutronStars,
+        cons.darkMatter, cons.bad,
         cons.maxCellCount, cons.momentum,
         emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter,
         emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter,
         sim.bornAshMean(),
         // 판 전체의 칸당 재 평균. 격자는 패딩 없이 G³ 다.
-        (double)sim.totalAsh() / (double)((double)sim.gridSize() * sim.gridSize() * sim.gridSize()));
+        (double)sim.totalAsh() / (double)((double)sim.gridSize() * sim.gridSize() * sim.gridSize()),
+        rot[0], rot[1], rot[2], rot[3]);
     return buf;
 }
 
@@ -393,6 +401,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starBHRatio"))    app.cfg.starBHRatio    = clampF(getFloat(kv, "starBHRatio", app.cfg.starBHRatio), 1.0f, 1.0e5f, app.cfg.starBHRatio);
         if (has(kv, "starCollapseToBH")) app.cfg.starCollapseToBH = getInt(kv, "starCollapseToBH", 0) != 0;
         if (has(kv, "starIonizeK"))    app.cfg.starIonizeK    = clampF(getFloat(kv, "starIonizeK", app.cfg.starIonizeK), 0.0f, 100.0f, app.cfg.starIonizeK);
+        if (has(kv, "darkMatterFraction")) app.cfg.darkMatterFraction = clampF(getFloat(kv, "darkMatterFraction", app.cfg.darkMatterFraction), 0.0f, 0.9f, app.cfg.darkMatterFraction);
         // 무엇으로 볼지. 「빛」은 별이 실제로 내는 밝기(L = M^3.5)로 그린다 —
         // 밀도 그림과 대비가 통째로 다르다.
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);

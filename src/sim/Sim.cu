@@ -164,12 +164,36 @@ __device__ __forceinline__ float3 bulgePoint(float R, unsigned seed) {
 //
 // 비용: N 스레드 × O(1). 한 프레임이 아니라 판을 새로 깔 때 한 번만 돈다.
 __global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
-                       float bulgeFrac, float bulgeR, float thickness, unsigned seed) {
+                       float bulgeFrac, float bulgeR, float thickness, unsigned seed,
+                       float darkFrac) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const unsigned s = (unsigned)i * 2654435761u + seed;
     const float u1 = rnd01(s), u2 = rnd01(s * 3u + 1u), u3 = rnd01(s * 7u + 5u);
     float x = 0.5f, y = 0.5f, z = 0.5f;
+
+    // ── 암흑물질 ────────────────────────────────────────────────────────────
+    //
+    // **중력만 주고받고 빛과는 아무 상호작용을 하지 않는 물질.** 은하 회전곡선이 바깥에서
+    // 안 떨어지는 것이 그 존재의 첫 증거였다 — 보이는 별만으로는 바깥 별이 그렇게 빨리
+    // 돌 수 없다.
+    //
+    // **넓은 구형 헤일로로 깐다.** 실제 암흑물질이 원반이 아니라 공 모양으로 퍼져 있는
+    // 이유는 **서로 부딪히지 않아 에너지를 잃지 못하기 때문**이다. 보통 물질은 부딪혀
+    // 식으며 납작해지지만(그래서 원반 은하가 있다) 암흑물질은 그 길이 없다.
+    // 그 성질을 이 판에서도 지킨다 — 아래 커널들이 `vel.w < -50` 을 보고 식히기와
+    // 압력에서 빼고, 별도 안 된다.
+    //
+    // **표시를 `vel.w` 에 둔다.** 알갱이 번호로 가르면 정렬이 재배치하는 순간 뒤섞인다
+    // (`kReorder` 는 `float4` 를 통째로 옮기므로 `vel.w` 는 알갱이를 따라간다).
+    if (darkFrac > 0.f && rnd01(s * 13u + 7u) < darkFrac) {
+        // 헤일로는 원반보다 훨씬 크다(실제로도 광학 반지름의 수 배까지 뻗는다).
+        const float3 h = bulgePoint(0.42f, s ^ 0x2545F491u);
+        pos[i] = make_float4(0.5f + h.x, 0.5f + h.y, 0.5f + h.z, 0.f);
+        vel[i] = make_float4(0.f, 0.f, 0.f, -100.f);   // -100 = 암흑물질
+        if (temp) temp[i] = 0.f;
+        return;
+    }
 
     if (preset == 0 || preset == 3) {            // 나선 은하 · 블랙홀
         const float R = 0.30f;
@@ -245,7 +269,9 @@ __global__ void kSetOrbit(const float4* accG_unused, float4* vel, const float4* 
 
     const float dx = p.x - 0.5f, dy = p.y - 0.5f;
     const float r = sqrtf(dx * dx + dy * dy);
-    if (r < 1e-5f) { vel[i] = make_float4(base.x, base.y, 0.f, 0.f); return; }
+    // **`w` 를 0 으로 덮지 않는다** — 거기에 나이·잔해 종류·암흑물질 표시가 들어 있다.
+    const float keepW = vel[i].w;
+    if (r < 1e-5f) { vel[i] = make_float4(base.x, base.y, 0.f, keepW); return; }
 
     // a = v²/r 에서 v = √(a·r). accMag 는 그 자리에서 잰 중심 방향 가속도 크기다.
     const float v = sqrtf(fmaxf(accMag[i], 0.f) * r);
@@ -262,7 +288,7 @@ __global__ void kSetOrbit(const float4* accG_unused, float4* vel, const float4* 
     const float vz = g3 * v * fminf(thickness * 8.0f, 0.35f);
     vel[i] = make_float4(-dy / r * v * spin + g1 * v * disp + base.x,
                           dx / r * v * spin + g2 * v * disp + base.y,
-                          vz, 0.f);
+                          vz, keepW);
 }
 
 // ---------------------------------------------------------------------------
@@ -896,6 +922,10 @@ __global__ void kAccumCellVel(const float4* pos, const float4* vel, int n, int G
     if (p.x < 0.f) return;
     const float4 v = vel[i];
     if (!isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) return;
+    // **암흑물질은 이 통계에 안 든다.** 서로 부딪히지 않는 물질이라 식지도, 압력을 내지도
+    // 않는다 — 그래서 실제로도 납작해지지 못하고 넓은 구형 헤일로로 남는다. 여기에 섞으면
+    // 헤일로의 무작위 속도가 원반의 「온도」로 잘못 읽혀 압력과 별 문턱이 통째로 어긋난다.
+    if (v.w < -50.f) return;
     const int cx = min(max((int)(p.x * G), 0), G - 1);
     const int cy = min(max((int)(p.y * G), 0), G - 1);
     const int cz = min(max((int)(p.z * G), 0), G - 1);
@@ -946,6 +976,7 @@ __global__ void kCoolCell(const float4* pos, const float4* vel, int n, int G, in
     const float4 v = vel[i];
     velOut[i] = v;                       // 손댈 일이 없으면 그대로 넘긴다
     if (p.x < 0.f) return;
+    if (v.w < -50.f) return;             // 암흑물질은 안 식는다(위 `kAccumCellVel` 주석)
 
     const int cx = min(max((int)(p.x * G), 0), G - 1);
     const int cy = min(max((int)(p.y * G), 0), G - 1);
@@ -1089,9 +1120,11 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
                           const float* dispX, const float* dispY, const float* dispZ,
                           const float* dispCnt, float kJeans, float sunMass,
                           float formEff, float dt, unsigned seed,
-                          const float* ashGrid, double* bornStat) {
+                          const float* ashGrid, double* bornStat, const float4* vel) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    // **암흑물질은 별이 되지 않는다** — 빛과 아무 상호작용을 안 하는 물질이라 핵융합도 없다.
+    if (vel && vel[i].w < -50.f) return;
     float4 p = pos[i];
     if (p.x < 0.f) return;               // 삼켜졌거나 빈 자리
     if (p.w != 0.f) return;              // 이미 별이거나(>0) 폭발 중(<0)
@@ -1418,6 +1451,9 @@ __global__ void kCountStates(const float4* pos, const float4* vel, int n,
     if (!isfinite(p.x) || !isfinite(p.y) || !isfinite(p.z) ||
         !isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) {
         atomicAdd(&out[4], 1);                     // 못 쓸 값 — 하나라도 있으면 실패다
+    } else if (v.w < -50.f) {
+        // 암흑물질. **잔해보다 먼저 본다** — 표시가 음수라 안 그러면 잔해로 세어진다.
+        atomicAdd(&out[6], 1);
     } else if (v.w < 0.f) {
         atomicAdd(&out[3], 1);                          // 잔해(별보다 먼저 본다)
         // 잔해 안에서 중성자별만 따로 센다 — 「넷을 눈으로 가른다」를 판정하려면
@@ -1428,6 +1464,32 @@ __global__ void kCountStates(const float4* pos, const float4* vel, int n,
     else if (p.w < 0.f)        atomicAdd(&out[2], 1);   // 폭발 중
     else if (p.w > 0.f)        atomicAdd(&out[1], 1);   // 별
     else                       atomicAdd(&out[0], 1);   // 가스
+}
+
+// **회전곡선** — 반지름 구간별 접선 속도의 평균. 암흑물질이 있는지 보는 창이다.
+//
+// 보이는 물질만 있으면 바깥으로 갈수록 도는 속도가 케플러처럼 `v ∝ 1/√r` 로 떨어져야 한다.
+// 실제 은하는 **바깥에서도 안 떨어지고 평평하다** — 그것이 암흑물질 존재의 첫 증거였다
+// (1970년대 루빈의 관측). 보이는 별만으로는 바깥 별이 그렇게 빨리 돌 수 없다.
+//
+// 접선 성분만 센다 — 안팎으로 떨어지는 속도는 회전이 아니다.
+// **비용**: N 스레드 × 원자 연산 둘. `starCount()` 처럼 부를 때만 돈다.
+__global__ void kRotationCurve(const float4* pos, const float4* vel, int n,
+                               float cx, float cy, double* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+    const float dx = p.x - cx, dy = p.y - cy;
+    const float r = sqrtf(dx * dx + dy * dy);
+    if (r < 1e-4f || r > 0.45f) return;
+    const float4 v = vel[i];
+    if (!isfinite(v.x) || !isfinite(v.y)) return;
+    // 네 구간: ~0.1125, ~0.225, ~0.3375, ~0.45
+    const int b = min((int)(r / 0.1125f), 3);
+    const float vt = fabsf((-dy * v.x + dx * v.y) / r);
+    atomicAdd(&out[b], (double)vt);
+    atomicAdd(&out[4 + b], 1.0);
 }
 
 // 재를 **반지름 구간별로** 모은다. 「금속 기울기」가 생기는지 보는 창이다.
@@ -2686,7 +2748,8 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&cellEnd, sizeof(int) * (size_t)G * G * G));
     // **2 에서 4 로 늘렸다(2026-08-16).** 총 운동량이 x·y·z 세 칸을 쓴다 —
     // 2칸짜리에 3칸을 `cudaMemset` 하면 범위 밖 쓰기이고, 그 뒤 커널들이 조용히 실패한다.
-    CK(cudaMalloc(&redD, sizeof(double) * 4));
+    // 4 → 12 로 늘렸다(2026-08-17). 회전곡선이 반지름 네 구간의 합·개수로 8칸을 쓴다.
+    CK(cudaMalloc(&redD, sizeof(double) * 12));
     // 상태별 개수 5칸 + 셀 최대 점유 1칸 + 여유. 늘려 두어도 32바이트다.
     CK(cudaMalloc(&redI, sizeof(int) * 8));
     CK(cudaMalloc(&redU, sizeof(unsigned long long)));
@@ -2777,7 +2840,8 @@ void Sim::Impl::placeInitial() {
                      : (cfg.preset == Preset::BlackHole)  ? 3 : 4;
     kPlace<<<(allocN + 255) / 256, 256>>>(pos, vel, temp, allocN, preset,
                                           cfg.bulgeFraction, cfg.bulgeRadius,
-                                          cfg.diskThickness, 12345u);
+                                          cfg.diskThickness, 12345u,
+                                          cfg.darkMatterFraction);
     CK(cudaGetLastError());
     active = (preset == 4) ? 0 : allocN;
     aliveShown = -1;                       // 판을 새로 열었으니 세어 둔 값은 버린다
@@ -2988,7 +3052,7 @@ void Sim::Impl::doCooling(float dt) {
                                                  fmaxf(cfg.starSunMass, 1.0f),
                                                  cfg.starFormEfficiency, dt,
                                                  (unsigned)(stepCount * 2246822519u + 374761393u),
-                                                 ashGrid, bornStat);
+                                                 ashGrid, bornStat, vel);
         CK(cudaGetLastError());
     }
 }
@@ -3605,10 +3669,10 @@ Sim::Conservation Sim::measureConservation() const {
     // 상태별 개수 + 못 쓸 값
     CK(cudaMemset(d.redI, 0, sizeof(int) * 8));
     kCountStates<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redI);
-    int h[6] = {0, 0, 0, 0, 0, 0};
-    CK(cudaMemcpy(h, d.redI, sizeof(int) * 6, cudaMemcpyDeviceToHost));
+    int h[7] = {0, 0, 0, 0, 0, 0, 0};
+    CK(cudaMemcpy(h, d.redI, sizeof(int) * 7, cudaMemcpyDeviceToHost));
     c.gas = h[0]; c.stars = h[1]; c.exploding = h[2]; c.remnants = h[3]; c.bad = h[4];
-    c.neutronStars = h[5];
+    c.neutronStars = h[5]; c.darkMatter = h[6];
 
     // 총 운동량. 네 칸을 비운다 — `kMomentumAccum` 이 넷째에 개수를 센다(그 커널 주석).
     // 여기서는 개수를 안 읽지만, 안 비우면 지난 스텝 값이 남아 다음에 읽는 쪽이 오염된다.
@@ -4038,6 +4102,25 @@ const float* Sim::lightTempDevicePtr() const { return impl_->projT; }
 // 「폭발 자리에서 새 별이 태어나는가」 — 새로 태어난 별이 있던 칸의 **재 평균**이다.
 // 판 전체의 칸당 재 평균과 견주면 답이 나온다: 이쪽이 크면 재가 쌓인 자리(별이 터진
 // 자리)에서 별이 더 잘 태어난다는 뜻이다.
+// 회전곡선 — 반지름 네 구간의 평균 접선 속도. 바깥 두 구간이 안 떨어지면 평평한 것이다.
+void Sim::rotationCurve(float* out4) const {
+    Impl& d = *impl_;
+    for (int i = 0; i < 4; ++i) out4[i] = 0.f;
+    if (g_failed || d.allocN <= 0 || !d.redD) return;
+    // 판 중앙이 아니라 **무게중심** 기준이다 — 은하가 판 가운데 있다는 보장이 없고,
+    // 그것을 판 중앙으로 재다가 금속 기울기를 100배 틀리게 읽은 적이 있다(round-24).
+    // `measureCentroid` 가 non-const 인 것은 GPU 작업을 하기 때문이지 판을 바꿔서가
+    // 아니다(`measureConservation` 도 같은 일을 하면서 const 다).
+    double cxd = 0.5, cyd = 0.5;
+    const_cast<Sim*>(this)->measureCentroid(cxd, cyd);
+    const float cx = (float)cxd, cy = (float)cyd;
+    if (cudaMemset(d.redD, 0, sizeof(double) * 8) != cudaSuccess) return;
+    kRotationCurve<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, cx, cy, d.redD);
+    double h[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    if (cudaMemcpy(h, d.redD, sizeof(double) * 8, cudaMemcpyDeviceToHost) != cudaSuccess) return;
+    for (int i = 0; i < 4; ++i) out4[i] = (h[4 + i] > 0.5) ? (float)(h[i] / h[4 + i]) : 0.f;
+}
+
 double Sim::bornAshMean() const {
     if (!impl_->bornStat) return 0.0;
     double h[2] = {0.0, 0.0};
