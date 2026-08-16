@@ -459,20 +459,14 @@ struct BHPack {
 
 __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
                           int n, int G, int periodic,
-                          float haloV2, float haloCore2, BHPack bh) {
+                          BHPack bh) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
     if (p.x < 0.f) { out[i] = 0.f; return; }
     float4 a = sampleAcc(accG, p, G, periodic);
 
-    if (haloV2 > 0.f) {
-        const float hx = p.x - 0.5f, hy = p.y - 0.5f, hz = p.z - 0.5f;
-        const float denom = hx * hx + hy * hy + hz * hz + haloCore2;
-        a.x -= haloV2 * hx / denom;
-        a.y -= haloV2 * hy / denom;
-        a.z -= haloV2 * hz / denom;
-    }
+    // (헤일로 근사를 지웠다 — 진짜 암흑물질 입자가 격자 중력에 이미 들어 있다)
     // 처음 속도를 정할 때는 상대론 보정을 빼고 뉴턴만 본다 — 그 보정은 각운동량이
     // 정해진 뒤에야 계산할 수 있는데, 지금 정하려는 것이 바로 그 각운동량이다.
     for (int b = 0; b < bh.n; ++b) {
@@ -496,9 +490,7 @@ __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
 __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
                            int n, int G, float dt, int periodic,
                            BHPack bh, float c2, int* eaten,
-                           float haloV2, float haloCore2,
-                           const float4* accContact,
-                           float waveA, float wavePattern, float wavePitch, float waveTime) {
+                           const float4* accContact) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -508,46 +500,18 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
     float4 a = sampleAcc(accG, p, G, periodic);
     if (accContact) { const float4 c = accContact[i]; a.x += c.x; a.y += c.y; a.z += c.z; }
 
-    // 보이지 않는 무게(암흑물질 헤일로) — 유사등온구. 바깥에서 회전 속도가 평평해진다.
-    //   a(r) = -v₀²·r⃗ / (r² + rc²)
-    if (haloV2 > 0.f) {
-        const float hx = p.x - 0.5f, hy = p.y - 0.5f, hz = p.z - 0.5f;
-        const float denom = hx * hx + hy * hy + hz * hz + haloCore2;
-        a.x -= haloV2 * hx / denom;
-        a.y -= haloV2 * hy / denom;
-        a.z -= haloV2 * hz / denom;
-    }
-
-    // 나선 밀도파 — 팔은 물질이 아니라 회전하는 무늬다.
+    // (암흑물질 헤일로 근사와 나선 밀도파를 지웠다 — 2026-08-17)
     //
-    // 얕은 나선 골 Φ = -A·cos(2(θ - Ωp·t) - (2/tan i)·ln(r/r0)) 를 중력에 더한다.
-    // 별은 골을 지날 때 잠깐 몰렸다가 빠져나가고, 몰린 자리가 팔이 된다. 그 자리는 Ωp 로
-    // 돌기 때문에 원반이 몇 바퀴를 돌아도 무늬가 감기지 않는다 — 이것이 실제 은하의 팔이
-    // 유지되는 방식이다(감김 문제의 답).
+    // **둘 다 「버린 것」인데 코드가 남아 있었다.**
     //
-    // 힘은 -∇Φ 다. 반지름 방향과 각 방향으로 나눠 구한 뒤 xy 로 되돌린다.
-    if (waveA > 0.f) {
-        const float dx = p.x - 0.5f, dy = p.y - 0.5f;
-        const float r2 = dx * dx + dy * dy;
-        const float r = sqrtf(fmaxf(r2, 1e-8f));
-        if (r > 0.01f && r < 0.9f) {
-            const float th = atan2f(dy, dx);
-            const float m = 2.0f;                       // 팔 두 개
-            const float km = m / fmaxf(wavePitch, 1e-3f);
-            const float phase = m * (th - wavePattern * waveTime) - km * __logf(r / 0.06f);
-            // 골의 깊이는 바깥으로 갈수록 사그라든다 — 원반 밖에서까지 끌면 어색하다.
-            const float amp = waveA * __expf(-r / 0.30f) * r;
-            const float s = __sinf(phase), c = __cosf(phase);
-            // Φ = -amp·cos(phase)
-            //   ∂Φ/∂r  = -(∂amp/∂r)·cos + amp·sin·(-km/r)·(-1) → 아래처럼 정리된다
-            //   (1/r)∂Φ/∂θ = amp·sin·m / r
-            const float dPhi_dr  = -amp * (1.0f / r - 1.0f / 0.30f) * c - amp * s * km / r;
-            const float dPhi_rdth = amp * s * m / r;
-            const float ar = -dPhi_dr, at = -dPhi_rdth;
-            a.x += ar * (dx / r) - at * (dy / r);
-            a.y += ar * (dy / r) + at * (dx / r);
-        }
-    }
+    // 헤일로는 암흑물질을 **배경 힘으로 흉내 낸 근사**였다. round-34 에서 **진짜 입자**로
+    // 다시 만들었다(`darkMatterFraction`) — 중력만 주고받고 서로 부딪히지 않아 식지 못해
+    // 넓은 구형으로 남는 그 성질까지 실제와 같다. 근사와 진짜가 둘 다 있으면 사용자가
+    // 어느 것을 켜야 하는지 알 수 없다.
+    //
+    // 나선 밀도파는 **팔을 직접 그리는 장치**였다. round-17 에서 **끄고도 팔이 나왔고**
+    // (`spiralM2` 0.10~0.26, 실제 은하 범위), 그것이 이 판의 첫째 원칙(연출을 제거한다)이
+    // 지키려던 바로 그 결과다. 무늬를 손으로 그리면 「나왔다」가 아무 뜻이 없어진다.
 
     // 블랙홀 — 휘어진 시공간의 최단경로. 슈바르츠실트 해의 운동을 그대로 적분한다.
     //   a = -GM/r³ · (1 + 3L²/(c²r²)) · r⃗
@@ -2926,10 +2890,8 @@ void Sim::Impl::giveOrbits() {
     if (g_failed || cfg.preset == Preset::Empty || cfg.preset == Preset::CosmicWeb) return;
     computeAccel();
     // 적분기가 쓰는 힘을 그대로 넘긴다 — 하나라도 빠지면 궤도가 어긋나 원반이 무너진다.
-    const float haloV2 = cfg.haloEnabled ? (cfg.haloSpeed * cfg.haloSpeed) : 0.f;
-    const float haloCore2 = cfg.haloCore * cfg.haloCore;
     kAccelMag<<<(allocN + 255) / 256, 256>>>(accG, pos, accMag, allocN, allocG,
-                                             periodic() ? 1 : 0, haloV2, haloCore2, packBH());
+                                             periodic() ? 1 : 0, packBH());
     // 은하 충돌은 둘을 서로에게 밀어 준다. 나머지는 제자리에서 돈다.
     const float2 base = make_float2(0.f, 0.f);
     kSetOrbit<<<(allocN + 255) / 256, 256>>>(accG, vel, pos, accMag, allocN,
@@ -3506,8 +3468,6 @@ void Sim::step() {
 
     CK(cudaEventRecord(d.ev2));      // 여기까지가 냉각·분산 갱신·별 판정·무게중심 정지
 
-    const float haloV2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
-    const float haloCore2 = d.cfg.haloCore * d.cfg.haloCore;
     // **삼키는 반경은 그리는 반경보다 훨씬 작다.** (아래 값은 packBH 가 만든다.)
     //
     // rs 는 화면에서 보이게 하려고 실제 지평선보다 크게 부풀린 값이다. 그 부풀린 반경을
@@ -3537,12 +3497,10 @@ void Sim::step() {
 
     kIntegrate<<<(d.allocN + 255) / 256, 256>>>(
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
-        bhPack, d.cfg.lightSpeedSq, d.eaten, haloV2, haloCore2,
+        bhPack, d.cfg.lightSpeedSq, d.eaten,
         // 세 힘 중 하나라도 켜져 있으면 그 가속도를 함께 넘긴다.
         (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
-            ? d.accContact : nullptr,
-        d.cfg.spiralWaveEnabled ? d.cfg.spiralWaveStrength : 0.f,
-        d.cfg.spiralWavePattern, d.cfg.spiralWavePitch, (float)d.simTime);
+            ? d.accContact : nullptr);
     CK(cudaGetLastError());
 
     if (d.bhCount > 0) {
@@ -4445,10 +4403,8 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
 
     if (autoOrbit) {
         d.computeAccel();
-        const float hv2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
-        const float hc2 = d.cfg.haloCore * d.cfg.haloCore;
         kAccelMag<<<(d.allocN + 255) / 256, 256>>>(d.accG, d.pos, d.accMag, d.allocN,
-                                                   d.allocG, d.periodic() ? 1 : 0, hv2, hc2,
+                                                   d.allocG, d.periodic() ? 1 : 0,
                                                    d.packBH());
         kSetOrbitAt<<<(n + 255) / 256, 256>>>(d.vel, d.pos, d.accMag, from, n, cx, cy);
     }

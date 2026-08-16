@@ -387,9 +387,13 @@ void TabGravity(App& app) {
     SliderLine("bhScale", "블랙홀 무게 배율", &app.cfg.blackHoleMassScale, 0.002f, 1.0f, "%.3f", true);
     UnderNote("놓는 개수에 이 값을 곱한 만큼 무겁다. 1 이면 개수 그대로 \xE2\x80\x94 판을 통째로 삼킨다.");
 
-    Toggle("halo", "보이지 않는 무게",
-           "은하 질량의 80~90% 를 차지하는 암흑물질 \xE2\x80\x94 원반을 감싸 나선팔을 자라게 한다",
-           &app.cfg.haloEnabled);
+    // **배경 힘 근사를 걷어내고 진짜 알갱이로 바꿨다(2026-08-17).**
+    // 전에는 켜고 끄는 스위치였는데, 그것은 암흑물질을 「보이지 않는 배경 중력」으로
+    // 때우는 근사였다. 이제 알갱이의 일부를 실제로 암흑물질로 깐다 — 중력만 주고받고
+    // 서로 부딪히지 않아 식지 못해 넓은 구형 헤일로로 남는다.
+    SliderLine("dark", "암흑물질 비율", &app.cfg.darkMatterFraction, 0.0f, 0.9f, "%.2f", true);
+    UnderNote("알갱이 중 이만큼을 암흑물질로 깐다. 중력만 주고받고 화면에는 안 보인다 \xE2\x80\x94 "
+              "재기 창의 회전곡선이 바깥에서 안 떨어지는 것으로 확인한다.");
 }
 
 void TabBounds(App& app) {

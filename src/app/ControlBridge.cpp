@@ -425,8 +425,9 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;
         if (has(kv, "coolingRate"))    app.cfg.coolingRate        = clampF(getFloat(kv, "coolingRate", app.cfg.coolingRate), 0.0f, 1.0f, app.cfg.coolingRate);
         if (has(kv, "starFormation"))  app.cfg.starFormationEnabled = getInt(kv, "starFormation", 0) != 0;
-        if (has(kv, "starDensity"))    app.cfg.starDensityThreshold = clampF(getFloat(kv, "starDensity", app.cfg.starDensityThreshold), 1.0f, 400.0f, app.cfg.starDensityThreshold);
-        if (has(kv, "starTemp"))       app.cfg.starTempThreshold  = clampF(getFloat(kv, "starTemp", app.cfg.starTempThreshold), 0.0f, 1.0f, app.cfg.starTempThreshold);
+        // (`starDensity`·`starTemp` 를 받던 두 줄을 지웠다 — 코어가 안 읽는 값이라
+        //  받아 봐야 「먹힌 것처럼 보이는데 아무 일도 안 일어나는」 상태만 만든다.
+        //  별 형성 문턱은 Jeans 조건 하나뿐이고 그 상수는 `starJeansK` 다.)
         if (has(kv, "expansion"))      app.cfg.expansionEnabled   = getInt(kv, "expansion", 0) != 0;
         if (has(kv, "hubble"))         app.cfg.hubble             = clampF(getFloat(kv, "hubble", app.cfg.hubble), 0.0f, 1.0f, app.cfg.hubble);
         if (has(kv, "brightness"))     app.view.brightness    = clampF(getFloat(kv, "brightness", app.view.brightness), 0.05f, 8.0f, app.view.brightness);

@@ -191,8 +191,8 @@ void DrawMeters(App& app, int viewW, int viewH) {
                 else {
                     for (int i = 0; i < kBins; ++i) g.ref[i] = g.rot[i];
                     g.hasRef = true;
-                    snprintf(g.refNote, sizeof(g.refNote), "기준 — 보이지 않는 무게 %s",
-                             app.cfg.haloEnabled ? "켬" : "끔");
+                    snprintf(g.refNote, sizeof(g.refNote), "기준 — 암흑물질 %.0f%%",
+                             app.cfg.darkMatterFraction * 100.0f);
                 }
             }
             if (g.hasRef) {
@@ -219,9 +219,9 @@ void DrawMeters(App& app, int viewW, int viewH) {
         // 1 에 가까우면 평평하다 — 보이지 않는 무게가 붙잡고 있다는 뜻이다.
         Row("바깥/안쪽 속도비", v, (ratio > 0.75f) ? kGood : kInk);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
-        ImGui::TextWrapped(app.cfg.haloEnabled
-            ? "1 에 가까우면 회전곡선이 평평하다 \xE2\x80\x94 보이지 않는 무게가 붙잡고 있다."
-            : "보이지 않는 무게를 끄면 바깥이 느려져 이 값이 내려간다.");
+        ImGui::TextWrapped(app.cfg.darkMatterFraction > 0.f
+            ? "1 에 가까우면 회전곡선이 평평하다 \xE2\x80\x94 암흑물질이 바깥을 붙잡고 있다."
+            : "암흑물질이 0 이면 바깥이 느려져 이 값이 내려간다. 설정에서 비율을 올려 보라.");
         ImGui::PopStyleColor();
     }
 
