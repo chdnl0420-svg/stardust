@@ -203,7 +203,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         "maxCellCount=%d\ntotalMomentum=%.4f\n"
         // 창발 — 코드에 「그렇게 되라」고 안 적은 것들이 나왔는지.
         // spiralM2 가 0.1 을 넘으면 눈에 보이는 두 팔이고, ash 안쪽이 진하면 금속 기울기다.
-        "spiralM2=%.4f\nashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n",
+        "spiralM2=%.4f\nashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n"
+        // 위 재 분포가 착시인지 가르는 값들 — 재를 뿌린 칸 수와 알갱이 분포.
+        "ashCellsIn=%d\nashCellsOut=%d\nnInner=%d\nnMid=%d\nnOuter=%d\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -238,7 +240,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz,
         cons.gas, cons.stars, cons.exploding, cons.remnants, cons.bad,
         cons.maxCellCount, cons.momentum,
-        emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter);
+        emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter,
+        emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter);
     return buf;
 }
 

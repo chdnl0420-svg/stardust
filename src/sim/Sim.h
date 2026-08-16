@@ -453,6 +453,13 @@ public:
         float  ashInner = 0.0f;
         float  ashMid   = 0.0f;
         float  ashOuter = 0.0f;
+        // **위 값이 착시인지 가르는 판별식.** 바깥이 진해 보여도 재를 뿌린 칸이 몇 개뿐이거나
+        // 알갱이가 거의 없으면 그것은 기울기가 아니라 표본이 적은 것이다.
+        int    ashCellsInner = 0;
+        int    ashCellsOuter = 0;
+        int    nInner = 0;
+        int    nMid   = 0;
+        int    nOuter = 0;
     };
     Emergence        measureEmergence() const;
 

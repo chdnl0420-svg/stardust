@@ -1283,6 +1283,25 @@ __global__ void kAshRadial(const float* ash, int G, float* outSum, float* outCnt
     if (a > 0.f) { atomicAdd(&outSum[b], a); atomicAdd(&outCnt[b], 1.0f); }
 }
 
+// 알갱이를 반지름 구간별로 센다.
+//
+// **재 분포가 「진짜 역전」인지 「측정 착시」인지 가르는 판별식이다.**
+// 판이 한 점으로 뭉치면 안쪽 구간에 알갱이가 거의 다 들어가고 바깥에는 흩어진 소수만
+// 남는데, 그때 「칸당 평균 재」는 바깥이 부풀 수 있다 — 재를 뿌린 칸이 몇 개뿐이라서다.
+// 알갱이 수를 함께 보면 그 착시가 드러난다.
+__global__ void kParticleRadial(const float4* pos, int n, float* outCnt, int bins) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+    // 원반은 xy 평면이므로 반지름도 xy 로만 잰다(kAshRadial 과 같은 규칙이어야 견줄 수 있다).
+    const float fx = p.x - 0.5f, fy = p.y - 0.5f;
+    int b = (int)(sqrtf(fx * fx + fy * fy) / 0.5f * (float)bins);
+    if (b >= bins) b = bins - 1;
+    if (b < 0) b = 0;
+    atomicAdd(&outCnt[b], 1.0f);
+}
+
 // 나선팔이 생겼는지 **수치로** 잰다 — 밀도의 m=2 푸리에 진폭.
 //
 // 두 팔 구조는 밀도가 각도에 대해 `1 + A·cos(2θ + φ)` 로 변조된다는 뜻이다.
@@ -3062,6 +3081,22 @@ Sim::Emergence Sim::measureEmergence() const {
         e.ashInner = (c[0] > 0.f) ? s[0] / c[0] : 0.f;
         e.ashMid   = (c[1] > 0.f) ? s[1] / c[1] : 0.f;
         e.ashOuter = (c[2] > 0.f) ? s[2] / c[2] : 0.f;
+        // **재를 뿌린 칸이 몇 개인지도 가져온다.** 바깥이 진해 보이는데 그 칸이 열 개뿐이면
+        // 그것은 기울기가 아니라 표본이 적어서다.
+        e.ashCellsInner = (int)c[0];
+        e.ashCellsOuter = (int)c[2];
+    }
+
+    // ── 알갱이가 어디 있나 — 위 재 분포가 착시인지 가르는 판별식 ────────
+    if (d.allocN > 0 && d.projA) {
+        const int kBins = 3;
+        CK(cudaMemset(d.projA, 0, sizeof(float) * kBins));
+        kParticleRadial<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.allocN, d.projA, kBins);
+        float n3[3] = {0.f, 0.f, 0.f};
+        CK(cudaMemcpy(n3, d.projA, sizeof(float) * kBins, cudaMemcpyDeviceToHost));
+        e.nInner = (int)n3[0];
+        e.nMid   = (int)n3[1];
+        e.nOuter = (int)n3[2];
     }
     return e;
 }
