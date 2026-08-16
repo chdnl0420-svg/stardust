@@ -988,6 +988,25 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
     if (k > 0.5f) k = 0.5f;
 
     // v + k·(v̄ - v) 인데, m 이 이미 (v̄ - v) 라 그대로 더하면 된다.
+    //
+    // **이 식은 총 운동량을 지키지 않는다 — 알고 쓴다.**
+    //
+    // 쌍 (i, j) 하나가 총합에 더하는 몫은 `(vⱼ − vᵢ)·(kᵢ/nᵢ − kⱼ/nⱼ)` 다. 두 알갱이의
+    // `k/n` 이 같아야 0 이 되는데 셋이 그것을 깬다:
+    //   ① `used`(n)가 알갱이마다 다르다 — 밀집한 자리는 96, 성긴 자리는 둘셋
+    //   ② `k` 가 재에 따라 칸마다 다르다(위 `ashCoolK`)
+    //   ③ **`kMaxPeers` 상한 때문에 이웃 관계 자체가 비대칭이다** — 붐비는 칸에서
+    //      i 는 j 를 봤는데 j 는 상한에 걸려 i 를 못 본다
+    // 셋 다 「이웃 평균으로 끌린다」는 형태에서 오는 것이라 이 자리에서는 못 없앤다.
+    // 쌍마다 대칭으로 주고받으려면 스레드가 남의 속도까지 써야 하는데, 그러면 원자 연산이
+    // 이웃 수만큼 늘어 이 커널이 가장 비싼 자리가 된다.
+    //
+    // 2026-08-16 실측: 냉각만 켠 판이 40초에 무게중심 0.303 이사(운동량 128,426).
+    // 압력만·별만 켠 판은 0.0003 · 0.0003 이라 **냉각 하나가 원인이다.**
+    //
+    // 그래서 결과를 `Sim::step` 이 스텝마다 지운다(`kSubtractMeanVelDev`) — 판 전체가
+    // 등속으로 흐르는 것은 갈릴레이 불변이라 물리적으로 뜻이 없다. **다만 지우는 것은
+    // 알짜 흐름뿐이고, 위 비대칭이 국소적으로 만드는 힘은 그대로 남는다.**
     velOut[i] = make_float4(v.x + k * mx, v.y + k * my, v.z + k * mz, v.w);
 }
 
@@ -1375,6 +1394,36 @@ __global__ void kMomentumAccum(const float4* pos, const float4* vel, int n, doub
     atomicAdd(&out[0], (double)v.x);
     atomicAdd(&out[1], (double)v.y);
     atomicAdd(&out[2], (double)v.z);
+    // 개수도 같이 센다 — 매 스텝 무게중심을 세우려면 평균을 GPU 안에서 내야 하고,
+    // 그러려면 나눌 수도 GPU 안에 있어야 한다. 호스트로 가져와 나누면 스텝마다
+    // `cudaMemcpy` 동기화가 들어가 GPU 가 그때마다 멈춘다.
+    // **부르는 쪽은 out 을 네 칸으로 비워야 한다** — 세 칸만 비우면 넷째에 지난 값이 남는다.
+    atomicAdd(&out[3], 1.0);
+}
+
+// 모든 알갱이에서 평균 속도를 뺀다. 위 `kSubtractMeanVel` 과 같은 일이지만 평균을
+// 호스트가 아니라 **GPU 안에서** 읽는다 — 매 스텝 돌릴 것이라 동기화가 있으면 안 된다.
+//
+// **왜 매 스텝인가.** reset 때 한 번 빼는 것으로는 못 잡는다. 2026-08-16 실측에서
+// 알짜 운동량을 만드는 것은 초기 배치가 아니라 **매 스텝 도는 냉각**이었다
+// (냉각만 켠 판이 40초에 0.303 이사, 운동량 128,426. 압력만·별만 켠 판은 0.0003 · 211 · 0.2).
+//
+// 냉각이 운동량을 안 지키는 이유는 `kCool` 에 적었다. 여기서는 그 결과를 지운다 —
+// **판 전체가 등속으로 흐르는 것은 물리적으로 아무 뜻이 없고**(갈릴레이 불변) 화면만
+// 망친다. N체 시뮬레이션에서 무게중심을 정지시키는 것은 표준 관행이다.
+//
+// 비용: N 스레드 × O(1). 앞의 `kMomentumAccum` 과 합쳐 5N 인데, `kCool` 이 이웃을
+// 96개까지 훑는 96N 에 비하면 5% 다.
+__global__ void kSubtractMeanVelDev(float4* vel, const float4* pos, int n, const double* acc) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || pos[i].x < 0.f) return;
+    const double cnt = acc[3];
+    if (cnt < 1.0) return;
+    float4 v = vel[i];
+    v.x -= (float)(acc[0] / cnt);
+    v.y -= (float)(acc[1] / cnt);
+    v.z -= (float)(acc[2] / cnt);
+    vel[i] = v;
 }
 
 // 원반이 실제로 얼마나 두꺼운지 — **공간** 두께다.
@@ -2862,7 +2911,8 @@ void Sim::reset() {
     // 중심이 (0.5,0.5) → **(0.983, 0.859)** 로 판 모서리까지 갔다. 화면으로는 「퍼졌다」로
     // 보이지만 실제로는 뭉친 채 이사한 것이고, 판 중앙 기준으로 재는 값이 전부 어긋난다.
     if (!g_failed && d.allocN > 0) {
-        CK(cudaMemset(d.redD, 0, sizeof(double) * 3));
+        // 네 칸이다 — `kMomentumAccum` 이 넷째에 개수를 센다(그 커널 주석).
+        CK(cudaMemset(d.redD, 0, sizeof(double) * 4));
         kMomentumAccum<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redD);
         double m[3] = {0.0, 0.0, 0.0};
         CK(cudaMemcpy(m, d.redD, sizeof(double) * 3, cudaMemcpyDeviceToHost));
@@ -2935,7 +2985,29 @@ void Sim::step() {
     // 식히는 것은 힘을 더하기 전에 한다 — 이번 스텝의 dt 로 이웃과의 무작위 운동을 걷어낸다.
     // 속도를 줄이는 쪽이라 방금 CFL 이 정한 dt 를 위태롭게 하지 않는다.
     d.doCooling(dt);
-    CK(cudaEventRecord(d.ev2));      // 여기까지가 냉각·분산 갱신·별 판정
+
+    // **무게중심을 세운다 — 매 스텝.**
+    //
+    // reset 에서 한 번 빼는 것으로는 못 잡는다. 알짜 운동량을 만드는 것은 초기 배치가
+    // 아니라 매 스텝 도는 냉각이고(`kCool` 끝 주석), 그래서 은하가 통째로 흘러 판
+    // 모서리에 눌러붙었다 — 2026-08-16 실측에서 100초에 무게중심이 (0.98, 0.92) 였고,
+    // 그 상태로는 반지름으로 재는 값(금속 기울기·성단·나선팔)이 전부 어긋난다.
+    //
+    // **조건을 안 건다.** 냉각이 가장 큰 원천이지만 접촉·경계 되튕김·광속 절단도 전부
+    // 비탄성이라 알짜 운동량을 만들 수 있고, 어느 쪽이든 판 전체의 등속 운동은 물리적으로
+    // 뜻이 없다(갈릴레이 불변).
+    //
+    // 평균을 호스트로 가져오지 않는다 — `cudaMemcpy` 는 GPU 를 멈추고, 스텝마다 멈추면
+    // 위에서 아낀 시간이 다 사라진다. `kMomentumAccum` 이 넷째 칸에 개수까지 세어 두고
+    // 나눗셈은 커널 안에서 한다. **그래서 여기 memset 은 세 칸이 아니라 네 칸이다.**
+    if (d.allocN > 0) {
+        CK(cudaMemset(d.redD, 0, sizeof(double) * 4));
+        kMomentumAccum<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redD);
+        kSubtractMeanVelDev<<<(d.allocN + 255) / 256, 256>>>(d.vel, d.pos, d.allocN, d.redD);
+        CK(cudaGetLastError());
+    }
+
+    CK(cudaEventRecord(d.ev2));      // 여기까지가 냉각·분산 갱신·별 판정·무게중심 정지
 
     const float haloV2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
     const float haloCore2 = d.cfg.haloCore * d.cfg.haloCore;
@@ -3138,8 +3210,9 @@ Sim::Conservation Sim::measureConservation() const {
     CK(cudaMemcpy(h, d.redI, sizeof(int) * 5, cudaMemcpyDeviceToHost));
     c.gas = h[0]; c.stars = h[1]; c.exploding = h[2]; c.remnants = h[3]; c.bad = h[4];
 
-    // 총 운동량
-    CK(cudaMemset(d.redD, 0, sizeof(double) * 3));
+    // 총 운동량. 네 칸을 비운다 — `kMomentumAccum` 이 넷째에 개수를 센다(그 커널 주석).
+    // 여기서는 개수를 안 읽지만, 안 비우면 지난 스텝 값이 남아 다음에 읽는 쪽이 오염된다.
+    CK(cudaMemset(d.redD, 0, sizeof(double) * 4));
     kMomentumAccum<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.redD);
     double m[3] = {0.0, 0.0, 0.0};
     CK(cudaMemcpy(m, d.redD, sizeof(double) * 3, cudaMemcpyDeviceToHost));
