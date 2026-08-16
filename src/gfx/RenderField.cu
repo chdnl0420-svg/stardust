@@ -251,11 +251,18 @@ __global__ void kShade(const float* rho, const float* tempSum, int G, uchar4* ou
 // 파티클을 화면에 더한다. 겹칠수록 밝아지므로 밀집한 곳이 자연히 도드라진다.
 // uchar4 에는 atomicAdd 가 없어 float3 누적 버퍼에 모았다가 뒤에서 색으로 바꾼다.
 // 코어가 3D 로 바뀌면서 위치·속도가 float4 가 됐다(x, y, z, 안 씀).
+// 블랙홀 자리와 지평선 반지름. **커널 인자로 값을 통째로 넘긴다** — 최대 여덟 개라
+// 128 바이트고, 별도 버퍼를 잡아 매 프레임 채우는 것보다 싸다.
+struct BHDisk {
+    float4 p[8];      // xyz = 자리, w = 지평선 반지름
+    int    n = 0;
+};
+
 // 화면은 위에서 내려다보므로 여기서는 x, y 만 쓴다 — z 는 깊이라 투영에서 사라진다.
 __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* temp,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
-                             float sizePx, float sunMass, float pulsePhase) {
+                             float sizePx, float sunMass, float pulsePhase, BHDisk bh) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -330,8 +337,46 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
         } else if (p.w < 0.f) {
             L = 1.0e4f; TK = 30000.f;                              // 폭발 중
         } else {
-            return;                                                 // 가스는 스스로 안 빛난다
+            L = 0.f; TK = 0.f;                                      // 가스는 스스로 안 빛난다
         }
+
+        // ── 블랙홀 강착원반 ────────────────────────────────────────────────
+        //
+        // **블랙홀 자체는 안 보인다 — 보이는 것은 떨어지는 물질이다.** 안으로 끌려 들어가는
+        // 물질은 각운동량 때문에 곧장 못 떨어지고 원반을 이루며 돌고, 그 원반의 안쪽과
+        // 바깥쪽이 다른 속도로 돌아 마찰로 데워진다. 그것이 빛난다.
+        //
+        // 표준 원반(샤쿠라-순야예프)에서 온도는 `T ∝ r^-3/4` 이고 단위면적 복사는
+        // `T⁴ ∝ r^-3` 이다. 그 둘을 그대로 쓴다 — 안쪽이 뜨겁고 푸르며 훨씬 밝고,
+        // 바깥으로 갈수록 식어 희어진다. **그래서 블랙홀은 「밝은 고리」로 보인다.**
+        //
+        // 가스든 별이든 원반 안에 있으면 데워진다(실제로도 블랙홀 가까이 간 별은 조석력에
+        // 찢겨 원반이 된다). 자기 빛에 **더한다** — 별은 원래 밝기 위에 얹힌다.
+        //
+        // **비용**: 알갱이당 블랙홀 수만큼 거리 계산. 자리가 여덟뿐이라 100만 알갱이에
+        // 800만 회이고, 제곱근 없이 `r²` 로 견주다 원반 안일 때만 한 번 편다. 블랙홀이
+        // 없으면 루프를 통째로 건너뛴다.
+        if (bh.n > 0) {
+            for (int k = 0; k < bh.n; ++k) {
+                const float4 b = bh.p[k];
+                const float dx = p.x - b.x, dy = p.y - b.y, dz = p.z - b.z;
+                const float r2 = dx * dx + dy * dy + dz * dz;
+                const float rs = fmaxf(b.w, 1e-5f);
+                // 원반 바깥 끝은 지평선의 12배. 그 밖은 너무 식어 안 보인다.
+                const float rOut = rs * 12.0f;
+                if (r2 >= rOut * rOut) continue;
+                const float r = fmaxf(__fsqrt_rn(r2), rs);
+                const float x = r / rs;                    // 지평선 단위 거리
+                // 안쪽 5만 K — 초대질량 블랙홀 원반의 실측 범위다(항성질량은 1e7 K 급).
+                const float Td = 50000.f * __powf(x, -0.75f);
+                const float Ld = 100.0f  * __powf(x, -3.0f);
+                // 밝기로 가중해 온도를 섞는다 — 별 위에 원반이 얹히면 밝은 쪽이 색을 정한다.
+                TK = (L + Ld > 0.f) ? (TK * L + Td * Ld) / (L + Ld) : 0.f;
+                L += Ld;
+            }
+        }
+        if (L <= 0.f) return;                                       // 아무것도 안 빛난다
+
         const float tc = tempToColorT(TK);
         // **밝기를 로그로 눌러 쌓는다.** `L = M^3.5` 라 범위가 1e-3~1e7 로 극단적이라
         // 그대로 쌓으면 무거운 별 하나가 누적 버퍼를 통째로 삼켜 나머지가 전부 검어진다.
@@ -716,6 +761,17 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             // 파티클 점 — 겹칠수록 밝아지도록 누적한 뒤 한 번에 색으로 바꾼다.
             const int n = app.sim.activeCount();
             kClearAccum<<<(npix + 255) / 256, 256>>>((float3*)devAccum_, npix);
+            // 블랙홀 자리를 모아 커널에 값으로 넘긴다(강착원반). 빛 모드에서만 쓰이지만
+            // 여덟 개 읽기라 모드를 가려 건너뛸 만큼의 비용이 아니다.
+            BHDisk bhDisk;
+            {
+                const int bhN = app.sim.blackHoleCount();
+                for (int k = 0; k < bhN && bhDisk.n < 8; ++k) {
+                    const BlackHoleState s = app.sim.blackHoleAt(k);
+                    if (!s.active) continue;
+                    bhDisk.p[bhDisk.n++] = make_float4(s.x, s.y, s.z, s.rs);
+                }
+            }
             if (n > 0) {
                 kSplatPoints<<<(n + 255) / 256, 256>>>(
                     (const float4*)app.sim.particlePosDevicePtr(),
@@ -725,7 +781,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     app.zoom, app.panX, app.panY, app.ui.pointSizePx,
                     fmaxf(app.sim.config().starSunMass, 1.0f),
                     // 펄서 위상. 90 프레임이 한 바퀴라 60fps 에서 약 1.5초 주기다.
-                    (float)(drawTick_ % 90u) * (6.2831853f / 90.0f));
+                    (float)(drawTick_ % 90u) * (6.2831853f / 90.0f), bhDisk);
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //

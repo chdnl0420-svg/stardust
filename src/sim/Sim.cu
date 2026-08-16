@@ -532,11 +532,22 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
         const float dx = p.x - bp.x, dy = p.y - bp.y, dz = p.z - bp.z;
         const float r2 = dx * dx + dy * dy + dz * dz;
         const float r = sqrtf(fmaxf(r2, 1e-12f));
-        if (r <= bp.w) {                       // 지평선 안으로 들어왔다 — 삼킨다
-            atomicAdd(&eaten[b], 1);
-            pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
-            vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
-            return;
+        if (r <= bp.w) {                       // 지평선 안으로 들어왔다
+            // **에딩턴 한계 — 이 스텝에 삼킬 수 있는 몫이 남았을 때만 삼킨다**
+            // (그 몫을 정하는 근거는 `packBH` 의 셋째 칸 주석).
+            const int slot = atomicAdd(&eaten[b], 1);
+            if ((float)slot < bh.q[b].z) {
+                pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
+                vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+                return;
+            }
+            // 몫이 찼다 — 안 삼키고 **둘레를 돌며 기다린다. 그 대기열이 강착원반이다.**
+            // 지평선 안쪽에서 `1/r³` 을 그대로 쓰면 중심에서 발산하므로 지평선 표면 값으로
+            // 고정한다. 다음 스텝에 다시 줄을 선다.
+            const float rw = fmaxf(bp.w, 1e-6f);
+            const float mm = -bh.q[b].x / (rw * rw * rw);
+            a.x += mm * dx; a.y += mm * dy; a.z += mm * dz;
+            continue;
         }
         // 각운동량 L = |r × v|
         const float lx = dy * v.z - dz * v.y;
@@ -2356,7 +2367,20 @@ BHPack Sim::Impl::packBH() const {
     for (int i = 0; i < bhCount && i < kMaxBlackHoles; ++i) {
         pk.p[i] = make_float4(bhs[i].x, bhs[i].y, bhs[i].z,
                               fmaxf(bhs[i].rs * 0.5f, cell));
-        pk.q[i] = make_float4(cfg.gravity * bhs[i].mass * inv, bhs[i].rs, 0.f, 0.f);
+        // 셋째 칸은 **이 스텝에 삼킬 수 있는 최대 개수**다(에딩턴 강착 한계).
+        //
+        // 실제 블랙홀은 아무리 물질이 많아도 무한정 못 삼킨다 — 떨어지는 물질이 마찰로
+        // 데워져 내는 복사압이 그 이상의 유입을 밀어낸다. 그 한계가 질량에 비례하고
+        // (`Ṁ ∝ M`), 못 들어간 물질은 둘레를 돌며 대기한다. **그 대기열이 강착원반이다.**
+        //
+        // **이것이 없으면 판이 통째로 사라진다** — 2026-08-17 실측: 블랙홀 여덟이 시뮬
+        // 시간 2 만에 알갱이 83만 개를 삼켜 화면이 검어졌다. 뭉친 칸 하나에 91만 개가
+        // 몰려 있는데(round-14) 그 자리에 블랙홀이 생기면 한 스텝에 다 빨려 든다.
+        //
+        // 계수 0.0004 는 `dt ≈ 0.0016` 에서 에딩턴 시간 4.0 시뮬 단위(4천만 년)에
+        // 해당한다 — 실제 4천5백만 년에 가깝다. **최소 1 이라 작은 블랙홀도 자란다.**
+        const float maxEat = fmaxf(1.0f, bhs[i].mass * 0.0004f);
+        pk.q[i] = make_float4(cfg.gravity * bhs[i].mass * inv, bhs[i].rs, maxEat, 0.f);
     }
     pk.n = (bhCount < kMaxBlackHoles) ? bhCount : kMaxBlackHoles;
     return pk;
@@ -3319,6 +3343,11 @@ void Sim::step() {
         bool any = false;
         for (int i = 0; i < d.bhCount; ++i) {
             if (e[i] <= 0) continue;
+            // **커널이 센 수는 실제로 삼킨 수보다 클 수 있다.** 에딩턴 몫이 찬 뒤에도
+            // 지평선 안에 있는 알갱이들이 `atomicAdd` 로 번호를 받고 되돌아가기 때문이다.
+            // 여기서 같은 상한으로 잘라야 질량이 부풀지 않는다(상한 식은 `packBH` 와 같다).
+            const int cap = (int)fmaxf(1.0f, d.bhs[i].mass * 0.0004f);
+            if (e[i] > cap) e[i] = cap;
             d.bhs[i].mass += (float)e[i];
             // 자라는 규칙은 setRsFrom 이 쥔다(세제곱근 — 그 자리의 주석 참조).
             d.setRsFrom(i);
