@@ -28,6 +28,20 @@ __device__ __forceinline__ float3 cmapAstro(float t) {
     return c[6];
 }
 
+// 표면 온도(켈빈)를 흑체 컬러맵의 자리 [0,1] 로 옮긴다.
+//
+// **흰색 지점을 6500K 에 맞춘다.** 실제 흑체가 그 온도에서 (255,249,253) 으로 거의 흰색이고,
+// 아래는 주황·붉은, 위는 청백으로 갈린다. 전에 2000K~60000K 를 통째로 폈더니 태양(5800K)이
+// 0.31 로 「붉은~흰」 구간의 아래쪽에 놓여 주황으로 그려졌다 — 실제 태양은 흰색에 가깝다.
+//
+// 로그를 쓰는 이유는 별의 색-온도 관계 자체가 로그에 가깝기 때문이다. 선형으로 펴면
+// 3만 K 위가 전부 같은 청백으로 뭉쳐 백색왜성과 청색거성을 못 가른다.
+//   1800K 붉은(0) · 5800K 태양(0.47) · 6500K 흰(0.5) · 15000K 백색왜성(0.69)
+//   30000K 청색거성(0.84) · 60000K 이상(1.0, 중성자별은 여기에 붙는다)
+__device__ __forceinline__ float tempToColorT(float tempK) {
+    return __saturatef(0.5f + 0.22492f * __logf(fmaxf(tempK, 1.f) * (1.f / 6500.f)));
+}
+
 // 흑체복사 색. **별이 실제로 내는 빛의 색이다.**
 //
 // 열화상(cmapThermal)과 결정적으로 다른 점은 **끝이 파랗다**는 것이다. 열화상은
@@ -36,8 +50,13 @@ __device__ __forceinline__ float3 cmapAstro(float t) {
 //
 //   3000K 붉은(적색왜성)  5800K 노란(태양)  7500K 흰  15000K+ 청백(거성)
 //
-// **밝기 t 를 그대로 온도로 읽는다.** 이 판에서 밝기와 온도가 같은 축에서 나오기 때문이다 —
-// `L = M^3.5` 이고 `T ∝ M^0.5` 라 밝을수록 뜨겁다. 격자를 둘로 나눌 필요가 없다.
+// **인자 t 는 이제 밝기가 아니라 온도다**(0 = 2000K, 1 = 60000K, 로그로 편 값).
+//
+// 전에는 밝기를 그대로 온도로 읽었다 — 주계열 별만 있으면 `L = M^3.5`·`T ∝ M^0.5` 라
+// 같은 축이어서 맞았다. 그런데 **잔해는 그 관계 밖에 있다**: `L = 4πR²σT⁴` 에서 백색왜성은
+// 반지름이 태양의 100분의 1 이라 어두우면서 뜨겁고, 중성자별은 10km 라 거의 안 보이면서
+// 백만 K 다. 밝기로 색을 정하면 그 둘이 「어두우니 붉다」로 그려져 적색왜성과 구분되지
+// 않는다. 격자를 둘로 나눈 이유가 이것이다(`Sim::lightTempDevicePtr`).
 __device__ __forceinline__ float3 cmapBlackbody(float t) {
     t = fminf(fmaxf(t, 0.f), 1.f);
     float r, g, b;
@@ -51,6 +70,19 @@ __device__ __forceinline__ float3 cmapBlackbody(float t) {
         r = 1.0f - 0.38f * u;
         g = 1.0f - 0.14f * u;
         b = 1.0f;
+    }
+    // **채도를 든다 — 있는 차이를 눈에 보이게 하는 것이지 없는 것을 그리는 게 아니다.**
+    //
+    // 실제 흑체의 청백은 40000K 에서도 (0.59, 0.73, 1.00) 이라 빨강과 파랑의 차이가
+    // 4% 남짓이고, 그 차이는 화면에서 눈에 안 걸린다 — 2026-08-17 실측에서 「푸른 별」로
+    // 세어진 픽셀이 **0.0%** 였다. 회색축에서 밀어내면 색조는 그대로 두고 대비만 커진다.
+    // 실제 천체 사진이 하는 처리와 같다(가짜 색을 입히는 것과 다르다).
+    {
+        const float lum = 0.30f * r + 0.59f * g + 0.11f * b;
+        const float k = 3.0f;
+        r = __saturatef(lum + (r - lum) * k);
+        g = __saturatef(lum + (g - lum) * k);
+        b = __saturatef(lum + (b - lum) * k);
     }
     // **어두운 쪽은 실제로도 어둡다.** 붉은 왜성은 색만 붉은 게 아니라 흐리다 —
     // 여기서 안 눌러 주면 어두운 별이 선명한 빨강으로 떠서 은하가 붉은 점묘화가 된다.
@@ -125,7 +157,7 @@ __global__ void kBlendGrid(float* dst, const float* src, int n, float a) {
 
 // 격자를 화면 픽셀로 샘플링해 RGBA8 을 만든다.
 // zoom/pan 은 화면 중앙을 기준으로 시뮬레이션 공간 [0,1]² 을 확대·이동한다.
-__global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
+__global__ void kShade(const float* rho, const float* tempSum, int G, uchar4* out, int W, int H,
                        float bright, float invGamma, int cmapKind,
                        float zoom, float panX, float panY) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -172,10 +204,42 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
         // 되돌리려는 것이다(x 가 두 배가 되면 어두운 쪽이 그만큼 올라온다).
         const float x = fmaxf(__logf(1.f + d * bright) * 0.60f, 0.f);
         float t = __powf(x / (1.f + x), invGamma);
-        float3 c = (cmapKind == 3) ? cmapBlackbody(t)
-                 : (cmapKind == 2) ? cmapThermal(t)
-                 : (cmapKind == 1) ? make_float3(t, t, t)
-                                   : cmapAstro(t);
+        float3 c;
+        if (cmapKind == 3 && tempSum) {
+            // ── 색은 온도가, 밝기는 밝기가 정한다 ──────────────────────────
+            //
+            // `L = 4πR²σT⁴` 라 밝기는 **크기와 온도 둘 다**에 달려 있다. 밝기 하나로
+            // 색을 정하면 그 둘의 조합이 통째로 사라져서, 작고 뜨거운 백색왜성이
+            // 「어두우니 붉다」로 그려진다 — 실제로는 어두우면서 푸르다. 그 구분이
+            // 없으면 작은 별·큰 별·중성자별·블랙홀이 화면에서 전부 흰 점이 된다.
+            //
+            // `tempSum` 은 밝기로 가중한 온도의 합이라 밝기로 나누면 대표 온도(K)다.
+            // 밝기 격자와 **같은 방식으로 보간해야** 한다 — 한쪽만 보간하면 경계에서
+            // 분자와 분모가 어긋나 색이 튄다.
+            const float ts = tempSum[y0 * G + x0] * (1.f - tx) * (1.f - ty)
+                           + tempSum[y0 * G + x1] * tx * (1.f - ty)
+                           + tempSum[y1 * G + x0] * (1.f - tx) * ty
+                           + tempSum[y1 * G + x1] * tx * ty;
+            const float TK = (d > 1e-12f) ? (ts / d) : 0.f;
+            c = cmapBlackbody(tempToColorT(TK));
+            // 색에 밝기를 곱한다. 어두운 별은 같은 색이라도 어둡게 남아야 한다.
+            //
+            // **제곱근을 쓰는 이유 — 컬러맵이 깔고 있던 명도 바닥을 대신한다.**
+            // 밝기로 색을 정하던 시절 `cmapBlackbody(0)` 은 (1, 0.32, 0.08) 이라 휘도가
+            // **0.50** 이었다. 즉 가장 어두운 값도 절반 밝기로 그려졌고, 그 바닥이 화면
+            // 전체를 떠받치고 있었다. 색을 온도로 옮기면 그 바닥이 사라져 `c × t` 가
+            // 그대로 어두워진다 — 2026-08-17 실측: 켜진 픽셀 6.4% → **1.34%**.
+            // `√t` 는 t=0.25 에서 0.5 를 돌려주므로 그 바닥을 근사하면서, 밝고 어두운
+            // 차이는 그대로 남긴다(0.05→0.22, 0.8→0.89). 감마를 건드리면 다른 색 기준까지
+            // 함께 바뀌므로 이 경로에서만 쓴다.
+            const float tv = __fsqrt_rn(t);
+            c.x *= tv; c.y *= tv; c.z *= tv;
+        } else {
+            c = (cmapKind == 3) ? cmapBlackbody(t)
+              : (cmapKind == 2) ? cmapThermal(t)
+              : (cmapKind == 1) ? make_float3(t, t, t)
+                                : cmapAstro(t);
+        }
         px = make_uchar4((unsigned char)(c.x * 255.f),
                          (unsigned char)(c.y * 255.f),
                          (unsigned char)(c.z * 255.f), 255);
@@ -191,7 +255,7 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
 __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* temp,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
-                             float sizePx) {
+                             float sizePx, float sunMass) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -208,7 +272,7 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
     int y = (int)((1.f - v) * H);                // GL 텍스처는 아래에서 위로 쌓인다
     if (x < 0 || x >= W || y < 0 || y >= H) return;
 
-    // 색 기준: 0 밀도 / 1 온도 / 2 속력.
+    // 색 기준: 0 밀도 / 1 온도 / 2 속력 / **3 별빛**.
     // 어느 쪽이든 색은 사용자가 고른 컬러맵(cmapKind: 0 천체 · 1 흑백 · 2 열화상)에서 뽑는다.
     // 전에는 컬러맵을 아예 안 받아서, 보드에서 흑백으로 바꿔도 점 렌더는 그대로였다
     // (round-06 리뷰 P2 #26).
@@ -222,7 +286,39 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
     }
 
     float3 c;
-    if (colorBy == 0) {
+    if (colorBy == 3) {
+        // ── 별빛 — **여기가 실제로 화면에 나오는 경로다** ────────────────────
+        //
+        // 격자 쪽(`kShade`)에도 같은 계산이 있는데, 배율이 조금만 커지면 격자 한 칸이
+        // 화면 여러 픽셀을 덮어 `pointMix` 가 1 로 포화된다. 그러면 격자는 아예 안
+        // 그려지고 이 커널만 남는다 — 2026-08-17 실측: 배율 1.78·격자 128 에서 한 칸이
+        // 12.5 픽셀이라 화면이 통째로 점 렌더였다. **격자만 고치면 화면은 안 바뀐다.**
+        //
+        // 색은 온도가, 밝기는 밝기가 정한다. `L = 4πR²σT⁴` 라 둘이 다른 축이고,
+        // 그래서 백색왜성은 어두우면서 푸르다(자세한 근거는 `Sim.cu` 의 `starTempK`).
+        // **두 곳에 같은 식이 있는 것은 번역 단위가 달라서다** — 한쪽을 고치면 다른
+        // 쪽도 고쳐야 화면과 격자가 같은 색을 낸다.
+        const float4 vv = vel[i];
+        float L, TK;
+        if (p.w > 0.f) {
+            const float ratio = fmaxf(p.w / sunMass, 1e-3f);
+            L = __powf(ratio, 3.5f);
+            if (vv.w < -1.5f)    { TK = 1000000.f; L *= 1e-6f; }   // 중성자별 — 10km 라 거의 안 보인다
+            else if (vv.w < 0.f) { TK = 15000.f;   L *= 1e-3f; }   // 백색왜성 — 반지름이 태양의 100분의 1
+            else                   TK = 5800.f * __fsqrt_rn(ratio);
+        } else if (p.w < 0.f) {
+            L = 1.0e4f; TK = 30000.f;                              // 폭발 중
+        } else {
+            return;                                                 // 가스는 스스로 안 빛난다
+        }
+        const float tc = tempToColorT(TK);
+        // **밝기를 로그로 눌러 쌓는다.** `L = M^3.5` 라 범위가 1e-3~1e7 로 극단적이라
+        // 그대로 쌓으면 무거운 별 하나가 누적 버퍼를 통째로 삼켜 나머지가 전부 검어진다.
+        // 로그를 씌우면 0.04~17.5 로 좁아져, 겹침(누적)과 개별 밝기가 같은 눈금에 온다.
+        const float w = __logf(1.f + L);
+        c = cmapBlackbody(tc);
+        c.x *= w; c.y *= w; c.z *= w;
+    } else if (colorBy == 0) {
         // 밀도 모드는 점마다 같은 색을 쌓아 겹친 수가 밝기가 되게 한다.
         // 그 한 가지 색을 컬러맵의 대표색으로 잡아 색조가 보드 설정과 어긋나지 않게 한다.
         c = (cmapKind == 1) ? make_float3(1.f, 1.f, 1.f)
@@ -299,7 +395,7 @@ __global__ void kClearAccum(float3* a, int n) {
 // 격자에서 알갱이로 서서히 넘어가는 구간에서 쓴다.
 __global__ void kAccumToRGBA(const float3* accum, uchar4* out, int n,
                              float bright, float invGamma, int useCmap, int cmapKind,
-                             float blend) {
+                             float blend, int reinhard) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float3 a = accum[i];
@@ -313,9 +409,18 @@ __global__ void kAccumToRGBA(const float3* accum, uchar4* out, int n,
                                          : cmapAstro(t);
         r = c.x; g = c.y; b = c.z;
     } else {
-        const float s = (lum > 1e-6f)
-                      ? __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma) / lum
-                      : 0.f;
+        // **별빛 모드는 자르지 않고 눌러 담는다(Reinhard).** 별 밝기가 `L = M^3.5` 라
+        // 질량이 2.5배만 차이나도 27배가 되어, 1 에서 자르면 웬만한 별이 전부 흰 점으로
+        // 포화된다 — 어느 별이 더 눈부신지 눈으로 못 가른다는 지적이 여기서 나왔다.
+        // `x/(1+x)` 는 1 에 절대 닿지 않아 아무리 밝아도 차이가 색으로 남는다.
+        float tone;
+        if (reinhard) {
+            const float x = fmaxf(__logf(1.f + lum * bright) * 0.42f, 0.f);
+            tone = __powf(x / (1.f + x), invGamma);
+        } else {
+            tone = __powf(fminf(__logf(1.f + lum * bright) * 0.42f, 1.f), invGamma);
+        }
+        const float s = (lum > 1e-6f) ? tone / lum : 0.f;
         r = fminf(a.x * s, 1.f); g = fminf(a.y * s, 1.f); b = fminf(a.z * s, 1.f);
     }
 
@@ -349,6 +454,7 @@ void RenderField::shutdown() {
     if (devPixels_)  { cudaFree(devPixels_); devPixels_ = nullptr; devBytes_ = 0; }
     if (devAccum_)   { cudaFree(devAccum_);  devAccum_  = nullptr; }
     if (devSmooth_)  { cudaFree(devSmooth_); devSmooth_ = nullptr; }
+    if (devSmoothT_) { cudaFree(devSmoothT_); devSmoothT_ = nullptr; }
     if (devStat_)    { cudaFree(devStat_);   devStat_   = nullptr; }
     smoothCells_ = 0; smoothPrimed_ = false; liveMean_ = 0.f;
 }
@@ -457,6 +563,10 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                                : (view.colorBy == ColorBy::Light)       ? Sim::Field::Light
                                                                         : Sim::Field::Density;
             const float* grid = app.sim.fieldDevicePtr(f);
+            // 빛 모드에서만 온도 격자가 있다. 다른 모드는 nullptr 이라 `kShade` 가
+            // 기존 경로(밝기로 색을 정함)를 그대로 탄다.
+            const float* tempGrid = (f == Sim::Field::Light)
+                                  ? app.sim.lightTempDevicePtr() : nullptr;
 
             // 앞 프레임과 섞어 떨림을 누른다. 새 그림을 35% 만 받아들이면 서너 프레임에
             // 걸쳐 따라가므로, 빠르게 도는 것도 뭉개지지 않으면서 깜빡임은 사라진다.
@@ -465,16 +575,25 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             if (grid && app.running && gridG > 0) {
                 const int cells = gridG * gridG;
                 if (cells > smoothCells_) {          // 커질 때만 다시 잡는다
-                    if (devSmooth_) cudaFree(devSmooth_);
-                    devSmooth_ = nullptr;
+                    if (devSmooth_)  cudaFree(devSmooth_);
+                    if (devSmoothT_) cudaFree(devSmoothT_);
+                    devSmooth_ = nullptr; devSmoothT_ = nullptr;
                     if (cudaMalloc(&devSmooth_, sizeof(float) * (size_t)cells) != cudaSuccess)
                         devSmooth_ = nullptr;
+                    if (cudaMalloc(&devSmoothT_, sizeof(float) * (size_t)cells) != cudaSuccess)
+                        devSmoothT_ = nullptr;
                     smoothCells_ = devSmooth_ ? cells : 0;
                     smoothPrimed_ = false;
                 }
                 if (devSmooth_) {
                     const float a = smoothPrimed_ ? 0.35f : 1.0f;
                     kBlendGrid<<<(cells + 255) / 256, 256>>>((float*)devSmooth_, grid, cells, a);
+                    // 온도 합도 같은 비율로 섞어야 색이 안 튄다(위 멤버 선언 참조).
+                    if (tempGrid && devSmoothT_) {
+                        kBlendGrid<<<(cells + 255) / 256, 256>>>((float*)devSmoothT_, tempGrid,
+                                                                 cells, a);
+                        tempGrid = (const float*)devSmoothT_;
+                    }
                     smoothPrimed_ = true;
                     grid = (const float*)devSmooth_;
                 }
@@ -564,7 +683,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                                : view.brightness * 60.0f;
             if (grid) {
                 dim3 b(16, 16), g((viewW + 15) / 16, (viewH + 15) / 16);
-                kShade<<<g, b>>>(grid, gridG, (uchar4*)devPixels_, viewW, viewH,
+                kShade<<<g, b>>>(grid, tempGrid, gridG, (uchar4*)devPixels_, viewW, viewH,
                                  bright, 1.0f / view.gamma, cmapKind,
                                  app.zoom, app.panX, app.panY);
                 drew = true;
@@ -581,7 +700,8 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     (const float4*)app.sim.particleVelDevicePtr(),
                     app.sim.particleTempDevicePtr(), n,
                     (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
-                    app.zoom, app.panX, app.panY, app.ui.pointSizePx);
+                    app.zoom, app.panX, app.panY, app.ui.pointSizePx,
+                    fmaxf(app.sim.config().starSunMass, 1.0f));
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //
@@ -589,14 +709,21 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             // 저절로 넘어온 알갱이 쪽에도 같은 배수와 같은 색 배열을 써야 섞이는 구간에서
             // 두 그림이 같은 색조로 겹친다. 사용자가 직접 점 모드를 고른 경우는 건드리지 않는다.
             const bool autoPoints = (view.mode != RenderMode::Points);
-            const float pointBright = autoPoints ? view.brightness / fmaxf(meanRho, 1e-6f)
-                                                 : view.brightness;
+            // **별빛 모드는 컬러맵을 다시 씌우지 않는다.** 알갱이가 이미 자기 온도의 색을
+            // 쌓아 두었는데 그 위에 밝기 기준 컬러맵을 덮으면 색이 통째로 지워진다 —
+            // 그래서 지금까지 화면이 온도와 무관한 남색이었다(2026-08-17 실측: 어두운
+            // 픽셀 평균 rgb 12.5/13.4/43.6 은 흑체가 못 내는 색이고 `cmapAstro` 의 값이다).
+            const bool lightMode = (view.colorBy == ColorBy::Light);
+            const float pointBright = (autoPoints && !lightMode)
+                                    ? view.brightness / fmaxf(meanRho, 1e-6f)
+                                    : view.brightness;
             // wantField 가 그리지 못했으면 섞을 바탕이 없다 — 그때는 알갱이로 덮어쓴다.
             const float blend = (wantField && drew) ? pointMix : 1.0f;
             kAccumToRGBA<<<(npix + 255) / 256, 256>>>((const float3*)devAccum_,
                                                       (uchar4*)devPixels_, npix,
                                                       pointBright, 1.0f / view.gamma,
-                                                      autoPoints ? 1 : 0, cmapKind, blend);
+                                                      (autoPoints && !lightMode) ? 1 : 0,
+                                                      cmapKind, blend, lightMode ? 1 : 0);
             drew = true;
         }
 

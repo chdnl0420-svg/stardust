@@ -1718,7 +1718,9 @@ __global__ void kScatterDispersion(const float4* pos, const float4* vel, int n, 
 // 합을 밀도로 나눠 평균으로 만든다. 빈 칸은 0 으로 둔다.
 // 별이 내는 빛을 화면 격자에 뿌린다.
 //
-// **비용**: N 스레드 × CIC 4칸 = 400만 × 4 = 1600만 atomicAdd. `kScatterDispersion` 과 같다.
+// **비용**: N 스레드 × CIC 4칸 × 격자 2개(밝기·온도) = 400만 × 8 = 3200만 atomicAdd.
+// 온도 축을 나누며 두 배가 됐다. `kScatterDispersion`(1600만)의 두 배이고, 이 커널은
+// 매 스텝이 아니라 **화면을 그릴 때만** 돈다 — 빛 모드가 아니면 아예 안 돈다.
 //
 // **밝기는 질량의 3.5제곱이다.** 이 지수 하나가 밀도 그림과 빛 그림을 완전히 갈라놓는다 —
 // 태양 20배짜리 별은 3만 6천 배 밝다. 밀도로 보면 알갱이 20개일 뿐인데 빛으로 보면
@@ -1727,7 +1729,29 @@ __global__ void kScatterDispersion(const float4* pos, const float4* vel, int n, 
 // 가스(`pos.w == 0`)는 스스로 빛나지 않아 여기서 0 이다. 별빛을 받아 빛나는 반사광은
 // 별빛을 퍼뜨리는 계산이 따로 필요해 이번 판에서는 넣지 않는다(스펙의 다음 항목).
 // 폭발 중(`pos.w < 0`)인 것은 **아주 밝게** 친다 — 초신성은 은하 전체보다 밝다.
-__global__ void kScatterLight(const float4* pos, int n, int G, float* out, ViewRot rot,
+// 별의 표면 온도(켈빈). **밝기와 다른 축이다 — 이 함수가 있어야 넷을 눈으로 가른다.**
+//
+// `L = 4πR²σT⁴` 라 밝기는 **크기와 온도 둘 다**에 달려 있다. 그래서 작고 뜨거운 것은
+// 어두우면서 푸르고, 크고 미지근한 것은 밝으면서 붉다. 밝기 하나로 색을 정하면
+// 그 조합이 통째로 표현되지 않는다 — 백색왜성이 「어두우니 붉다」로 그려진다.
+//
+// 상태마다 온도의 출처가 다르다:
+//   주계열   T = T_sun·(M/M_sun)^0.5   — L∝M^3.5, R∝M^0.8 에서 나온다
+//   백색왜성 15,000K 고정               — 관측 범위 8,000~40,000K 의 중간. 질량과 무관하게
+//                                        핵융합이 끝난 심의 잔열이라 M 으로 못 구한다
+//   중성자별 1,000,000K                 — 갓 태어난 것은 실제로 백만 K 대다
+//   폭발 중   30,000K                    — 초신성 광구
+//
+// **잔해 두 종류는 `vel.w` 의 음수 값으로 갈린다**(-1 백색왜성, -2 중성자별).
+__device__ __forceinline__ float starTempK(float pw, float vw, float sunMass) {
+    if (pw < 0.f) return 30000.f;                     // 폭발 중
+    if (vw < -1.5f) return 1000000.f;                 // 중성자별
+    if (vw < 0.f)   return 15000.f;                   // 백색왜성
+    return 5800.f * __fsqrt_rn(fmaxf(pw / sunMass, 1e-3f));
+}
+
+__global__ void kScatterLight(const float4* pos, const float4* vel, int n, int G,
+                              float* out, float* outT, ViewRot rot,
                               float sunMass, float novaBoost) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -1745,6 +1769,21 @@ __global__ void kScatterLight(const float4* pos, int n, int G, float* out, ViewR
         return;                                  // 가스는 스스로 안 빛난다
     }
 
+    // 잔해는 밝기를 실제 크기에서 다시 잡는다. `kStarAge` 가 백색왜성을 `p.w *= 0.1` 로
+    // 남기는데 그 값을 그대로 `M^3.5` 에 넣으면 **주계열 별의 식**을 잔해에 쓰는 것이 된다.
+    // 실제 백색왜성은 반지름이 태양의 100분의 1 이라 같은 온도라도 만분의 1 로 어둡고,
+    // 중성자별은 10km 라 사실상 안 보인다 — 그것이 「어두운데 푸르다」의 밝기 쪽 절반이다.
+    float tempK;
+    if (vel) {
+        const float vw = vel[i].w;
+        tempK = starTempK(p.w, vw, sunMass);
+        if (p.w > 0.f && vw < 0.f) {
+            lum *= (vw < -1.5f) ? 1e-6f : 1e-3f;   // 중성자별 · 백색왜성
+        }
+    } else {
+        tempK = starTempK(p.w, 0.f, sunMass);
+    }
+
     float ux = p.x, uy = p.y;
     if (rot.on && !rotPoint(p.x, p.y, p.z, rot, ux, uy)) return;
     const float gx = ux * G - 0.5f, gy = uy * G - 0.5f;
@@ -1756,6 +1795,10 @@ __global__ void kScatterLight(const float4* pos, int n, int G, float* out, ViewR
         const int cy = min(max(iy + oy, 0), G - 1);
         const float w = (ox ? fx : 1.f - fx) * (oy ? fy : 1.f - fy);
         atomicAdd(&out[cy * G + cx], w * lum);
+        // **밝기로 가중한 온도를 쌓는다.** 한 칸에 여러 별이 겹치면 밝은 쪽 색이 이겨야
+        // 한다 — 어두운 적색왜성 백 개와 청색거성 하나가 겹친 자리는 푸르게 보이는 것이
+        // 맞다. 나중에 이 합을 밝기 합으로 나누면 그 가중평균이 나온다.
+        if (outT) atomicAdd(&outT[cy * G + cx], w * lum * tempK);
     }
 }
 
@@ -2089,6 +2132,10 @@ struct Sim::Impl {
     // 빛이 퍼진 만큼 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고, 그러면 더한 만큼
     // 도로 깎여 **후광을 켤수록 화면이 어두워진다**(2026-08-16 실측: 켜진 픽셀 2.78% → 0.4%).
     float  *projLight = nullptr;
+    // **밝기로 가중한 온도의 합** G². 색을 밝기와 다른 축에서 정하는 자리다 —
+    // 이것을 밝기 합으로 나누면 그 픽셀의 대표 온도가 나온다. `projTB` 는 후광을 입힐 때
+    // 온도도 함께 퍼뜨리는 데 쓰는 임시 격자다(밝기만 퍼뜨리면 후광 자리의 색이 없다).
+    float  *projT = nullptr, *projTB = nullptr;
     float  *accMag = nullptr;        // 궤도 속도용 N
 
     // ── 압력 (속도 분산 텐서의 대각 성분) ──────────────────────────────────
@@ -2432,6 +2479,7 @@ void Sim::Impl::freeAll() {
     F((void*&)temp); F((void*&)tempTmp);
     F((void*&)accG); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
     F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)projLight); F((void*&)accMag);
+    F((void*&)projT); F((void*&)projTB);
     F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
     F((void*&)velSumX); F((void*&)velSumY); F((void*&)velSumZ);
     F((void*&)ashGrid);
@@ -2502,6 +2550,11 @@ void Sim::Impl::allocate() {
     // 후광 전 별빛(정규화 기준용). 화면 격자라 128² × 4B = 65 KB 밖에 안 든다.
     CK(cudaMalloc(&projLight, sizeof(float) * (size_t)G * G));
     CK(cudaMemset(projLight, 0, sizeof(float) * (size_t)G * G));
+    // 온도 격자 둘. 같은 화면 격자라 합쳐도 131 KB 다.
+    CK(cudaMalloc(&projT, sizeof(float) * (size_t)G * G));
+    CK(cudaMemset(projT, 0, sizeof(float) * (size_t)G * G));
+    CK(cudaMalloc(&projTB, sizeof(float) * (size_t)G * G));
+    CK(cudaMemset(projTB, 0, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&specRho, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&specGreen, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&keys, sizeof(int) * N));
@@ -2898,8 +2951,8 @@ size_t Sim::estimateBytes(int particleCount, int gridSize, Boundary boundary) {
     // 128³ 에서 25 MB. 대신 알갱이당 이웃 96개 읽기가 사라졌다.
     b += sizeof(float) * G * G * G * 3;
     b += sizeof(float) * G * G * G;   // ashGrid — 재도 패딩 없이 G³ 다
-    // 위 두 줄은 화면용 격자(proj/projA/projB, G²)를 안 센다 — 셋을 합쳐도 128² 에서
-    // 196 KB 라 어림에 영향이 없다.
+    // 위 두 줄은 화면용 격자를 안 센다 — proj·projA·projB·projLight·projT·projTB 여섯을
+    // 합쳐도 128² 에서 384 KB 라 어림에 영향이 없다(하나가 64 KB).
 
     // cuFFT 작업 공간 — **어림하지 말고 물어본다.**
     //
@@ -3840,6 +3893,10 @@ const float* Sim::densityDevicePtr() const { return impl_->rho; }
 // `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다 — 그 안에서 채워진다.
 const float* Sim::lightBeforeGlowDevicePtr() const { return impl_->projLight; }
 
+// 밝기로 가중한 온도의 합 격자. **밝기 격자로 나누면 그 픽셀의 대표 온도(K)가 된다.**
+// `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다.
+const float* Sim::lightTempDevicePtr() const { return impl_->projT; }
+
 // 보는 방향을 정한다(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그림 그대로다.
 void Sim::setViewAngles(float yaw, float pitch) {
     impl_->viewYaw   = yaw;
@@ -3867,12 +3924,13 @@ const float* Sim::fieldDevicePtr(Field field) {
         // 별빛은 **나누지 않는다.** 분산·속력은 「평균」이라 개수로 나눠야 하지만, 빛은
         // 합이 곧 그 자리의 밝기다 — 별 열 개가 모이면 열 배 밝은 것이 맞다.
         kClearF<<<blocks, 256>>>(d.proj, cells);
+        if (d.projT) kClearF<<<blocks, 256>>>(d.projT, cells);
         // 초신성 밝기 배수. 실제 초신성은 별 1000억 개를 합친 것보다 밝지만 그 값을 그대로
         // 쓰면 화면 기준을 통째로 삼킨다(밝기 정규화가 백분위수로 바뀌기 전까지는).
         // 「가장 무거운 별보다 확실히 밝다」 선에서 끊는다.
         const float nova = 1.0e4f;
         kScatterLight<<<(d.allocN + 255) / 256, 256>>>(
-            d.pos, d.allocN, G, d.proj, rot,
+            d.pos, d.vel, d.allocN, G, d.proj, d.projT, rot,
             fmaxf(d.cfg.starSunMass, 1.0f), nova);
 
         // ── 후광과 성운 — 둘 다 「퍼진 별빛」을 재료로 쓴다 ────────────────
@@ -3899,8 +3957,19 @@ const float* Sim::fieldDevicePtr(Field field) {
             const int radius = 6;
             kBlurLine<<<g2, b2>>>(d.proj,  d.projA, G, radius, 1);
             kBlurLine<<<g2, b2>>>(d.projA, d.projB, G, radius, 0);
+            // **온도 합도 밝기와 똑같이 퍼뜨린다.** 색은 `온도합 ÷ 밝기` 로 나오는데
+            // 분자만 안 퍼뜨리면 후광 자리에서 분모만 커져 색이 붉은 쪽으로 무너진다 —
+            // 밝은 파란 별의 후광이 붉어지는 것은 실제 현상이 아니다.
+            // `projA` 는 위에서 `projB` 로 이미 넘어가 자유롭다(재사용).
+            if (d.projT && d.projTB) {
+                kBlurLine<<<g2, b2>>>(d.projT, d.projA,  G, radius, 1);
+                kBlurLine<<<g2, b2>>>(d.projA, d.projTB, G, radius, 0);
+            }
             if (wantGlow) {
                 kAddGlow<<<blocks, 256>>>(d.proj, d.projB, d.proj, cells, d.cfg.starGlowK);
+                if (d.projT && d.projTB) {
+                    kAddGlow<<<blocks, 256>>>(d.projT, d.projTB, d.projT, cells, d.cfg.starGlowK);
+                }
             }
             if (wantNebula) {
                 // 가스 밀도는 기존 밀도 격자를 그대로 투영해 쓴다. 별도 「가스만」 격자를
@@ -3908,6 +3977,11 @@ const float* Sim::fieldDevicePtr(Field field) {
                 kClearF<<<blocks, 256>>>(d.projA, cells);
                 kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.projA, G, d.stride(), rot);
                 kAddNebula<<<blocks, 256>>>(d.proj, d.projB, d.projA, d.proj, cells, d.cfg.nebulaK);
+                // 성운도 온도를 함께 받는다 — 반사광의 색은 비추는 별의 색이다.
+                if (d.projT && d.projTB) {
+                    kAddNebula<<<blocks, 256>>>(d.projT, d.projTB, d.projA, d.projT,
+                                                cells, d.cfg.nebulaK);
+                }
             }
         }
         CK(cudaGetLastError());
