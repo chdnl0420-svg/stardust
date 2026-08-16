@@ -20,7 +20,9 @@ enum class RenderMode { DensityField, Points };
 // 전에 있던 가스 온도는 상태방정식과 충격 가열이 있어야 뜻이 있는데 그 계산을 하지 않으면서
 // 값만 남아 있었다 — 화면은 흑백으로만 갈리고 무엇을 보는지 알 수 없었다.
 enum class ColorBy    { Density, Dispersion, Speed, Light };
-enum class ColorMap   { Astro, Gray, Thermal };
+// Blackbody 는 별이 실제로 내는 빛의 색이다 — 붉은(3000K) → 노란(태양) → 흰 → 청백(거성).
+// 열화상(Thermal)과 달리 **끝이 파랗고**, 무거운 별이 거기 있다.
+enum class ColorMap   { Astro, Gray, Thermal, Blackbody };
 
 struct ViewSettings {
     RenderMode mode    = RenderMode::DensityField;

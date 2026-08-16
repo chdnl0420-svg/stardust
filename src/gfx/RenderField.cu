@@ -28,6 +28,36 @@ __device__ __forceinline__ float3 cmapAstro(float t) {
     return c[6];
 }
 
+// 흑체복사 색. **별이 실제로 내는 빛의 색이다.**
+//
+// 열화상(cmapThermal)과 결정적으로 다른 점은 **끝이 파랗다**는 것이다. 열화상은
+// 검정→빨강→노랑→흰에서 멈추는데, 실제 흑체는 그 위에 청백이 있고 **무거운 별이 바로
+// 거기 있다.** 그 파란 끝이 없으면 「무거운 별일수록 푸르다」가 화면에 안 나온다.
+//
+//   3000K 붉은(적색왜성)  5800K 노란(태양)  7500K 흰  15000K+ 청백(거성)
+//
+// **밝기 t 를 그대로 온도로 읽는다.** 이 판에서 밝기와 온도가 같은 축에서 나오기 때문이다 —
+// `L = M^3.5` 이고 `T ∝ M^0.5` 라 밝을수록 뜨겁다. 격자를 둘로 나눌 필요가 없다.
+__device__ __forceinline__ float3 cmapBlackbody(float t) {
+    t = fminf(fmaxf(t, 0.f), 1.f);
+    float r, g, b;
+    if (t < 0.5f) {
+        const float u = t * 2.0f;                 // 붉은 → 흰
+        r = 1.0f;
+        g = 0.32f + 0.68f * u;
+        b = 0.08f + 0.80f * u * u;                // 파랑이 가장 늦게 올라온다
+    } else {
+        const float u = (t - 0.5f) * 2.0f;        // 흰 → 청백
+        r = 1.0f - 0.38f * u;
+        g = 1.0f - 0.14f * u;
+        b = 1.0f;
+    }
+    // **어두운 쪽은 실제로도 어둡다.** 붉은 왜성은 색만 붉은 게 아니라 흐리다 —
+    // 여기서 안 눌러 주면 어두운 별이 선명한 빨강으로 떠서 은하가 붉은 점묘화가 된다.
+    const float dim = fminf(t * 3.2f, 1.0f);
+    return make_float3(r * dim, g * dim, b * dim);
+}
+
 __device__ __forceinline__ float3 cmapThermal(float t) {
     t = fminf(fmaxf(t, 0.f), 1.f);
     // 열화상: 검정 -> 빨강 -> 노랑 -> 흰. 충격파면이 달아오르는 것을 보기 좋다.
@@ -107,7 +137,8 @@ __global__ void kShade(const float* rho, int G, uchar4* out, int W, int H,
                       + rho[y1 * G + x1] * tx * ty;
         // 밀도는 범위가 매우 넓어(빈 곳 0, 중심 수천) 로그로 눌러야 구조가 보인다.
         float t = __powf(fminf(fmaxf(__logf(1.f + d * bright) * 0.30f, 0.f), 1.f), invGamma);
-        float3 c = (cmapKind == 2) ? cmapThermal(t)
+        float3 c = (cmapKind == 3) ? cmapBlackbody(t)
+                 : (cmapKind == 2) ? cmapThermal(t)
                  : (cmapKind == 1) ? make_float3(t, t, t)
                                    : cmapAstro(t);
         px = make_uchar4((unsigned char)(c.x * 255.f),
@@ -349,8 +380,9 @@ void RenderField::draw(App& app, int viewW, int viewH) {
 
     const ViewSettings& view = app.view;
     const int npix = viewW * viewH;
-    const int cmapKind = (view.cmap == ColorMap::Thermal) ? 2
-                       : (view.cmap == ColorMap::Gray)    ? 1 : 0;
+    const int cmapKind = (view.cmap == ColorMap::Blackbody) ? 3
+                       : (view.cmap == ColorMap::Thermal)   ? 2
+                       : (view.cmap == ColorMap::Gray)      ? 1 : 0;
 
     // 다가갈수록 격자에서 알갱이로 **서서히** 넘어간다.
     //

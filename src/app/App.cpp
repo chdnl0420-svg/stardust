@@ -465,11 +465,15 @@ void ApplyLook(App& app) {
     // 넣어도 status 가 계속 density 였다).
     if (app.look == App::Look::Light) {
         app.view.colorBy = ColorBy::Light;
+        // **빛으로 볼 때는 흑체 색을 쓴다.** 별이 실제로 내는 색이고, 밝기와 온도가 같은 축
+        // (질량)에서 나오므로 밝기 격자 하나로 색까지 정해진다 — 무거운 별은 밝고 푸르게,
+        // 가벼운 별은 어둡고 붉게 나온다.
+        app.view.cmap = ColorMap::Blackbody;
     } else {
         app.look = App::Look::Density;
         app.view.colorBy = ColorBy::Density;
+        app.view.cmap = ColorMap::Astro;
     }
-    app.view.cmap    = ColorMap::Astro;
     app.view.brightness = app.brightDensity;
     app.view.gamma      = app.gammaDensity;
 }

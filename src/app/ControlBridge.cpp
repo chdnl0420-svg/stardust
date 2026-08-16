@@ -217,7 +217,8 @@ std::string ControlBridge::statusBody(const App& app) const {
             : app.view.colorBy == ColorBy::Speed ? "speed"
             : app.view.colorBy == ColorBy::Light ? "light" : "density",
         app.view.cmap == ColorMap::Gray ? "gray"
-            : app.view.cmap == ColorMap::Thermal ? "thermal" : "astro",
+            : app.view.cmap == ColorMap::Thermal ? "thermal"
+            : app.view.cmap == ColorMap::Blackbody ? "blackbody" : "astro",
         app.view.brightness, app.view.gamma, app.view.showHud ? 1 : 0,
         app.cfg.contactEnabled ? 1 : 0, app.cfg.contactStiffness, app.cfg.contactDamping,
         STARDUST_VERSION, up.checked ? 1 : 0, up.available ? 1 : 0,
@@ -405,13 +406,19 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
             // **`app.look` 도 함께 바꾼다.** 설정 보드가 `ApplyLook` 을 부르면 그것이
             // `look` 을 보고 `colorBy` 를 다시 정하므로, 여기서 `colorBy` 만 바꾸면
             // 보드를 건드리는 순간 되돌아간다.
-            app.look = (app.view.colorBy == ColorBy::Light) ? App::Look::Light
-                                                            : App::Look::Density;
+            const bool wantLight = (app.view.colorBy == ColorBy::Light);
+            app.look = wantLight ? App::Look::Light : App::Look::Density;
+            // **컬러맵도 함께 바꾼다.** `ApplyLook` 이 이 짝을 맞추지만 그것은 시작 시
+            // 한 번만 불린다 — 여기서 안 바꾸면 빛으로 보면서 밀도용 색을 쓰게 되고,
+            // 그러면 「무거운 별은 푸르고 가벼운 별은 붉다」가 화면에 안 나온다.
+            // 아래 "colormap" 키가 함께 오면 그쪽이 이긴다(사용자가 명시한 것이 우선).
+            app.view.cmap = wantLight ? ColorMap::Blackbody : ColorMap::Astro;
         }
         if (has(kv, "colormap")) {
             const std::string& c = kv["colormap"];
-            app.view.cmap = (c == "gray") ? ColorMap::Gray
-                          : (c == "thermal") ? ColorMap::Thermal : ColorMap::Astro;
+            app.view.cmap = (c == "gray")      ? ColorMap::Gray
+                          : (c == "thermal")   ? ColorMap::Thermal
+                          : (c == "blackbody") ? ColorMap::Blackbody : ColorMap::Astro;
         }
         // 카메라도 같다 — zoom 0 이나 NaN 이 들어가면 화면 변환이 0 으로 나누기가 된다.
         if (has(kv, "zoom")) app.zoom = clampF(getFloat(kv, "zoom", app.zoom), 0.05f, 64.0f, app.zoom);
