@@ -131,29 +131,18 @@ __device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s
     if (r > R * 1.6f) r = R * 1.6f;                  // 아주 먼 꼬리는 자른다
     r = fmaxf(r, R * 0.015f);
 
-    // 감김각. 작을수록 촘촘히 감긴다. 22°(0.40)로 벌렸더니 팔이 거의 안 감겨 막대처럼
-    // 보였다(2026-08-14 실측) — 16° 로 조여 두 팔이 확실히 한 바퀴 이상 돌게 한다.
-    const float tanI = 0.29f;
-    const float psi = __logf(r / (R * 0.06f)) / tanI;
-
-    const float th0 = u2 * 6.2831853f;
-    // 팔을 뾰족하게 만든다.
+    // **각은 균등하게 둔다 — 나선팔을 손으로 그리지 않는다(2026-08-16).**
     //
-    // 각을 -(A/2)·sin(2Δ) 만큼 당기면 밀도가 1 + A·cos(2Δ) 가 된다(변환의 야코비안).
-    // 그런데 코사인 하나로는 팔이 완만한 언덕이라, A 를 상한까지 올려도 팔과 그 사이의
-    // 경계가 흐리다. 두 배 빠른 항을 함께 당기면 밀도에 cos(4Δ) 가 더해져 마루가 좁아지고
-    // 골이 넓어진다 — 실제 은하의 팔이 그렇게 생겼다(좁은 띠와 넓은 빈 공간).
+    // 전에는 여기서 로그 나선 `psi = ln(r/R₀)/tanI`(감김각 16°)로 팔이 지나는 각을 잡고,
+    // 각을 `-(A/2)·sin(2Δ) - (B/4)·sin(4Δ)` 만큼 당겨 밀도에 `1 + A·cos(2Δ) + B·cos(4Δ)` 를
+    // 만들었다. 야코비안을 이용한 정교한 방법이었고 사진처럼 보이는 팔이 나왔다.
     //
-    // 제약은 야코비안 1 - A·cos(2Δ) - B·cos(4Δ) 가 0 보다 커야 한다는 것이다. 둘이 함께
-    // 최대가 되는 자리에서 A + B 가 1 을 넘으면 각이 접혀 알갱이가 한 줄에 겹쳐 쌓인다.
+    // **그것이 이 판에서 가장 큰 연출이었다.** 팔이 저절로 생기는지 보려고 만든 판에서
+    // 팔을 처음부터 그려 넣으면, 무엇을 확인하든 이미 답이 그려져 있다.
+    // `spiralWave`(회전 밀도파)를 지워도 이 배치가 남아 있으면 팔은 계속 보인다.
     //
-    // 팔이 가장 진한 반지름은 바깥으로 둔다 — 안쪽은 팽대부가 덮어 어차피 안 보인다.
-    const float rn = r / R;
-    const float env = __expf(-(rn - 0.55f) * (rn - 0.55f) / 0.42f);
-    const float A = 0.62f * env;
-    const float B = 0.30f * env;                     // A + B <= 0.92 — 접히지 않는 선
-    const float dd = 2.0f * (th0 - psi);
-    const float th = th0 - (A * 0.5f) * __sinf(dd) - (B * 0.25f) * __sinf(2.0f * dd);
+    // 팔이 나오면 중력·냉각·압력·별의 한살이가 만든 것이고, 안 나오면 안 나오는 것이 결과다.
+    const float th = u2 * 6.2831853f;
 
     const float sigma = thickness * (0.6f + 0.9f * r / R);
     const float z = rndNormal(s ^ 0x2545F491u) * sigma;
@@ -2727,7 +2716,11 @@ void Sim::step() {
             fmaxf(d.cfg.starExplodeSim, 1e-4f), d.cfg.starKickSpeed,
             (unsigned)(d.stepCount * 2654435761u + 7919u),
             d.ashGrid, d.allocG, d.periodic() ? 1 : 0, d.cfg.starAshYield,
-            d.bhCand, d.bhCandN, d.bhBlockedCount, kMaxBlackHoles,
+            // 블랙홀 전환이 꺼져 있으면 후보 버퍼를 안 넘긴다 — 커널이 `bhCand` 가 null 인
+            // 것을 보고 그 갈래를 건너뛰어, 무거운 별도 그냥 터지고 가스로 돌아온다.
+            d.cfg.starCollapseToBH ? d.bhCand : nullptr,
+            d.cfg.starCollapseToBH ? d.bhCandN : nullptr,
+            d.bhBlockedCount, kMaxBlackHoles,
             fmaxf(d.cfg.starBHRatio, 1.0f));
         CK(cudaGetLastError());
 
@@ -2808,6 +2801,28 @@ double Sim::meanStarMass() const {
     CK(cudaMemcpy(&cnt, d.redI, sizeof(int), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(&sum, d.redD, sizeof(double), cudaMemcpyDeviceToHost));
     return (cnt > 0) ? sum / (double)cnt : 0.0;
+}
+
+// 방향별 분산을 따로 돌려준다. **원반이 스스로 납작해지는지를 보는 창이다** —
+// 수직(zz)이 수평(xx·yy)보다 작으면 그 방향으로 덜 밀려 원반이 얇게 유지된다는 뜻이고,
+// 그것이 `diskThickness` 를 손으로 정하지 않아도 되는 이유다.
+void Sim::measureDispersionAxes(double& xx, double& yy, double& zz) const {
+    Impl& d = *impl_;
+    xx = yy = zz = 0.0;
+    if (g_failed || d.allocG <= 0 || !d.cfg.pressureEnabled) return;
+    const int cells = d.allocG * d.allocG * d.allocG;
+    auto sumOf = [&](const float* src) -> double {
+        CK(cudaMemset(d.redD, 0, sizeof(double)));
+        kSumFloatGrid<<<(cells + 255) / 256, 256>>>(src, cells, d.redD);
+        double h = 0.0;
+        CK(cudaMemcpy(&h, d.redD, sizeof(double), cudaMemcpyDeviceToHost));
+        return h;
+    };
+    const double cnt = sumOf(d.dispCnt);
+    if (cnt < 1.0) return;
+    xx = sumOf(d.dispX) / cnt;
+    yy = sumOf(d.dispY) / cnt;
+    zz = sumOf(d.dispZ) / cnt;
 }
 
 // 판 전체에 쌓인 재의 총량. 사슬이 도는지 밖에서 확인할 창이다.

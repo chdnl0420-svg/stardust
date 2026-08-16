@@ -142,6 +142,11 @@ std::string ControlBridge::statusBody(const App& app) const {
     const UpdateInfo up = app.updater.status();
 
     char buf[2100];
+    // 방향별 분산은 격자 셋을 각각 합치는 일이라 포맷 인자 안에서 부르면 순서가 꼬인다.
+    // 미리 받아 둔다.
+    double dxx = 0.0, dyy = 0.0, dzz = 0.0;
+    app.sim.measureDispersionAxes(dxx, dyy, dzz);
+
     snprintf(buf, sizeof(buf),
         // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
         // 늘 1 을 돌려주면 자동 검증이 멈춘 시뮬레이션을 성공으로 읽는다(round-08 리뷰 A13).
@@ -176,7 +181,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 워치독이 이번 설정에서 몇 ms 를 위험선으로 잡았는지. 이 값이 2000(드라이버 타임아웃)
         // 근처로 올라가면 방어가 사실상 없는 상태라, 밖에서 확인할 수 있어야 한다.
         // 재 사슬이 도는지 밖에서 볼 창. meanStarMass 가 시간에 따라 내려가면 도는 것이다.
-        "vramFreeMB=%.0f\ndangerStepMs=%.1f\nmeanStarMass=%.3f\ntotalAsh=%.1f\n",
+        // 방향별 분산. zz 가 xx·yy 보다 작으면 원반이 스스로 납작해지는 중이다.
+        "vramFreeMB=%.0f\ndangerStepMs=%.1f\nmeanStarMass=%.3f\ntotalAsh=%.1f\n"
+        "dispXX=%.8f\ndispYY=%.8f\ndispZZ=%.8f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -206,7 +213,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         centroidX, centroidY, meanTemp,
         bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
         Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
-        app.sim.meanStarMass(), app.sim.totalAsh());
+        app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz);
     return buf;
 }
 
@@ -326,6 +333,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starExplodeSim")) app.cfg.starExplodeSim = clampF(getFloat(kv, "starExplodeSim", app.cfg.starExplodeSim), 0.0001f, 10.0f, app.cfg.starExplodeSim);
         if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, 0.5f, app.cfg.starKickSpeed);
         if (has(kv, "starBHRatio"))    app.cfg.starBHRatio    = clampF(getFloat(kv, "starBHRatio", app.cfg.starBHRatio), 1.0f, 1.0e5f, app.cfg.starBHRatio);
+        if (has(kv, "starCollapseToBH")) app.cfg.starCollapseToBH = getInt(kv, "starCollapseToBH", 0) != 0;
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);
         if (has(kv, "ashCoolK"))       app.cfg.ashCoolK       = clampF(getFloat(kv, "ashCoolK", app.cfg.ashCoolK), 0.0f, 10.0f, app.cfg.ashCoolK);
         if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
