@@ -152,7 +152,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         "gravity=%.4f\nsofteningCells=%.3f\ntimeScale=%.3f\nsortInterval=%d\n"
         "pressure=%d\npressureK=%.4f\ngamma=%.3f\n"
         "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
-        "running=%d\nsimTime=%.5f\nactiveCount=%d\nstarCount=%d\n"
+        // simYears 는 simTime 을 천문 시간으로 옮긴 값이다(kYearsPerSimUnit).
+        // 별의 나이·수명을 밖에서 확인하려면 무차원 시뮬 시간만으로는 안 된다.
+        "running=%d\nsimTime=%.5f\nsimYears=%.6g\nactiveCount=%d\nstarCount=%d\n"
         // 표시 설정은 set 으로 바꿀 수 있는데 상태에는 없어서 되읽을 방법이 없었다
         // (round-06 QA-2 — 컬러맵·밝기·대비·HUD·줌팬 4항목이 자동 검증 불가로 남았다).
         "renderMode=%s\ncolorBy=%s\ncolormap=%s\n"
@@ -171,7 +173,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 블랙홀 — 삼키고 자라는지 밖에서 확인할 유일한 창이다. 화면의 점 하나로는
         // 지평선이 커졌는지 알 수 없다.
         "bhActive=%d\nbhX=%.5f\nbhY=%.5f\nbhRs=%.6f\nbhMass=%.1f\nbhBorn=%d\nbhCount=%d\n"
-        "vramFreeMB=%.0f\n",
+        // 워치독이 이번 설정에서 몇 ms 를 위험선으로 잡았는지. 이 값이 2000(드라이버 타임아웃)
+        // 근처로 올라가면 방어가 사실상 없는 상태라, 밖에서 확인할 수 있어야 한다.
+        "vramFreeMB=%.0f\ndangerStepMs=%.1f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -182,7 +186,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.gamma,
         app.cfg.temperatureEnabled ? 1 : 0, app.cfg.coolingEnabled ? 1 : 0,
         app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
-        app.running ? 1 : 0, app.sim.simTime(), app.sim.activeCount(), app.sim.starCount(),
+        app.running ? 1 : 0, app.sim.simTime(), app.sim.simTime() * kYearsPerSimUnit,
+        app.sim.activeCount(), app.sim.starCount(),
         app.view.mode == RenderMode::Points ? "points" : "field",
         app.view.colorBy == ColorBy::Dispersion ? "dispersion"
             : app.view.colorBy == ColorBy::Speed ? "speed" : "density",
@@ -199,7 +204,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
         bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
-        Sim::deviceFreeBytes() / 1048576.0);
+        Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs);
     return buf;
 }
 

@@ -125,6 +125,18 @@ struct App {
     // 그 값으로 상한을 흔들면 요청이 그대로인데도 버퍼를 계속 다시 잡는다(1차 재부팅의 원인).
     int   hardMaxParticles = 30000000;
 
+    // 스텝 하나가 이 시간을 넘으면 그 자리에서 멈춘다(아래 guardPerformance).
+    //
+    // **정상 스텝의 64배로 잡되 250 ms 를 절대 넘지 않는다.** 두 조건이 다 필요하다.
+    //  · 배수만 두면 — 프레임 예산을 30 프레임으로 늘린 뒤 정상 스텝이 26 ms 라
+    //    26 × 64 = 2131 ms 가 되는데, 드라이버 타임아웃이 **2000 ms** 다.
+    //    워치독이 손을 대기 전에 드라이버가 먼저 죽는다
+    //  · 고정값만 두면 — 알갱이를 확 줄여 정상 스텝이 1 ms 가 되어도 문턱은 250 ms 라
+    //    250배가 튀어야 반응한다. 그 사이에 무슨 일이 일어나는지 못 본다
+    //
+    // 알갱이 수·격자가 바뀌면 정상 스텝도 바뀌므로 applyConfig 에서 다시 잡는다.
+    float dangerStepMs = 250.0f;
+
     // 자동 업데이트. 앱을 켤 때 한 번 배포 저장소를 확인하고, 새 버전이 있으면 알린다.
     // 받는 것은 사용자가 눌렀을 때만 한다 — 받아 온 것을 바로 실행하는 일이라
     // 모르는 사이에 프로그램이 바뀌어 있으면 안 된다.
@@ -256,6 +268,10 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset);
 
 // 알갱이 수에 맞는 격자 해상도와 소프트닝을 정한다. 최대 개수를 바꿀 때마다 부른다.
 void ApplyAutoGrid(SimConfig& cfg);
+
+// 워치독 문턱(app.dangerStepMs)을 지금 설정의 정상 스텝에 맞춰 다시 잡는다.
+// applyConfig 가 부르므로 보통은 직접 부를 일이 없다.
+void UpdateDangerStepMs(App& app);
 
 // 이 개수·격자에서 알갱이끼리 부딪히게 할 수 있는가(판에 움직일 공간이 남는가).
 bool ContactFitsCount(int particleCount, int gridSize);

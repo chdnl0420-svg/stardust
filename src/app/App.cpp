@@ -22,22 +22,23 @@ void App::init() {
     // 넣었는데, 3D 로 오면서 그 값이 상한 밖이 되어 계산이 폭발했고 상한이 최소값(10만)까지
     // 떨어졌다(2026-08-14 실측: 200만을 요청했는데 화면에 10만만 떴다).
     //
-    // 계산량 쪽은 정확히 예측할 수 없어 카드의 멀티프로세서 수로 어림한다. 실측에서
-    // 3000만 개가 60 FPS 로 돌기는 했지만 그때 드라이버가 깨졌다 — 「프레임이 나온다」와
-    // 「카드가 버틴다」는 다른 말이었다. 그래서 어림값을 보수적으로 잡고, 모자라면
-    // 아래 guardPerformance 가 도는 중에 더 낮춘다.
+    // 계산량 쪽은 **아래 프레임 예산이 혼자 본다.** 전에는 여기서 멀티프로세서 수로도
+    // 한 번 어림했는데(`SM 개수 × 10만`), 그 숫자에는 근거가 없었다 — 카드의 SM 수는
+    // 한 스텝의 시간을 정하는 여러 값 중 하나일 뿐이고, 이 앱에서 실제로 시간을 쥐고 있는
+    // 것은 격자다. 게다가 예산 계산이 이미 `estimateStepMs` 로 속도를 재고 있어
+    // 같은 것을 두 번 자르는 꼴이었다. 근거 없는 쪽을 지운다.
     const size_t freeB = Sim::deviceFreeBytes();
     const int gridForBudget = Sim::maxGridSize(cfg.boundary);
     int byMemory = Sim::maxParticlesFor(gridForBudget, cfg.boundary, freeB);
-    // 3D 는 알갱이 하나가 격자 8칸을 오가므로 2D 보다 한 개당 일이 두 배다.
-    int bySpeed  = 10000000;
-    {
-        const int sm = Sim::deviceMultiProcessors();
-        // 멀티프로세서 하나당 10만 개를 상한으로 본다.
-        if (sm > 0) bySpeed = sm * 100000;
-    }
-    int cap = (byMemory < bySpeed) ? byMemory : bySpeed;
-    if (cap > 10000000) cap = 10000000;
+    int cap = byMemory;
+    // 최후의 그물. 메모리와 예산이 이미 자르고 있으므로 평소에는 안 걸리고, 두 계산이
+    // 동시에 이상한 값을 내놓았을 때만 듣는다.
+    //
+    // **1000만에서 3000만으로 올렸다(2026-08-16).** 격자를 128 로 고정하고 예산을 30 프레임으로
+    // 늘리자 1000만이 예산 안에 들어왔는데(실측: 스텝 16.7 ms, 프레임 23.4 ms, VRAM 여유 5.6 GB),
+    // 이 줄이 그 위를 잘라 **메모리도 예산도 아닌 셋째 제한**이 되어 있었다.
+    // 상한을 정하는 것은 메모리와 프레임 예산 둘뿐이어야 한다.
+    if (cap > 30000000) cap = 30000000;
     if (cap < 200000)   cap = 200000;
 
     // ── 그 개수가 **부르는 격자**까지 계산에 넣는다 ────────────────────────
@@ -57,11 +58,18 @@ void App::init() {
     // 드라이버가 강제로 리셋되고 그 과정에서 시스템이 죽는다
     // (2026-08-14 실측: 480만 · 256³ · 블랙홀 질량 100만 — 하루에 여섯 번 재부팅).
     //
-    // 그래서 **한 프레임 예산 안에 드는 조합만 허락한다.** 예산을 60 프레임에 맞추면
-    // 정상 스텝이 4 ms 언저리가 되어, 몰림으로 백 배가 튀어도 타임아웃 전에 아래
-    // guardPerformance 가 손을 댈 수 있다.
+    // 그래서 **한 프레임 예산 안에 드는 조합만 허락한다.**
+    //
+    // **예산을 30 프레임으로 늘렸다(2026-08-16).** 60 프레임일 때는 정상 스텝이 4 ms 언저리라
+    // 드라이버 타임아웃(2초)까지 512배의 여유가 있었는데, 그 여유를 알갱이 수로 바꾼다 —
+    // 별의 한살이를 보려면 알갱이가 더 필요하고, 은하가 도는 것은 30 프레임으로도 충분히 보인다.
+    //
+    // **대신 잃는 것이 있다.** 정상 스텝이 26 ms 언저리로 오르면 타임아웃까지의 여유가
+    // 512배에서 77배로 줄어든다. 그래서 아래 워치독의 문턱을 「정상 스텝의 배수」로 바꾸되
+    // **250 ms 절대 상한을 함께 건다** — 배수만 두면 26 ms × 64 = 2131 ms 가 되어
+    // 워치독이 손을 대기도 전에 드라이버가 먼저 죽는다(타임아웃이 2000 ms 다).
     {
-        constexpr double kStepBudgetMs = 16.7;   // 60 프레임
+        constexpr double kStepBudgetMs = 33.3;   // 30 프레임
         // 규칙을 여기에 옮겨 적지 않는다 — 실제로 그 개수를 넣어 보고 격자를 받아 온다.
         auto gridFor = [&](int count) {
             SimConfig probe = cfg;
@@ -96,9 +104,9 @@ void App::init() {
     fx::mark("카드 %s · %s · SM %d · 대역폭 %.0f GB/s · 여유 VRAM %.0f MB",
              Sim::deviceName().c_str(), Sim::deviceDriver().c_str(),
              Sim::deviceMultiProcessors(), Sim::deviceBandwidthGBs(), freeB / 1048576.0);
-    fx::mark("상한 %d = min(메모리 %d, 속도 %d) 를 한 프레임 예산으로 다시 조인 값. "
+    fx::mark("상한 %d = 메모리 한계 %d 를 한 프레임 예산(33.3 ms)으로 다시 조인 값. "
              "격자 %d, 스텝 어림 %.1f ms, VRAM 어림 %.0f MB",
-             hardMaxParticles, byMemory, bySpeed, cfg.gridSize,
+             hardMaxParticles, byMemory, cfg.gridSize,
              Sim::estimateStepMs(cfg.particleCount, cfg.gridSize, cfg.boundary),
              Sim::estimateBytes(cfg.particleCount, cfg.gridSize, cfg.boundary) / 1048576.0);
     fx::mark("판 열기: 알갱이 %d, 격자 %d, 경계 %s, 장면 %d, 배속 %.2f",
@@ -107,6 +115,14 @@ void App::init() {
              (int)cfg.preset, cfg.timeScale);
 
     sim.init(cfg);
+
+    // 워치독 문턱을 이 설정의 정상 스텝에 맞춰 처음 잡는다. `init` 은 `applyConfig` 를
+    // 거치지 않으므로 여기서 직접 부르지 않으면 첫 판이 기본값(250 ms) 그대로 돈다.
+    UpdateDangerStepMs(*this);
+    fx::mark("워치독 문턱 %.0f ms = min(정상 스텝 %.1f ms × 64, 250 ms). "
+             "드라이버 타임아웃 2000 ms 안쪽이어야 한다",
+             dangerStepMs,
+             Sim::estimateStepMs(cfg.particleCount, cfg.gridSize, cfg.boundary));
 
     // 설정 화면 왼쪽 아래에 적을 「이 그림을 그리는 카드」. 한 번 물어 담아 둔다.
     deviceName    = Sim::deviceName();
@@ -129,25 +145,28 @@ void App::guardPerformance() {
     // 시스템이 통째로 재부팅된다. 즉 아래 감시는 원리적으로 이 사고를 막을 수 없다.
     //
     // 그래서 **스텝 하나**를 보고, 위험선을 넘으면 그 자리에서 멈춘다. 이 값은 GPU 가 실제로
-    // 쓴 시간이다(cudaEvent 로 잰 것). 250 ms 는 타임아웃까지 여덟 배가 남는 자리라,
-    // 다음 스텝이 그보다 몇 배 더 나빠져도 아직 시간이 있다.
+    // 쓴 시간이다(cudaEvent 로 잰 것).
+    //
+    // **문턱은 고정값이 아니라 `dangerStepMs` 다**(applyConfig 가 정한다). 정상 스텝의 64배로
+    // 잡되 **250 ms 를 절대 넘지 않는다.** 프레임 예산을 30 프레임으로 늘린 뒤 정상 스텝이
+    // 26 ms 가 되었는데, 배수만 두면 2131 ms 라 타임아웃(2000 ms) 밖으로 나간다 —
+    // 그러면 이 방어가 있으나 마나다.
     //
     // 멈추는 것을 고른 이유: 알갱이를 줄이는 것은 수 GB 버퍼를 다시 잡는 일이라 그 자체가
     // 위험하고(2026-08-13 첫 재부팅의 원인), 지금은 그럴 여유가 있는 상태가 아니다.
     // 멈추면 GPU 에 아무것도 밀어 넣지 않으므로 즉시 듣는다.
     {
-        constexpr float DANGER_STEP_MS = 250.0f;
         const SimTimings t = sim.timings();
-        if (running && t.totalMs > DANGER_STEP_MS) {
+        if (running && t.totalMs > dangerStepMs) {
             running = false;
             guardHaltedMs = t.totalMs;
             const BlackHoleState bh = sim.blackHole();
             // 디스크까지 미는 기록이다. 다음 스텝에서 시스템이 죽어도 이 줄은 남는다 —
             // 그것이 이 줄의 존재 이유다.
-            fx::mark("!! 위험: 스텝 %.0f ms (타임아웃 2000 ms) — 멈춤. "
+            fx::mark("!! 위험: 스텝 %.0f ms > 문턱 %.0f ms (타임아웃 2000 ms) — 멈춤. "
                      "알갱이 %d/%d, 격자 %d, dt %.6g, 최고속도 %.3g, "
                      "블랙홀 %s 질량 %.0f 지평선 %.5f",
-                     t.totalMs, sim.activeCount(), cfg.particleCount, cfg.gridSize,
+                     t.totalMs, dangerStepMs, sim.activeCount(), cfg.particleCount, cfg.gridSize,
                      t.dtUsed, t.maxSpeed,
                      bh.active ? "있음" : "없음", bh.mass, bh.rs);
             return;
@@ -214,6 +233,31 @@ void App::guardPerformance() {
 void App::applyConfig() {
     // 재할당이 필요한지는 코어가 판단한다. 여기서 미리 비교하면 판정이 두 곳으로 갈린다.
     sim.reconfigure(cfg);
+    UpdateDangerStepMs(*this);
+}
+
+void UpdateDangerStepMs(App& app) {
+    // 워치독 문턱을 지금 설정의 정상 스텝에 맞춘다.
+    //
+    // `estimateStepMs` 는 산술 몇 줄이라 싸지만, 매 프레임 부를 이유가 없어 설정이 바뀔 때만
+    // 다시 잡는다. 알갱이 수나 격자가 바뀌면 정상 스텝이 통째로 달라지므로 그 자리가 맞다.
+    const double normalMs = Sim::estimateStepMs(app.cfg.particleCount, app.cfg.gridSize,
+                                                app.cfg.boundary);
+
+    // **250 ms 는 절대 상한이고 넘지 않는다.** 드라이버 타임아웃이 2000 ms 라, 문턱이 그보다
+    // 크면 워치독이 손을 대기 전에 드라이버가 먼저 리셋되고 그 과정에서 시스템이 죽는다
+    // (이 프로젝트에서 여섯 번 일어난 일이다). 30 프레임 예산의 정상 스텝 26 ms 에
+    // 64배를 곱하면 2131 ms 라 그 선을 넘는다 — 그래서 min 이 필요하다.
+    constexpr float kAbsoluteCeilMs = 250.0f;
+    // 아래로도 바닥을 둔다. 알갱이를 최소로 줄이면 정상 스텝이 1 ms 아래로 내려가는데,
+    // 그 64배(64 ms)를 문턱으로 삼으면 로딩 직후의 첫 몇 프레임처럼 원래 무거운 순간에
+    // 워치독이 오발동한다.
+    constexpr float kFloorMs = 60.0f;
+
+    float threshold = (float)(normalMs * 64.0);
+    if (threshold > kAbsoluteCeilMs) threshold = kAbsoluteCeilMs;
+    if (threshold < kFloorMs)        threshold = kFloorMs;
+    app.dangerStepMs = threshold;
 }
 
 void App::tick() {
@@ -368,11 +412,19 @@ void ApplyAutoGrid(SimConfig& cfg) {
     // 격자는 알갱이 수에 맞춰 고른다.
     //
     // **3D 라 한 변을 하나 올릴 때마다 칸이 여덟 배가 된다.** 2D 시절에는 1024 와 2048 을
-    // 오갔지만 여기서는 64~256 이 실제 범위다. 칸당 알갱이가 대여섯이 되도록 잡는다 —
-    // 128³ 은 200만 칸이라 200만 알갱이면 칸당 하나 남짓이다.
+    // 오갔지만 여기서는 64~256 이 실제 범위다.
     // 아래로는 128 밑으로 내려가지 않는다. 64³ 이면 한 칸이 0.0156 이라 원반 두께(0.012)가
     // 한 칸보다 얇아 z 방향이 아예 표현되지 않는다 — 3D 로 옮긴 의미가 사라진다.
-    int g = (cfg.particleCount >= 4000000) ? 256 : 128;
+    //
+    // **위로도 128 에서 멈춘다(2026-08-16).** 전에는 알갱이가 400만을 넘으면 256 으로 올렸는데,
+    // 고립 경계에서 256 은 패딩까지 **512³ = 1억 3400만 칸**이라 알갱이를 하나도 안 넣어도
+    // 한 스텝이 25 ms 다. 30 프레임 예산(33.3 ms)을 격자 혼자 거의 다 먹는다.
+    //
+    // 그 문턱이 있는 한 알갱이 상한은 400만에서 벽에 부딪힌다 — 400만을 넘기려는 순간
+    // 격자가 뛰어 예산을 넘고, 예산 계산이 다시 400만 아래로 내려보내기 때문이다.
+    // 별의 한살이는 **알갱이가 많아야** 보이는 것이지 격자가 세밀해야 보이는 것이 아니다.
+    // 한 칸(판의 0.78%)보다 작은 구조를 못 보는 것은 그대로 감수한다.
+    int g = 128;
 
     // 알갱이끼리 부딪히게 할 장면이면 격자를 한 단계 올려 본다.
     // 알갱이 반지름이 칸의 절반이라, 칸이 크면 알갱이도 커져 금세 판을 가득 채운다.
