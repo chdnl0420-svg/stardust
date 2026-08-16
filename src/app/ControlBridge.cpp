@@ -158,6 +158,7 @@ std::string ControlBridge::statusBody(const App& app) const {
     // 보존량도 같은 이유로 미리 받는다 — 커널을 여럿 돌리므로 포맷 인자 안에서 부르면
     // 평가 순서가 정해져 있지 않아 값이 섞인다.
     const Sim::Conservation cons = app.sim.measureConservation();
+    const Sim::Emergence    emg  = app.sim.measureEmergence();
 
     snprintf(buf, sizeof(buf),
         // GPU 가 실패해 스텝이 전부 무동작이면 ok=0 으로 알린다.
@@ -199,7 +200,10 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 보존량. **gas + star + nova + remnant + 삼킨 수 = 총 알갱이 수** 여야 한다.
         // badValues 는 NaN·무한대 개수로 하나라도 0 이 아니면 실패다.
         "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\nbadValues=%d\n"
-        "maxCellCount=%d\ntotalMomentum=%.4f\n",
+        "maxCellCount=%d\ntotalMomentum=%.4f\n"
+        // 창발 — 코드에 「그렇게 되라」고 안 적은 것들이 나왔는지.
+        // spiralM2 가 0.1 을 넘으면 눈에 보이는 두 팔이고, ash 안쪽이 진하면 금속 기울기다.
+        "spiralM2=%.4f\nashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -233,7 +237,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
         app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz,
         cons.gas, cons.stars, cons.exploding, cons.remnants, cons.bad,
-        cons.maxCellCount, cons.momentum);
+        cons.maxCellCount, cons.momentum,
+        emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter);
     return buf;
 }
 

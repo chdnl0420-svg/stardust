@@ -1258,6 +1258,63 @@ __global__ void kCountStates(const float4* pos, const float4* vel, int n,
     else                       atomicAdd(&out[0], 1);   // 가스
 }
 
+// 재를 **반지름 구간별로** 모은다. 「금속 기울기」가 생기는지 보는 창이다.
+//
+// 실제 은하는 중심이 금속(무거운 원소)이 진하고 바깥이 옅다 — 중심에서 별이 더 많이
+// 태어나고 더 많이 죽었기 때문이다. **그것을 코드에 적지 않았으므로, 나오면 창발이다.**
+//
+// **비용**: 격자 칸 수 × O(1). 부를 때만 돈다.
+__global__ void kAshRadial(const float* ash, int G, float* outSum, float* outCnt, int bins) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int z = blockIdx.z * blockDim.z + threadIdx.z;
+    if (x >= G || y >= G || z >= G) return;
+
+    // 판 중앙(0.5, 0.5, 0.5)에서의 거리. 원반은 xy 평면이므로 **반지름은 xy 로만 잰다** —
+    // z 를 넣으면 원반 위아래로 벗어난 것이 「바깥」으로 잘못 분류된다.
+    const float fx = ((float)x + 0.5f) / (float)G - 0.5f;
+    const float fy = ((float)y + 0.5f) / (float)G - 0.5f;
+    const float r  = sqrtf(fx * fx + fy * fy);      // 0 ~ 0.707
+
+    int b = (int)(r / 0.5f * (float)bins);          // 0.5 를 판 반지름으로 본다
+    if (b >= bins) b = bins - 1;
+
+    const float a = ash[(z * G + y) * G + x];
+    if (a > 0.f) { atomicAdd(&outSum[b], a); atomicAdd(&outCnt[b], 1.0f); }
+}
+
+// 나선팔이 생겼는지 **수치로** 잰다 — 밀도의 m=2 푸리에 진폭.
+//
+// 두 팔 구조는 밀도가 각도에 대해 `1 + A·cos(2θ + φ)` 로 변조된다는 뜻이다.
+// 그 A 를 재려면 `Σ ρ·e^{2iθ}` 를 밀도 합으로 나누면 된다:
+//
+//   A2 = |Σ ρ(cos2θ + i·sin2θ)| / Σ ρ
+//
+// **0 에 가까우면 팔이 없고, 0.1 을 넘으면 눈에 보이는 팔이다**(실제 은하는 0.1~0.3).
+// 이것이 있어야 「팔이 생겼다/흐릿하다/안 생겼다」를 스크린샷 인상이 아니라 숫자로 적을 수 있다.
+//
+// **중심 근처는 뺀다.** r 이 작으면 각도가 불안정하고(중심 한 칸은 모든 각도를 갖는다)
+// 팽대부가 팔과 무관하게 밝아 A2 를 흐린다.
+__global__ void kSpiralM2(const float* rho, int G, int S, double* out /* [3]: re, im, sum */) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int z = blockIdx.z * blockDim.z + threadIdx.z;
+    if (x >= G || y >= G || z >= G) return;
+
+    const float fx = ((float)x + 0.5f) / (float)G - 0.5f;
+    const float fy = ((float)y + 0.5f) / (float)G - 0.5f;
+    const float r2 = fx * fx + fy * fy;
+    if (r2 < 0.01f || r2 > 0.25f) return;          // 반지름 0.1~0.5 만 본다
+
+    const float d = rho[(size_t)(z * S + y) * S + x];
+    if (d <= 0.f) return;
+
+    const float th2 = 2.0f * atan2f(fy, fx);
+    atomicAdd(&out[0], (double)(d * __cosf(th2)));
+    atomicAdd(&out[1], (double)(d * __sinf(th2)));
+    atomicAdd(&out[2], (double)d);
+}
+
 // 한 칸에 알갱이가 얼마나 몰렸는지 — **원자 연산 경합의 선행 지표다.**
 // 이 값이 치솟는 순간이 곧 커널 하나가 수십 배 느려지는 순간이고, 그것이 드라이버
 // 타임아웃으로 이어진 것이 2026-08-14 재부팅의 경로였다.
@@ -2969,6 +3026,44 @@ Sim::Conservation Sim::measureConservation() const {
         CK(cudaMemcpy(&c.maxCellCount, d.redI + 5, sizeof(int), cudaMemcpyDeviceToHost));
     }
     return c;
+}
+
+// 창발이 실제로 일어났는지 재는 값들. **이 판의 목적을 판정하는 자리다.**
+//
+// 셋 다 「그렇게 되라」고 코드에 적지 않은 것들이다 — 나오면 규칙들이 스스로 만든 것이고,
+// 안 나오면 그것도 결과다(원칙 2: 안 나오면 빠진 현실을 찾는다).
+Sim::Emergence Sim::measureEmergence() const {
+    Impl& d = *impl_;
+    Emergence e{};
+    if (g_failed || d.allocG <= 0) return e;
+    const int G = d.allocG;
+
+    // ── 나선팔: 밀도의 m=2 푸리에 진폭 ──────────────────────────────────
+    if (d.rho) {
+        CK(cudaMemset(d.redD, 0, sizeof(double) * 3));
+        kSpiralM2<<<grd3(G), blk3()>>>(d.rho, G, d.stride(), d.redD);
+        double h[3] = {0.0, 0.0, 0.0};
+        CK(cudaMemcpy(h, d.redD, sizeof(double) * 3, cudaMemcpyDeviceToHost));
+        if (h[2] > 1e-9) e.spiralM2 = sqrt(h[0] * h[0] + h[1] * h[1]) / h[2];
+    }
+
+    // ── 금속 기울기: 재를 안·중간·바깥 세 구간으로 ─────────────────────
+    //
+    // 화면 격자(projA/projB)를 빌려 쓴다 — 색을 칠할 때만 쓰이고 지금은 비어 있어
+    // 새로 잡지 않아도 된다(`measureRotationCurve` 가 쓰는 것과 같은 수법).
+    if (d.ashGrid && d.projA && d.projB) {
+        const int kBins = 3;
+        CK(cudaMemset(d.projA, 0, sizeof(float) * kBins));
+        CK(cudaMemset(d.projB, 0, sizeof(float) * kBins));
+        kAshRadial<<<grd3(G), blk3()>>>(d.ashGrid, G, d.projA, d.projB, kBins);
+        float s[3] = {0.f, 0.f, 0.f}, c[3] = {0.f, 0.f, 0.f};
+        CK(cudaMemcpy(s, d.projA, sizeof(float) * kBins, cudaMemcpyDeviceToHost));
+        CK(cudaMemcpy(c, d.projB, sizeof(float) * kBins, cudaMemcpyDeviceToHost));
+        e.ashInner = (c[0] > 0.f) ? s[0] / c[0] : 0.f;
+        e.ashMid   = (c[1] > 0.f) ? s[1] / c[1] : 0.f;
+        e.ashOuter = (c[2] > 0.f) ? s[2] / c[2] : 0.f;
+    }
+    return e;
 }
 
 // 방향별 분산을 따로 돌려준다. **원반이 스스로 납작해지는지를 보는 창이다** —

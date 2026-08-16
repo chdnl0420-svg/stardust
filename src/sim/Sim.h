@@ -443,6 +443,19 @@ public:
     };
     Conservation     measureConservation() const;
 
+    // 창발 — **이 판의 목적을 판정하는 값들.**
+    // 셋 다 「그렇게 되라」고 코드에 적지 않았다. 나오면 규칙들이 스스로 만든 것이다.
+    struct Emergence {
+        // 밀도의 m=2 푸리에 진폭. 두 팔 구조의 세기다.
+        // 0 에 가까우면 팔이 없고, **0.1 을 넘으면 눈에 보이는 팔**이다(실제 은하 0.1~0.3).
+        double spiralM2 = 0.0;
+        // 재의 반지름별 평균(안·중간·바깥). 안쪽이 진하면 「금속 기울기」가 생긴 것이다.
+        float  ashInner = 0.0f;
+        float  ashMid   = 0.0f;
+        float  ashOuter = 0.0f;
+    };
+    Emergence        measureEmergence() const;
+
     // CUDA 가 한 번이라도 실패했는가. 실패하면 그 뒤로 스텝이 멈춰 화면이 그대로 굳는다 —
     // 왜 굳었는지 사용자가 알 수 있어야 하므로 밖에서 읽을 수 있게 연다.
     static bool        failed();
