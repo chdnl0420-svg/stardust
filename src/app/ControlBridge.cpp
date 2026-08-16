@@ -175,7 +175,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         "bhActive=%d\nbhX=%.5f\nbhY=%.5f\nbhRs=%.6f\nbhMass=%.1f\nbhBorn=%d\nbhCount=%d\n"
         // 워치독이 이번 설정에서 몇 ms 를 위험선으로 잡았는지. 이 값이 2000(드라이버 타임아웃)
         // 근처로 올라가면 방어가 사실상 없는 상태라, 밖에서 확인할 수 있어야 한다.
-        "vramFreeMB=%.0f\ndangerStepMs=%.1f\n",
+        // 재 사슬이 도는지 밖에서 볼 창. meanStarMass 가 시간에 따라 내려가면 도는 것이다.
+        "vramFreeMB=%.0f\ndangerStepMs=%.1f\nmeanStarMass=%.3f\ntotalAsh=%.1f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -204,7 +205,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
         bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
-        Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs);
+        Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
+        app.sim.meanStarMass(), app.sim.totalAsh());
     return buf;
 }
 

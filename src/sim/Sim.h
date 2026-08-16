@@ -168,6 +168,12 @@ struct SimConfig {
     float starExplodeSim       = 0.288f;
     // 폭발이 바깥층에 주는 속도. 광속(1.0)의 5% 로 잡는다.
     float starKickSpeed        = 0.05f;
+    // 폭발이 뿌리는 재의 양(별 질량에 곱한다). 이 값이 0 이면 사슬의 마지막 고리가 끊겨
+    // 세대가 흘러도 별 크기가 안 변한다.
+    float starAshYield         = 1.0f;
+    // 재가 냉각을 얼마나 세게 하나. `rate × (1 + k·ln(1+ash))` — 로그로 누르는 이유는
+    // 재가 쌓이기만 하는 값이라 선형이면 오래 돌린 판의 냉각률이 무한정 커지기 때문이다.
+    float ashCoolK             = 0.5f;
     // 아래 둘은 Jeans 이전의 방식(밀도 문턱 + 온도 문턱)이 쓰던 값이다. 코어는 더 이상
     // 읽지 않지만 저장 파일 호환을 위해 자리만 남긴다.
     float starDensityThreshold = 70.0f;
@@ -370,6 +376,10 @@ public:
     const SimConfig& config() const;
     SimTimings       timings() const;
     double           simTime() const;
+    // 별 하나의 평균 질량. 시간에 따라 내려가면 재 사슬이 도는 것이다.
+    double           meanStarMass() const;
+    // 판에 쌓인 재의 총량.
+    double           totalAsh() const;
 
     // CUDA 가 한 번이라도 실패했는가. 실패하면 그 뒤로 스텝이 멈춰 화면이 그대로 굳는다 —
     // 왜 굳었는지 사용자가 알 수 있어야 하므로 밖에서 읽을 수 있게 연다.

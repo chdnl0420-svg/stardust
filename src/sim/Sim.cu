@@ -915,7 +915,8 @@ __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int
 __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
                       int periodic, const int* cellStart, const int* cellEnd,
                       float rate, float dt, float4* velOut,
-                      float* dispX, float* dispY, float* dispZ, float* dispCnt) {
+                      float* dispX, float* dispY, float* dispZ, float* dispCnt,
+                      const float* ashGrid, float ashCoolK) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -984,6 +985,17 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
     // 절반에서 끊는다 — 한 스텝에 이웃 속도로 통째로 갈아타면 알갱이들이 한 덩어리로
     // 굳어 버려 흐름이 사라진다.
     float k = rate * dt * 60.0f;
+
+    // **재가 쌓인 자리는 더 잘 식는다.** 무거운 원소가 있으면 가스가 복사로 에너지를
+    // 훨씬 잘 버리기 때문이고, 그래서 초기 우주(재가 없던 시절)의 별은 거대했다.
+    // 여기서 사슬이 처음으로 되돌아온다 — 터짐 → 재 → 잘 식음 → σ↓ → Jeans 문턱↓ → 작은 별.
+    if (ashGrid && ashCoolK > 0.f) {
+        const float a = ashGrid[gidx3(cx, cy, cz, G, G, periodic)];
+        // 로그로 눌러 담는다. 재는 계속 쌓이기만 하는 값이라 선형으로 곱하면 오래 돌린 판에서
+        // 냉각률이 무한정 커져, 그 자리가 절대영도처럼 굳어 버린다.
+        k *= (1.0f + ashCoolK * __logf(1.0f + a));
+    }
+
     if (k > 0.5f) k = 0.5f;
 
     // v + k·(v̄ - v) 인데, m 이 이미 (v̄ - v) 라 그대로 더하면 된다.
@@ -1124,7 +1136,8 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
 // 붉은 별만 남아 은하 색이 통째로 늙는다.
 __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
                          float sunMass, float sunLifeSim, float explodeSim,
-                         float kickSpeed, unsigned seed) {
+                         float kickSpeed, unsigned seed,
+                         float* ashGrid, int G, int periodic, float ashYield) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -1159,6 +1172,18 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
             // 중성자별·블랙홀 후보는 **터진다.** 바깥층이 날아가고 그 자리가 가스로 돌아온다.
             // 블랙홀 전환은 자리가 여덟뿐이라 별도 판정이 필요하고, 이번 증분에서는
             // 폭발까지만 한다(스펙의 「최후가 셋으로 갈린다」는 아직 미충족).
+
+            // **재를 뿌린다 — 사슬의 마지막 고리다.**
+            // 무거운 별일수록 많이 뿌린다(질량에 비례). 이 재가 쌓인 칸은 잘 식고,
+            // 식으면 σ² 가 내려가고, Jeans 문턱 `ρ > k_J·σ²` 가 저절로 낮아져
+            // **다음 세대는 더 작은 별이 된다.** 그 규칙을 따로 적지 않는다.
+            if (ashGrid) {
+                const int ax_ = min(max((int)(p.x * G), 0), G - 1);
+                const int ay_ = min(max((int)(p.y * G), 0), G - 1);
+                const int az_ = min(max((int)(p.z * G), 0), G - 1);
+                atomicAdd(&ashGrid[gidx3(ax_, ay_, az_, G, G, periodic)], p.w * ashYield);
+            }
+
             p.w = -explodeSim;                // 폭발 시작 — 이 시간 동안 보인다
             v.w = 0.f;
 
@@ -1185,14 +1210,20 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
 // 별이 몇 개인지 센다. `starCount()` 가 불릴 때만 돈다 — 매 스텝 세면 그 자체가 비용이다.
 //
 // 블록 안에서 모으고 블록마다 한 번만 전역에 더한다(kCountAlive 와 같은 수법).
-__global__ void kCountStars(const float4* pos, int n, int* out) {
-    __shared__ int s;
-    if (threadIdx.x == 0) s = 0;
+// 개수와 **질량 합**을 함께 센다. 평균 별 질량이 있어야 「1세대가 나중 세대보다 무거운가」를
+// 볼 수 있고, 그것이 재 사슬이 실제로 도는지를 보여 주는 유일한 수치다.
+__global__ void kCountStars(const float4* pos, int n, int* outCount, double* outMass) {
+    __shared__ int   sn;
+    __shared__ double sm;
+    if (threadIdx.x == 0) { sn = 0; sm = 0.0; }
     __syncthreads();
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n && pos[i].x >= 0.f && pos[i].w > 0.f) atomicAdd(&s, 1);
+    if (i < n && pos[i].x >= 0.f && pos[i].w > 0.f) {
+        atomicAdd(&sn, 1);
+        atomicAdd(&sm, (double)pos[i].w);
+    }
     __syncthreads();
-    if (threadIdx.x == 0) atomicAdd(out, s);
+    if (threadIdx.x == 0) { atomicAdd(outCount, sn); atomicAdd(outMass, sm); }
 }
 
 // 살아 있는 알갱이를 센다.
@@ -1633,6 +1664,19 @@ struct Sim::Impl {
     // 이미 ρσ² 이고, 그래서 kPressure 가 나누지 않고 바로 미분한다.
     float  *dispX = nullptr, *dispY = nullptr, *dispZ = nullptr, *dispCnt = nullptr;
 
+    // ── 재(무거운 원소) ────────────────────────────────────────────────────
+    //
+    // **알갱이가 아니라 격자에 든다.** 폭발은 자기 자신이 아니라 **그 자리 주변**을
+    // 오염시키고, 다음에 그 자리를 지나는 알갱이가 그 영향을 받아야 하기 때문이다.
+    // 알갱이에 붙이면 터진 알갱이만 재를 갖고 다니게 되어 사슬이 끊긴다.
+    //
+    // 재가 쌓이면 그 칸이 잘 식고(kCool), 식으면 σ² 가 내려가고, Jeans 문턱이
+    // `ρ > k_J·σ²` 라 **저절로 낮아져 작은 별이 태어난다.** 「재가 많으면 작은 별」이라는
+    // 규칙을 코드에 적지 않아도 그 사슬이 도는 것이 이 배열의 값어치다.
+    //
+    // 128³ × 4B = 8 MB.
+    float  *ashGrid = nullptr;
+
     cufftComplex *specRho = nullptr, *specGreen = nullptr;
     cufftHandle planR2C = 0, planC2R = 0;
     bool planReady = false;
@@ -1916,6 +1960,7 @@ void Sim::Impl::freeAll() {
     F((void*&)accG); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
     F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)accMag);
     F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
+    F((void*&)ashGrid);
     F((void*&)specRho); F((void*&)specGreen);
     F((void*&)keys); F((void*&)order); F((void*&)cellStart); F((void*&)cellEnd);
     F((void*&)flag); F((void*&)scan);
@@ -1954,6 +1999,10 @@ void Sim::Impl::allocate() {
         CK(cudaMemset(dispY, 0, sizeof(float) * gcells));
         CK(cudaMemset(dispZ, 0, sizeof(float) * gcells));
         CK(cudaMemset(dispCnt, 0, sizeof(float) * gcells));
+        // 재는 **분산과 달리 매 바퀴 비우지 않는다** — 쌓이는 것이 그 자체로 역사다.
+        // 그래서 여기서만 초기화한다. 안 비우면 미초기화 값이 냉각률로 들어가 판이 터진다.
+        CK(cudaMalloc(&ashGrid, sizeof(float) * gcells));
+        CK(cudaMemset(ashGrid, 0, sizeof(float) * gcells));
     }
     CK(cudaMalloc(&rho, sizeof(float) * cells));
     CK(cudaMalloc(&pot, sizeof(float) * cells));
@@ -2211,7 +2260,8 @@ void Sim::Impl::doCooling(float dt) {
                                          wantPressure ? dispX : nullptr,
                                          wantPressure ? dispY : nullptr,
                                          wantPressure ? dispZ : nullptr,
-                                         wantPressure ? dispCnt : nullptr);
+                                         wantPressure ? dispCnt : nullptr,
+                                         ashGrid, cfg.ashCoolK);
     std::swap(vel, velTmp);
     CK(cudaGetLastError());
 
@@ -2311,6 +2361,7 @@ size_t Sim::estimateBytes(int particleCount, int gridSize, Boundary boundary) {
     // 고립 경계에서 cells 는 G³ 의 여덟 배고, 그걸로 세면 실제의 여덟 배를 잡아 둔 것으로
     // 계산해 알갱이 상한이 까닭 없이 내려간다. 128³ 에서 이 넷은 33 MB 다.
     b += sizeof(float) * G * G * G * 4;
+    b += sizeof(float) * G * G * G;   // ashGrid — 재도 패딩 없이 G³ 다
     // 위 두 줄은 화면용 격자(proj/projA/projB, G²)를 안 센다 — 셋을 합쳐도 128² 에서
     // 196 KB 라 어림에 영향이 없다.
 
@@ -2630,7 +2681,8 @@ void Sim::step() {
             d.pos, d.vel, d.allocN, dt,
             fmaxf(d.cfg.starSunMass, 1.0f), fmaxf(d.cfg.starSunLifeSim, 1e-3f),
             fmaxf(d.cfg.starExplodeSim, 1e-4f), d.cfg.starKickSpeed,
-            (unsigned)(d.stepCount * 2654435761u + 7919u));
+            (unsigned)(d.stepCount * 2654435761u + 7919u),
+            d.ashGrid, d.allocG, d.periodic() ? 1 : 0, d.cfg.starAshYield);
         CK(cudaGetLastError());
     }
 
@@ -2664,9 +2716,38 @@ int Sim::starCount() const {
     // 세는 커널을 여기서만 돌린다 — 매 스텝 세면 그 자체가 비용이고, 이 값은
     // 화면·상태 표시에만 쓰여 그때그때 재면 충분하다.
     CK(cudaMemset(d.redI, 0, sizeof(int)));
-    kCountStars<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.allocN, d.redI);
+    CK(cudaMemset(d.redD, 0, sizeof(double)));
+    kCountStars<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.allocN, d.redI, d.redD);
     int h = 0;
     CK(cudaMemcpy(&h, d.redI, sizeof(int), cudaMemcpyDeviceToHost));
+    return h;
+}
+
+// 별 하나의 평균 질량(= 그 별을 이룬 알갱이 수). **시간에 따라 이 값이 내려가면
+// 재 사슬이 도는 것이다** — 재가 쌓여 잘 식고, 식으면 Jeans 문턱이 낮아져 더 작은 덩어리도
+// 별이 되기 때문이다. 1세대가 거대했던 이유가 그 반대(재가 없어 못 식음)다.
+double Sim::meanStarMass() const {
+    Impl& d = *impl_;
+    if (g_failed || d.allocN <= 0) return 0.0;
+    CK(cudaMemset(d.redI, 0, sizeof(int)));
+    CK(cudaMemset(d.redD, 0, sizeof(double)));
+    kCountStars<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.allocN, d.redI, d.redD);
+    int    cnt = 0;
+    double sum = 0.0;
+    CK(cudaMemcpy(&cnt, d.redI, sizeof(int), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(&sum, d.redD, sizeof(double), cudaMemcpyDeviceToHost));
+    return (cnt > 0) ? sum / (double)cnt : 0.0;
+}
+
+// 판 전체에 쌓인 재의 총량. 사슬이 도는지 밖에서 확인할 창이다.
+double Sim::totalAsh() const {
+    Impl& d = *impl_;
+    if (g_failed || d.allocG <= 0 || !d.ashGrid) return 0.0;
+    const int cells = d.allocG * d.allocG * d.allocG;
+    CK(cudaMemset(d.redD, 0, sizeof(double)));
+    kSumFloatGrid<<<(cells + 255) / 256, 256>>>(d.ashGrid, cells, d.redD);
+    double h = 0.0;
+    CK(cudaMemcpy(&h, d.redD, sizeof(double), cudaMemcpyDeviceToHost));
     return h;
 }
 BlackHoleState Sim::blackHole() const { return impl_->heaviest(); }
