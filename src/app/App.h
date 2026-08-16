@@ -19,7 +19,7 @@ enum class RenderMode { DensityField, Points };
 // 제각각 움직이는가이고(별들의 무질서한 속도), 그것이 원반이 파편화를 버티는 힘이다.
 // 전에 있던 가스 온도는 상태방정식과 충격 가열이 있어야 뜻이 있는데 그 계산을 하지 않으면서
 // 값만 남아 있었다 — 화면은 흑백으로만 갈리고 무엇을 보는지 알 수 없었다.
-enum class ColorBy    { Density, Dispersion, Speed };
+enum class ColorBy    { Density, Dispersion, Speed, Light };
 enum class ColorMap   { Astro, Gray, Thermal };
 
 struct ViewSettings {
@@ -232,7 +232,7 @@ struct App {
 
 
     // 「보기」가 고르는 표현 방식. 나머지 색 설정(컬러맵·온도 추적)은 여기에 맞춰 자동으로 정한다.
-    enum class Look { Density, Dispersion };
+    enum class Look { Density, Dispersion, Light };
     Look  look = Look::Density;
 
     // 밀도와 온도는 값의 범위가 달라 보기 좋은 밝기·세기가 서로 다르다.

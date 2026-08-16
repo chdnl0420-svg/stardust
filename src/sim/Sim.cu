@@ -1410,6 +1410,49 @@ __global__ void kScatterDispersion(const float4* pos, const float4* vel, int n, 
 }
 
 // 합을 밀도로 나눠 평균으로 만든다. 빈 칸은 0 으로 둔다.
+// 별이 내는 빛을 화면 격자에 뿌린다.
+//
+// **비용**: N 스레드 × CIC 4칸 = 400만 × 4 = 1600만 atomicAdd. `kScatterDispersion` 과 같다.
+//
+// **밝기는 질량의 3.5제곱이다.** 이 지수 하나가 밀도 그림과 빛 그림을 완전히 갈라놓는다 —
+// 태양 20배짜리 별은 3만 6천 배 밝다. 밀도로 보면 알갱이 20개일 뿐인데 빛으로 보면
+// 주변 수만 개를 합친 것보다 밝다. **그것이 실제 밤하늘이다.**
+//
+// 가스(`pos.w == 0`)는 스스로 빛나지 않아 여기서 0 이다. 별빛을 받아 빛나는 반사광은
+// 별빛을 퍼뜨리는 계산이 따로 필요해 이번 판에서는 넣지 않는다(스펙의 다음 항목).
+// 폭발 중(`pos.w < 0`)인 것은 **아주 밝게** 친다 — 초신성은 은하 전체보다 밝다.
+__global__ void kScatterLight(const float4* pos, int n, int G, float* out, ViewRot rot,
+                              float sunMass, float novaBoost) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+
+    float lum;
+    if (p.w > 0.f) {
+        // 별. L = (M/M_sun)^3.5
+        lum = __powf(fmaxf(p.w / sunMass, 1e-3f), 3.5f);
+    } else if (p.w < 0.f) {
+        // 폭발 중. 실제 초신성은 은하 전체보다 밝고 몇 주 동안 그렇다.
+        lum = novaBoost;
+    } else {
+        return;                                  // 가스는 스스로 안 빛난다
+    }
+
+    float ux = p.x, uy = p.y;
+    if (rot.on && !rotPoint(p.x, p.y, p.z, rot, ux, uy)) return;
+    const float gx = ux * G - 0.5f, gy = uy * G - 0.5f;
+    const int ix = (int)floorf(gx), iy = (int)floorf(gy);
+    const float fx = gx - ix, fy = gy - iy;
+    for (int k = 0; k < 4; ++k) {
+        const int ox = k & 1, oy = (k >> 1) & 1;
+        const int cx = min(max(ix + ox, 0), G - 1);
+        const int cy = min(max(iy + oy, 0), G - 1);
+        const float w = (ox ? fx : 1.f - fx) * (oy ? fy : 1.f - fy);
+        atomicAdd(&out[cy * G + cx], w * lum);
+    }
+}
+
 __global__ void kDivideInto(const float* num, const float* den, float* out, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -3141,6 +3184,21 @@ const float* Sim::fieldDevicePtr(Field field) {
     if (field == Field::Density) {
         kClearF<<<blocks, 256>>>(d.proj, cells);
         kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.proj, G, d.stride(), rot);
+        CK(cudaGetLastError());
+        return d.proj;
+    }
+
+    if (field == Field::Light) {
+        // 별빛은 **나누지 않는다.** 분산·속력은 「평균」이라 개수로 나눠야 하지만, 빛은
+        // 합이 곧 그 자리의 밝기다 — 별 열 개가 모이면 열 배 밝은 것이 맞다.
+        kClearF<<<blocks, 256>>>(d.proj, cells);
+        // 초신성 밝기 배수. 실제 초신성은 별 1000억 개를 합친 것보다 밝지만 그 값을 그대로
+        // 쓰면 화면 기준을 통째로 삼킨다(밝기 정규화가 백분위수로 바뀌기 전까지는).
+        // 「가장 무거운 별보다 확실히 밝다」 선에서 끊는다.
+        const float nova = 1.0e4f;
+        kScatterLight<<<(d.allocN + 255) / 256, 256>>>(
+            d.pos, d.allocN, G, d.proj, rot,
+            fmaxf(d.cfg.starSunMass, 1.0f), nova);
         CK(cudaGetLastError());
         return d.proj;
     }

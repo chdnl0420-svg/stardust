@@ -509,7 +509,14 @@ public:
     // 화면에 색을 입힐 때 무엇을 기준으로 삼을지.
     // Dispersion 은 속도 분산 — 은하에서 「온도」에 해당한다.
     // 별들이 나란히 돌면 차갑고, 제각각 움직이면 뜨겁다.
-    enum class Field { Density, Dispersion, Speed };
+    // 화면에 무엇을 그릴지.
+    //  Density     알갱이가 얼마나 몰려 있나 (지금까지의 기본)
+    //  Dispersion  속도 분산 — 은하의 「온도」
+    //  Speed       속력
+    //  **Light**   별이 실제로 내는 빛. 밝기 L = (M/M_sun)^3.5 이라 무거운 별 하나가
+    //              가벼운 별 수만 개보다 밝다. 그것이 실제 밤하늘이 보이는 방식이고,
+    //              밀도 그림과는 대비가 통째로 다르다
+    enum class Field { Density, Dispersion, Speed, Light };
 
     // 렌더가 읽어 갈 격자(디바이스 포인터). gridSize()² 개의 float.
     // 온도·속도는 밀도로 가중 평균한 값이라 빈 칸은 0 이다.

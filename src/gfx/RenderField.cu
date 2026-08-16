@@ -387,6 +387,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             // 밀도 필드 — 색 기준에 맞는 격자를 받아 화면으로 샘플링한다.
             const Sim::Field f = (view.colorBy == ColorBy::Dispersion) ? Sim::Field::Dispersion
                                : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
+                               : (view.colorBy == ColorBy::Light)       ? Sim::Field::Light
                                                                         : Sim::Field::Density;
             const float* grid = app.sim.fieldDevicePtr(f);
 
@@ -431,7 +432,10 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             // 「그 자리가 이웃보다 얼마나 진한가」로 그려져 구조가 늘 보인다.
             // 급변하면 화면이 출렁이므로 열 프레임에 걸쳐 따라가게 한다.
             float norm = meanRho;
-            if (f == Sim::Field::Density && grid && gridG > 0) {
+            // 빛도 밀도와 같은 정규화를 쓴다. `L = M^3.5` 라 값 범위가 극단적이라
+            // 고정 배수로는 화면이 새까맣거나 새하얘진다.
+            const bool wantNorm = (f == Sim::Field::Density || f == Sim::Field::Light);
+            if (wantNorm && grid && gridG > 0) {
                 // **열다섯 프레임에 한 번만 잰다.**
                 //
                 // 재려면 결과를 호스트로 가져와야 하는데, 그 복사가 GPU 파이프라인을 세운다.
@@ -455,7 +459,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 }
                 if (liveMean_ > 1e-6f) norm = liveMean_;
             }
-            const float bright = (f == Sim::Field::Density)
+            const float bright = wantNorm
                                ? view.brightness / fmaxf(norm, 1e-6f)
                                : view.brightness * 60.0f;
             if (grid) {

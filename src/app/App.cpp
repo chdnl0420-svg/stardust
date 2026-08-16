@@ -454,10 +454,21 @@ bool ContactFitsCount(int particleCount, int gridSize) {
 }
 
 void ApplyLook(App& app) {
-    // 색은 밀도 하나로 굳혔다. 온도는 그 계산을 하지 않아 값이 없었고, 속도는 점으로 그릴
-    // 때만 뜻이 있었다 — 고를 것이 하나뿐이라 고르는 자리도 없앴다.
-    app.look = App::Look::Density;
-    app.view.colorBy = ColorBy::Density;
+    // 오래 밀도 하나로 굳어 있었다 — 온도는 그 계산을 하지 않아 값이 없었고, 속도는 점으로
+    // 그릴 때만 뜻이 있었다. **이제 「빛」이 생겨 고를 것이 둘이다.**
+    //
+    // 빛은 별이 실제로 내는 밝기(L = M^3.5)로 그린다. 밀도로 보면 알갱이 스무 개일 뿐인
+    // 무거운 별이 빛으로 보면 주변 수만 개보다 밝다 — 그것이 실제 밤하늘이 보이는 방식이다.
+    //
+    // **여기서 `app.look` 을 덮어쓰지 않는다.** 전에는 무조건 Density 로 되돌려,
+    // 밖에서 보기를 바꿔도 다음 프레임에 지워졌다(2026-08-16 실측: `colorBy=light` 를
+    // 넣어도 status 가 계속 density 였다).
+    if (app.look == App::Look::Light) {
+        app.view.colorBy = ColorBy::Light;
+    } else {
+        app.look = App::Look::Density;
+        app.view.colorBy = ColorBy::Density;
+    }
     app.view.cmap    = ColorMap::Astro;
     app.view.brightness = app.brightDensity;
     app.view.gamma      = app.gammaDensity;
