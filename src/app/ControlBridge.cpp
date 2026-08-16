@@ -158,6 +158,9 @@ std::string ControlBridge::statusBody(const App& app) const {
     // 원반의 공간 두께도 커널을 돌리고 `redD` 를 위 셋과 나눠 쓴다 — 포맷 인자 안에서
     // 부르면 평가 순서가 정해져 있지 않아 서로의 축소 버퍼를 덮는다.
     const double diskSigmaZ = app.sim.measureDiskThickness();
+    // 벽에 붙은 수도 커널을 돌리고 `redI` 를 다른 측정과 나눠 쓴다 — 포맷 인자 안에서
+    // 부르면 평가 순서가 정해져 있지 않아 서로의 축소 버퍼를 덮는다.
+    const int atWall = app.sim.wallCount();
     // 보존량도 같은 이유로 미리 받는다 — 커널을 여럿 돌리므로 포맷 인자 안에서 부르면
     // 평가 순서가 정해져 있지 않아 값이 섞인다.
     const Sim::Conservation cons = app.sim.measureConservation();
@@ -203,6 +206,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 그래서 판이 실제로 얼마나 두꺼운가. 씨앗 diskThickness 보다 크게 자라면
         // 두께를 만든 것은 초기 배치가 아니라 압력이다.
         "diskSigmaZ=%.6f\ndiskSeed=%.6f\n"
+        // 판 벽에 붙어 있는 수. 벽을 타고 미끄러지는 것이 화면에 보이는데, 그것을 지울지
+        // 정하려면 이 값이 시간에 따라 어떻게 변하는지 봐야 한다.
+        "atWall=%d\n"
         // 보존량. **gas + star + nova + remnant + 삼킨 수 = 총 알갱이 수** 여야 한다.
         // badValues 는 NaN·무한대 개수로 하나라도 0 이 아니면 실패다.
         "cGas=%d\ncStar=%d\ncNova=%d\ncRemnant=%d\nbadValues=%d\n"
@@ -244,7 +250,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
         Sim::deviceFreeBytes() / 1048576.0, app.dangerStepMs,
         app.sim.meanStarMass(), app.sim.totalAsh(), dxx, dyy, dzz,
-        diskSigmaZ, app.cfg.diskThickness,
+        diskSigmaZ, app.cfg.diskThickness, atWall,
         cons.gas, cons.stars, cons.exploding, cons.remnants, cons.bad,
         cons.maxCellCount, cons.momentum,
         emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter,
