@@ -411,6 +411,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starIonizeK"))    app.cfg.starIonizeK    = clampF(getFloat(kv, "starIonizeK", app.cfg.starIonizeK), 0.0f, 100.0f, app.cfg.starIonizeK);
         if (has(kv, "darkMatterFraction")) app.cfg.darkMatterFraction = clampF(getFloat(kv, "darkMatterFraction", app.cfg.darkMatterFraction), 0.0f, 0.9f, app.cfg.darkMatterFraction);
         if (has(kv, "starWindRate"))   app.cfg.starWindRate   = clampF(getFloat(kv, "starWindRate", app.cfg.starWindRate), 0.0f, 10.0f, app.cfg.starWindRate);
+        if (has(kv, "dustExtinctionK")) app.cfg.dustExtinctionK = clampF(getFloat(kv, "dustExtinctionK", app.cfg.dustExtinctionK), 0.0f, 20.0f, app.cfg.dustExtinctionK);
         // 무엇으로 볼지. 「빛」은 별이 실제로 내는 밝기(L = M^3.5)로 그린다 —
         // 밀도 그림과 대비가 통째로 다르다.
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);

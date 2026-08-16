@@ -4180,6 +4180,10 @@ const float* Sim::lightTempDevicePtr() const { return impl_->projT; }
 // 비용이 알갱이 수와 무관하다 — 2026-08-14 에 시스템을 죽인 경로를 피한다.
 // `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다.
 const float* Sim::lightSpreadDevicePtr() const { return impl_->projB; }
+// **시선 방향으로 합친 가스 기둥**(G²). 성운이 「가스에 별빛을 입힐」 때 쓰는 것과 같은
+// 격자다 — 같은 가스가 앞쪽 빛은 반사하고 **뒤쪽 빛은 가린다**(암흑성운). 하나의 현상이라
+// 격자도 하나다. `fieldDevicePtr(Field::Light)` 를 `nebulaK > 0` 으로 부른 뒤에만 찬다.
+const float* Sim::gasColumnDevicePtr() const { return impl_->projA; }
 const float* Sim::lightSpreadTempDevicePtr() const { return impl_->projTB; }
 
 // 「폭발 자리에서 새 별이 태어나는가」 — 새로 태어난 별이 있던 칸의 **재 평균**이다.

@@ -264,7 +264,7 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
                              float sizePx, float sunMass, float pulsePhase, BHDisk bh,
                              const float* spread, const float* spreadT, int gridG,
-                             float nebulaK) {
+                             float nebulaK, const float* gasCol, float dustTau) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -410,6 +410,23 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
             }
         }
         if (L <= 0.f) return;                                       // 아무것도 안 빛난다
+
+        // ── 암흑성운 — **같은 가스가 앞쪽 빛은 반사하고 뒤쪽 빛은 가린다** ──────────
+        //
+        // 실제 밤하늘에서 은하수를 갈라놓는 검은 띠가 이것이다. 별이 없어서 검은 것이
+        // 아니라 **앞에 있는 먼지가 뒤쪽 별빛을 먹어서** 검다. 소광은 `I = I₀·e^(−τ)` 이고
+        // `τ` 는 시선 방향으로 쌓인 먼지 양에 비례한다.
+        //
+        // **앞뒤를 가리지 않고 균일하게 깎는다.** 제대로 하려면 그 알갱이보다 **앞에 있는**
+        // 가스만 세야 하는데 그것은 z 방향 프리픽스 합이라 격자를 한 겹 더 쌓아야 한다.
+        // 균일하게 깎아도 「가스가 짙은 자리는 어둡다」는 그대로 나오고, 그것이 화면에서
+        // 보이는 전부다.
+        if (gasCol && dustTau > 0.f) {
+            const int gx2 = min(max((int)(p.x * gridG), 0), gridG - 1);
+            const int gy2 = min(max((int)(p.y * gridG), 0), gridG - 1);
+            L *= __expf(-gasCol[gy2 * gridG + gx2] * dustTau);
+            if (L <= 0.f) return;
+        }
 
         const float tc = tempToColorT(TK);
         // **밝기를 로그로 눌러 쌓는다.** `L = M^3.5` 라 범위가 1e-3~1e7 로 극단적이라
@@ -814,12 +831,21 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             const bool pointsLight = (view.colorBy == ColorBy::Light);
             const float* nebSpread = nullptr;
             const float* nebSpreadT = nullptr;
-            float nebK = 0.f;
+            const float* gasCol = nullptr;
+            float nebK = 0.f, dustTau = 0.f;
             if (pointsLight && app.sim.config().nebulaK > 0.f) {
                 if (!wantField) (void)app.sim.fieldDevicePtr(Sim::Field::Light);
                 nebSpread  = app.sim.lightSpreadDevicePtr();
                 nebSpreadT = app.sim.lightSpreadTempDevicePtr();
                 nebK       = app.sim.config().nebulaK;
+                // 암흑성운 — 같은 가스가 뒤쪽 빛을 가린다. 가스 기둥은 격자 값이라
+                // 크기가 알갱이 수에 붙으므로 **평균으로 나눠** 「평균의 몇 배인가」로
+                // 바꾼 뒤 소광 계수를 곱한다(성운이 쓰는 정규화와 같은 것).
+                gasCol = app.sim.gasColumnDevicePtr();
+                const int cells2 = gridG * gridG;
+                const int nAll = app.sim.particleCount();
+                const float invMeanGas = (nAll > 0) ? ((float)cells2 / (float)nAll) : 1.0f;
+                dustTau = app.sim.config().dustExtinctionK * invMeanGas;
             }
             if (n > 0) {
                 kSplatPoints<<<(n + 255) / 256, 256>>>(
@@ -831,7 +857,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     fmaxf(app.sim.config().starSunMass, 1.0f),
                     // 펄서 위상. 90 프레임이 한 바퀴라 60fps 에서 약 1.5초 주기다.
                     (float)(drawTick_ % 90u) * (6.2831853f / 90.0f), bhDisk,
-                    nebSpread, nebSpreadT, gridG, nebK);
+                    nebSpread, nebSpreadT, gridG, nebK, gasCol, dustTau);
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //
