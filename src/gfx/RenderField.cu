@@ -76,6 +76,30 @@ __device__ __forceinline__ float3 cmapThermal(float t) {
 // 그대로다(2026-08-14 실측: 알갱이 399만이 격자 안에 다 있는데 화면이 검었다).
 //
 // 비용: 화면 격자 칸 수만큼(128² 이면 1만 6천). 알갱이 수와 무관하다.
+// 값의 분포를 로그 구간 히스토그램으로 담는다. **백분위수를 정렬 없이 구하려는 것이다.**
+//
+// **왜 평균으로는 안 되나.** 초신성 하나가 은하 전체보다 밝다(별 1000억 개를 합친 것보다).
+// 그런 값 하나가 평균을 통째로 끌어올리면 `bright = brightness / 평균` 이 작아져
+// **나머지가 전부 검어진다.** 성운을 더해도 같은 일이 난다 — 더한 만큼 평균이 올라
+// 그만큼 깎여, 2026-08-16 실측에서 `nebulaK` 를 올릴수록 흐린 픽셀이 **줄었다**(15.3% → 10.9%).
+//
+// 실제 천문 사진도 같은 문제를 겪고 노출을 여러 장 겹쳐(HDR) 푼다. 여기서는 **상위 몇 %
+// 지점**을 기준으로 삼는다 — 초신성 하나는 그 위에 있어 기준을 못 움직인다.
+//
+// **비용**: 화면 격자 칸 수(128² = 1만 6천) × O(1). 정렬이 필요 없다.
+__global__ void kHistLog(const float* g, int n, int* hist, int bins) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float v = g[i];
+    if (v <= 0.f) return;
+    // 값의 범위가 몇 자릿수라 로그로 담는다. 1e-4 ~ 1e8 을 bins 칸에 나눈다.
+    const float t = (__logf(v) + 9.21f) / (18.42f + 9.21f);   // ln(1e-4)=-9.21, ln(1e8)=18.42
+    int b = (int)(t * (float)bins);
+    if (b < 0) b = 0;
+    if (b >= bins) b = bins - 1;
+    atomicAdd(&hist[b], 1);
+}
+
 __global__ void kSumNonZero(const float* g, int n, float* sum, int* cnt) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -476,16 +500,37 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 // 바뀌는 것을 따라가면 되는 값이라 0.25초에 한 번으로 충분하다.
                 if ((statTick_++ % 15) == 0) {
                     const int cells = gridG * gridG;
-                    if (!devStat_) cudaMalloc(&devStat_, sizeof(float) + sizeof(int));
+                    // **평균이 아니라 상위 백분위수를 기준으로 잡는다(2026-08-16).**
+                    //
+                    // 평균은 초신성 하나(은하 전체보다 밝다)에 통째로 끌려가고, 성운을
+                    // 더해도 그만큼 깎아 낸다 — 실측에서 `nebulaK` 를 올릴수록 흐린 픽셀이
+                    // **줄었다**(15.3% → 10.9%). 상위 5% 지점은 그런 극단값 위에 있어
+                    // 기준이 안 흔들린다. 실제 천문 사진이 HDR 로 푸는 것과 같은 문제다.
+                    constexpr int kBins = 64;
+                    if (!devStat_) cudaMalloc(&devStat_, sizeof(int) * kBins);
                     if (devStat_) {
-                        cudaMemset(devStat_, 0, sizeof(float) + sizeof(int));
-                        kSumNonZero<<<(cells + 255) / 256, 256>>>(
-                            grid, cells, (float*)devStat_, (int*)((char*)devStat_ + sizeof(float)));
-                        struct { float sum; int cnt; } st{};
-                        if (cudaMemcpy(&st, devStat_, sizeof(st), cudaMemcpyDeviceToHost) == cudaSuccess
-                            && st.cnt > 0) {
-                            const float m = st.sum / (float)st.cnt;
-                            liveMean_ = (liveMean_ > 0.f) ? (liveMean_ + (m - liveMean_) * 0.3f) : m;
+                        cudaMemset(devStat_, 0, sizeof(int) * kBins);
+                        kHistLog<<<(cells + 255) / 256, 256>>>(grid, cells, (int*)devStat_, kBins);
+                        int h[kBins] = {};
+                        if (cudaMemcpy(h, devStat_, sizeof(int) * kBins, cudaMemcpyDeviceToHost)
+                            == cudaSuccess) {
+                            int total = 0;
+                            for (int b = 0; b < kBins; ++b) total += h[b];
+                            if (total > 0) {
+                                // 위에서부터 5% 를 세어 그 지점의 값을 기준으로 삼는다.
+                                const int want = (int)(total * 0.05f) + 1;
+                                int acc = 0, hit = kBins - 1;
+                                for (int b = kBins - 1; b >= 0; --b) {
+                                    acc += h[b];
+                                    if (acc >= want) { hit = b; break; }
+                                }
+                                // 구간 번호를 값으로 되돌린다(kHistLog 의 역변환).
+                                const float t = ((float)hit + 0.5f) / (float)kBins;
+                                const float m = expf(t * (18.42f + 9.21f) - 9.21f);
+                                // 튀는 것을 눌러 화면이 깜빡이지 않게 한다(기존과 같은 이력).
+                                liveMean_ = (liveMean_ > 0.f)
+                                          ? (liveMean_ + (m - liveMean_) * 0.3f) : m;
+                            }
                         }
                     }
                 }
