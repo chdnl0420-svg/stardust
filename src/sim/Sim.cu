@@ -893,9 +893,29 @@ __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int
 //
 // 비용: N 스레드 × 27칸 × 최대 96 이웃. N=100만이면 9600만 번의 읽기로, 같은 상한을 쓰는
 // kContact 과 같다(실측 스텝 4 ms). 상한이 없으면 뭉친 칸 하나가 프레임을 통째로 먹는다.
+// 냉각 + **속도 분산 재기**를 한 번에 한다.
+//
+// 이 둘을 한 커널에 둔 이유는 게으름이 아니라 비용이다 — 둘 다 「이웃 27칸을 훑어
+// 속도를 모으는」 같은 일이 필요하고, 그 훑기가 이 커널의 거의 전부다. 따로 두면
+// 가장 비싼 부분을 두 번 한다.
+//
+// **비용**: N 스레드 × 최대 96 이웃 = 3.8억(N=400만). 여기에 압력을 켜면 알갱이마다
+// 격자 원자 연산 4회가 더해진다 — 400만 × 4 = 1600만. CIC 8칸이 아니라 **자기 칸 하나**에만
+// 쌓아서 그렇다(8칸이면 1억 2800만이 되어 kScatter 보다 4배 무거워진다). 이웃 27칸을
+// 이미 훑은 값이라 그 자체로 국소 평균이고, 한 칸에 쌓아도 정보가 뭉개지지 않는다.
+//
+// **분산을 자기 속도 기준으로 잰다** — 이것이 이 커널의 핵심이다.
+// 이웃 속도를 절대값으로 모아 분산을 내면 원반의 **차등회전**(안쪽이 빨리 도는 것)이
+// 그대로 분산으로 잡혀, 사이좋게 나란히 도는 알갱이들이 「제각각 움직인다」고 오해된다.
+// 그러면 없는 압력이 생겨 은하가 이유 없이 부푼다.
+//   틀린 것: σ² = <|v_j|²> - <v_j>²   ← 회전·전단이 섞임
+//   쓰는 것: σ² = <|v_j - v_i|²> - <v_j - v_i>²   ← 자기를 원점으로 옮겨 평균 흐름을 뺀다
+// 두 식은 수학적으로 같은 값을 주지만(평행이동 불변), 뒤엣것은 **작은 수끼리 빼서**
+// float 정밀도를 훨씬 덜 잃는다. 속도가 광속(1.0) 근처까지 가는 판이라 이 차이가 크다.
 __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
                       int periodic, const int* cellStart, const int* cellEnd,
-                      float rate, float dt, float4* velOut) {
+                      float rate, float dt, float4* velOut,
+                      float* dispX, float* dispY, float* dispZ, float* dispCnt) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -908,7 +928,9 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
     const int cz = min(max((int)(p.z * G), 0), G - 1);
 
     const int kMaxPeers = 96;            // kContact 과 같은 상한
-    float sx = 0.f, sy = 0.f, sz = 0.f;
+    // 이웃 - 자기. 합과 제곱합을 함께 모아 한 번만 돌고 분산까지 낸다.
+    float sdx = 0.f, sdy = 0.f, sdz = 0.f;
+    float sqx = 0.f, sqy = 0.f, sqz = 0.f;
     int seen = 0;                        // **들여다본** 수 — 상한은 이것으로 센다
     int used = 0;                        // 그중 실제로 더한 수
 
@@ -925,23 +947,105 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
             ++seen;
             if (pos[j].x < 0.f) continue;
             const float4 vj = vel[j];
-            sx += vj.x; sy += vj.y; sz += vj.z;
+            const float ax = vj.x - v.x, ay = vj.y - v.y, az = vj.z - v.z;
+            sdx += ax; sdy += ay; sdz += az;
+            sqx += ax * ax; sqy += ay * ay; sqz += az * az;
             ++used;
         }
     }
     if (used <= 0) return;               // 이웃이 없으면 잴 온도도 없다
 
     const float inv = 1.f / (float)used;
+    // 이웃의 평균 흐름(자기 기준). 냉각은 이쪽으로 끌려가는 것이다.
+    const float mx = sdx * inv, my = sdy * inv, mz = sdz * inv;
+
+    if (dispCnt) {
+        // 방향별 잔차 분산. 평균 흐름(m)을 뺀 나머지라 차등회전이 여기서 사라진다.
+        // 음수가 나올 수 있다(부동소수점 오차) — 그대로 두면 압력이 뒤집혀 빨아들이므로 자른다.
+        const float vxx = fmaxf(sqx * inv - mx * mx, 0.f);
+        const float vyy = fmaxf(sqy * inv - my * my, 0.f);
+        const float vzz = fmaxf(sqz * inv - mz * mz, 0.f);
+        const int c0 = gidx3(cx, cy, cz, G, G, periodic);
+        atomicAdd(&dispX[c0], vxx);
+        atomicAdd(&dispY[c0], vyy);
+        atomicAdd(&dispZ[c0], vzz);
+        atomicAdd(&dispCnt[c0], 1.0f);
+    }
+
     // 한 스텝에 걷어내는 몫. dt 를 곱해 배속을 바꿔도 식는 속도가 그대로이게 하고,
     // 절반에서 끊는다 — 한 스텝에 이웃 속도로 통째로 갈아타면 알갱이들이 한 덩어리로
     // 굳어 버려 흐름이 사라진다.
     float k = rate * dt * 60.0f;
     if (k > 0.5f) k = 0.5f;
 
-    velOut[i] = make_float4(v.x + k * (sx * inv - v.x),
-                            v.y + k * (sy * inv - v.y),
-                            v.z + k * (sz * inv - v.z),
-                            v.w);
+    // v + k·(v̄ - v) 인데, m 이 이미 (v̄ - v) 라 그대로 더하면 된다.
+    velOut[i] = make_float4(v.x + k * mx, v.y + k * my, v.z + k * mz, v.w);
+}
+
+// 격자에 쌓인 속도 분산에서 **압력 가속도**를 내어 중력 가속도에 더한다.
+//
+// **비용**: 격자 칸 수 × 이웃 6칸 = 209만 × 6 = 1250만 읽기(G=128).
+// **알갱이 수와 무관하다** — 한 칸에 알갱이가 백만 개 몰려도 이 커널은 같은 시간에 끝난다.
+// 뭉친 자리에서 폭주하는 경로가 구조적으로 없다는 뜻이라, 이 앱에서 그것만으로도 값어치가 있다.
+//
+// **격자에 패딩을 쓰지 않는다.** 중력(푸아송)은 아주 먼 곳까지 닿는 힘이라 고립 경계에서
+// 격자를 8배로 부풀려 푸는데(S), 압력은 **바로 옆 칸만 보는 국소 미분**이라 그럴 이유가 없다.
+// 그래서 인덱싱이 accG 와 같은 G³ 이고 pot 의 S³ 이 아니다 — 그냥 따라 했다면 209만이 아니라
+// 1677만 칸을 돌 뻔했다.
+//
+// **식**:  a = -∇·(ρσ²)/ρ  의 대각 성분만 쓴다.
+//   a_x = -(1/ρ)·∂(ρσ²ₓₓ)/∂x
+// 여기서 재밌는 것이 하나 있다 — `dispX[c]` 는 그 칸 알갱이들의 **분산 합**이라
+//   ρσ²ₓₓ = (칸의 알갱이 수) × (분산 평균) = cnt × (dispX/cnt) = dispX
+// 즉 **쌓아 둔 합 자체가 이미 ρσ² 다.** 평균으로 나눴다가 다시 곱할 필요가 없다.
+//
+// **방향별로 따로 미분한다**(σ²ₓₓ 는 x 로, σ²yy 는 y 로). 이것이 등방 압력과 갈리는 자리다 —
+// 하나로 뭉개면 원반의 수직 방향까지 좌우만큼 밀어내 판이 공처럼 부푼다. 방향을 나누면
+// 위아래 분산이 작은 만큼 덜 밀려 **원반이 스스로 납작해진다**(diskThickness 를 손으로
+// 정하지 않아도 되는 이유가 이것이다).
+__global__ void kPressure(const float* dispX, const float* dispY, const float* dispZ,
+                          const float* dispCnt, float4* accG, int G, int periodic,
+                          float k, float maxAcc) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int z = blockIdx.z * blockDim.z + threadIdx.z;
+    if (x >= G || y >= G || z >= G) return;
+
+    const int c = (z * G + y) * G + x;
+    const float rho = dispCnt[c];
+    // 빈 칸에는 밀어낼 것이 없다. 여기서 안 걸러 내면 0 으로 나눠 무한대가 된다.
+    if (rho < 1e-6f) return;
+
+    // 이웃 인덱스는 kGridAccel 과 같은 규칙으로 잡는다(주기면 감싸고, 고립이면 가장자리에 붙인다).
+    int xm, xp, ym, yp, zm, zp;
+    if (periodic) {
+        xm = (x - 1) & (G - 1); xp = (x + 1) & (G - 1);
+        ym = (y - 1) & (G - 1); yp = (y + 1) & (G - 1);
+        zm = (z - 1) & (G - 1); zp = (z + 1) & (G - 1);
+    } else {
+        xm = max(x - 1, 0); xp = min(x + 1, G - 1);
+        ym = max(y - 1, 0); yp = min(y + 1, G - 1);
+        zm = max(z - 1, 0); zp = min(z + 1, G - 1);
+    }
+
+    // 중앙차분. 칸 하나가 1/G 이므로 1/(2·cell) = G/2 다.
+    const float h = 0.5f * (float)G * k / rho;
+    float ax = -(dispX[(z * G + y) * G + xp] - dispX[(z * G + y) * G + xm]) * h;
+    float ay = -(dispY[(z * G + yp) * G + x] - dispY[(z * G + ym) * G + x]) * h;
+    float az = -(dispZ[(zp * G + y) * G + x] - dispZ[(zm * G + y) * G + x]) * h;
+
+    // 상한. 분산이 한 칸에서만 튀면(알갱이가 몇 개뿐인 칸에서 잘 일어난다) 기울기가 커져
+    // 힘이 발산하는데, 그 알갱이는 다음 스텝에 판 밖으로 날아가고 그것이 연쇄가 된다.
+    // 중력 쪽 kIntegrate 도 같은 이유로 가속도를 자른다.
+    ax = fminf(fmaxf(ax, -maxAcc), maxAcc);
+    ay = fminf(fmaxf(ay, -maxAcc), maxAcc);
+    az = fminf(fmaxf(az, -maxAcc), maxAcc);
+
+    // 중력 위에 **더한다** — 덮어쓰지 않는다. 이렇게 두면 kIntegrate 도 sampleAcc 도
+    // 손댈 필요가 없다. 알갱이는 두 힘의 합을 하나로 받는다.
+    float4 a = accG[c];
+    a.x += ax; a.y += ay; a.z += az;
+    accG[c] = a;
 }
 
 // 살아 있는 알갱이를 센다.
@@ -1130,6 +1234,21 @@ __global__ void kDivideInto(const float* num, const float* den, float* out, int 
 // ---------------------------------------------------------------------------
 // 측정
 // ---------------------------------------------------------------------------
+// 격자 하나를 통째로 더한다.
+//
+// 블록 안에서 먼저 모으고 블록마다 한 번만 전역에 더한다 — 칸마다 전역 원자 연산을 하면
+// 209만 칸이 같은 주소에 줄을 서서 이 측정 하나가 프레임을 먹는다(kCountAlive 와 같은 수법).
+// 합이 double 인 이유는 209만 칸을 float 으로 더하면 뒤쪽 값이 반올림에 먹히기 때문이다.
+__global__ void kSumFloatGrid(const float* g, int n, double* out) {
+    __shared__ double s;
+    if (threadIdx.x == 0) s = 0.0;
+    __syncthreads();
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) atomicAdd(&s, (double)g[i]);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(out, s);
+}
+
 __global__ void kCountOccupied(const float* g, int n, int* out, float eps) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n && g[i] > eps) atomicAdd(out, 1);
@@ -1353,6 +1472,19 @@ struct Sim::Impl {
     float  *proj = nullptr;          // 화면에 넘길 2D 투영 G²
     float  *projA = nullptr, *projB = nullptr;   // 속도 분산을 구할 때 쓰는 두 격자 G²
     float  *accMag = nullptr;        // 궤도 속도용 N
+
+    // ── 압력 (속도 분산 텐서의 대각 성분) ──────────────────────────────────
+    //
+    // 방향별로 따로 든다. 하나로 뭉개면 원반의 수직 방향까지 좌우만큼 밀어내 판이
+    // 공처럼 부푼다(kPressure 주석 참조).
+    //
+    // **패딩을 안 쓴다 — G³ 다.** 중력은 먼 곳까지 닿아 고립 경계에서 S³(8배)로 푸는데,
+    // 압력은 옆 칸만 보는 국소 미분이라 그럴 이유가 없다. 128³ × 4B × 4개 = 33 MB 이고,
+    // 패딩을 그대로 따라 했다면 268 MB 였다.
+    //
+    // dispCnt 는 그 칸에 쌓인 알갱이 수(ρ). dispX 등은 분산의 **합**이라 그 자체가
+    // 이미 ρσ² 이고, 그래서 kPressure 가 나누지 않고 바로 미분한다.
+    float  *dispX = nullptr, *dispY = nullptr, *dispZ = nullptr, *dispCnt = nullptr;
 
     cufftComplex *specRho = nullptr, *specGreen = nullptr;
     cufftHandle planR2C = 0, planC2R = 0;
@@ -1636,6 +1768,7 @@ void Sim::Impl::freeAll() {
     F((void*&)temp); F((void*&)tempTmp);
     F((void*&)accG); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
     F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)accMag);
+    F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
     F((void*&)specRho); F((void*&)specGreen);
     F((void*&)keys); F((void*&)order); F((void*&)cellStart); F((void*&)cellEnd);
     F((void*&)flag); F((void*&)scan);
@@ -1661,6 +1794,20 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&accMag, sizeof(float) * N));
     CK(cudaMalloc(&accContact, sizeof(float4) * N));
     CK(cudaMalloc(&accG, sizeof(float4) * (size_t)G * G * G));
+    // 압력 격자 넷. **패딩 없이 G³ 이다**(kPressure 주석 참조 — 국소 미분이라 패딩이 필요 없다).
+    // 잡은 직후에 반드시 비운다. 미초기화 값을 분산으로 읽으면 첫 스텝에 판이 통째로 터진다 —
+    // 이 프로젝트에서 미초기화 배열로 죽은 적이 이미 있다.
+    {
+        const size_t gcells = (size_t)G * G * G;
+        CK(cudaMalloc(&dispX, sizeof(float) * gcells));
+        CK(cudaMalloc(&dispY, sizeof(float) * gcells));
+        CK(cudaMalloc(&dispZ, sizeof(float) * gcells));
+        CK(cudaMalloc(&dispCnt, sizeof(float) * gcells));
+        CK(cudaMemset(dispX, 0, sizeof(float) * gcells));
+        CK(cudaMemset(dispY, 0, sizeof(float) * gcells));
+        CK(cudaMemset(dispZ, 0, sizeof(float) * gcells));
+        CK(cudaMemset(dispCnt, 0, sizeof(float) * gcells));
+    }
     CK(cudaMalloc(&rho, sizeof(float) * cells));
     CK(cudaMalloc(&pot, sizeof(float) * cells));
     CK(cudaMalloc(&proj, sizeof(float) * (size_t)G * G));
@@ -1736,6 +1883,20 @@ void Sim::Impl::computeAccel() {
     solvePoisson();
     kGridAccel<<<grd3(allocG), blk3()>>>(pot, accG, allocG, stride(), potScale(),
                                          periodic() ? 1 : 0);
+
+    // 압력을 중력 **위에 더한다**. kGridAccel 이 accG 를 덮어쓰므로 반드시 그 뒤여야 한다.
+    //
+    // **분산 격자는 8스텝에 한 번 갱신되는데(doCooling) 압력은 매 스텝 더한다.**
+    // 일부러 그렇게 나눴다 — 분산을 매 스텝 다시 재려면 399만 개를 매 스텝 줄 세워야 하고,
+    // 그것이 2026-08-14 에 드라이버를 죽인 바로 그 일이다. 분산은 천천히 변하는 값이라
+    // 여덟 스텝 묵은 값을 써도 힘이 튀지 않는다.
+    if (cfg.pressureEnabled) {
+        // 상한은 중력 쪽과 같은 자리에서 잘라야 뜻이 있다. kIntegrate 가 쓰는 값과 맞춘다.
+        constexpr float kMaxPressureAcc = 5.0f;
+        kPressure<<<grd3(allocG), blk3()>>>(dispX, dispY, dispZ, dispCnt, accG,
+                                            allocG, periodic() ? 1 : 0,
+                                            cfg.pressureK, kMaxPressureAcc);
+    }
     CK(cudaGetLastError());
 }
 
@@ -1846,7 +2007,12 @@ void Sim::Impl::countAlive() {
 }
 
 void Sim::Impl::doCooling(float dt) {
-    if (g_failed || !cfg.coolingEnabled || cfg.coolingRate <= 0.f || dt <= 0.f) return;
+    // 이름은 냉각이지만 실제로는 **이웃 훑기 한 판**이다 — 냉각과 속도 분산(압력의 재료)이
+    // 둘 다 여기서 나온다. 둘 중 하나만 켜도 돌아야 하므로 조건을 따로 본다.
+    const bool wantCool     = cfg.coolingEnabled && cfg.coolingRate > 0.f;
+    const bool wantPressure = cfg.pressureEnabled;
+    if (g_failed || dt <= 0.f) return;
+    if (!wantCool && !wantPressure) return;
     const int G = allocG;
 
     // **몇 스텝에 한 번만 식힌다. 매 스텝 하면 시스템이 죽는다.**
@@ -1871,10 +2037,30 @@ void Sim::Impl::doCooling(float dt) {
         kBuildCellRange<<<(allocN + 255) / 256, 256>>>(keys, allocN, cellStart, cellEnd);
     }
     if (g_failed) return;
+
+    // 분산을 쌓기 전에 **반드시 비운다.** 안 비우면 지난 번 값 위에 계속 더해져 압력이
+    // 스텝마다 커지고, 몇 판 안 가 판이 통째로 날아간다.
+    const size_t gcells = (size_t)G * G * G;
+    if (wantPressure) {
+        CK(cudaMemset(dispX, 0, sizeof(float) * gcells));
+        CK(cudaMemset(dispY, 0, sizeof(float) * gcells));
+        CK(cudaMemset(dispZ, 0, sizeof(float) * gcells));
+        CK(cudaMemset(dispCnt, 0, sizeof(float) * gcells));
+    }
+
     // 제자리에서 고치면 옆 스레드가 이미 식은 값을 읽어 한쪽으로 쏠린다. 정렬이 쓰는
     // 임시 버퍼에 새 속도를 쓰고 통째로 바꿔 끼운다.
+    //
+    // 냉각이 꺼져 있으면 rate 에 0 을 넘긴다 — 커널 안에서 k=0 이 되어 속도가 그대로 나오고,
+    // 분산만 쌓인다. 커널을 둘로 나누지 않는 이유는 이웃 훑기가 이 커널 비용의 거의 전부라
+    // 나누면 가장 비싼 부분을 두 번 하기 때문이다.
     kCool<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, G, periodic() ? 1 : 0,
-                                         cellStart, cellEnd, cfg.coolingRate, dt, velTmp);
+                                         cellStart, cellEnd,
+                                         wantCool ? cfg.coolingRate : 0.f, dt, velTmp,
+                                         wantPressure ? dispX : nullptr,
+                                         wantPressure ? dispY : nullptr,
+                                         wantPressure ? dispZ : nullptr,
+                                         wantPressure ? dispCnt : nullptr);
     std::swap(vel, velTmp);
     CK(cudaGetLastError());
 }
@@ -1961,6 +2147,12 @@ size_t Sim::estimateBytes(int particleCount, int gridSize, Boundary boundary) {
     b += sizeof(float)  * cells * 2;  // rho, pot
     b += sizeof(cufftComplex) * spec * 2;
     b += sizeof(int) * G * G * G * 2; // cellStart, cellEnd
+    // 압력 격자 넷(dispX/Y/Z/Cnt). **패딩 없이 G³ 이라 cells 가 아니라 G³ 로 센다** —
+    // 고립 경계에서 cells 는 G³ 의 여덟 배고, 그걸로 세면 실제의 여덟 배를 잡아 둔 것으로
+    // 계산해 알갱이 상한이 까닭 없이 내려간다. 128³ 에서 이 넷은 33 MB 다.
+    b += sizeof(float) * G * G * G * 4;
+    // 위 두 줄은 화면용 격자(proj/projA/projB, G²)를 안 센다 — 셋을 합쳐도 128² 에서
+    // 196 KB 라 어림에 영향이 없다.
 
     // cuFFT 작업 공간 — **어림하지 말고 물어본다.**
     //
@@ -2372,7 +2564,34 @@ void Sim::measureCentroid(double& cx, double& cy) {
     if (cnt > 0) { cx = s[0] / cnt; cy = s[1] / cnt; }
 }
 
-double Sim::measureMeanTemperature() { return 0.0; }
+// 판의 평균 「온도」 — 별 계에서 온도란 곧 **무작위 운동의 세기**다.
+//
+// 오래 `return 0.0` 이었다. 잴 것이 없어서가 아니라 재는 자리가 없었기 때문인데,
+// 압력을 넣으면서 그 값이 격자에 생겼다(dispX/Y/Z 는 방향별 잔차 분산의 합, dispCnt 는 개수).
+// 셋을 더해 개수로 나누면 알갱이 하나당 평균 분산이 나온다.
+//
+// **이 값이 「압력이 회전을 압력으로 착각하지 않는가」를 밖에서 확인하는 창이다.**
+// 이웃 속도를 절대값으로 모았다면 차등회전이 그대로 잡혀, 사이좋게 도는 판에서도
+// 이 값이 크게 나온다. kCool 이 자기 속도를 기준으로 재므로 그런 판에서는 0 에 가까워야 한다.
+//
+// 압력이 꺼져 있으면 격자가 안 채워지므로 0 을 돌려준다 — 옛 값이 남아 거짓을 말하지 않게.
+double Sim::measureMeanTemperature() {
+    Impl& d = *impl_;
+    if (g_failed || d.allocG <= 0 || !d.cfg.pressureEnabled) return 0.0;
+    const int cells = d.allocG * d.allocG * d.allocG;
+
+    // 네 격자를 각각 합친다. redD 는 double 두 칸짜리 축소용 버퍼다.
+    auto sumOf = [&](const float* src) -> double {
+        CK(cudaMemset(d.redD, 0, sizeof(double)));
+        kSumFloatGrid<<<(cells + 255) / 256, 256>>>(src, cells, d.redD);
+        double h = 0.0;
+        CK(cudaMemcpy(&h, d.redD, sizeof(double), cudaMemcpyDeviceToHost));
+        return h;
+    };
+    const double cnt = sumOf(d.dispCnt);
+    if (cnt < 1.0) return 0.0;
+    return (sumOf(d.dispX) + sumOf(d.dispY) + sumOf(d.dispZ)) / cnt;
+}
 
 namespace {
 // 파일 첫머리에 두는 표식. 다른 파일을 열었을 때 조용히 이상한 우주가 되는 것을 막는다.
