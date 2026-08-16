@@ -317,6 +317,12 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         // 상한을 크게 잡는다: σ² 가 잘 식은 자리에서 0.0002 까지 내려가므로 문턱을 올리려면
         // 그만큼 큰 수가 필요하다.
         if (has(kv, "starJeansK"))     app.cfg.starJeansK     = clampF(getFloat(kv, "starJeansK", app.cfg.starJeansK), 0.0f, 1.0e7f, app.cfg.starJeansK);
+        // 수명·최후를 가르는 값들. 별 비율이 평형에 드는지는 이 넷의 균형이 정하므로
+        // 밖에서 돌려 볼 수 있어야 한다.
+        if (has(kv, "starSunMass"))    app.cfg.starSunMass    = clampF(getFloat(kv, "starSunMass", app.cfg.starSunMass), 1.0f, 1.0e6f, app.cfg.starSunMass);
+        if (has(kv, "starSunLifeSim")) app.cfg.starSunLifeSim = clampF(getFloat(kv, "starSunLifeSim", app.cfg.starSunLifeSim), 0.001f, 1.0e6f, app.cfg.starSunLifeSim);
+        if (has(kv, "starExplodeSim")) app.cfg.starExplodeSim = clampF(getFloat(kv, "starExplodeSim", app.cfg.starExplodeSim), 0.0001f, 10.0f, app.cfg.starExplodeSim);
+        if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, 0.5f, app.cfg.starKickSpeed);
         if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
         if (has(kv, "temperature"))    app.cfg.temperatureEnabled = getInt(kv, "temperature", 1) != 0;
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;

@@ -1106,6 +1106,82 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
     }
 }
 
+// 별이 늙고, 수명이 다하면 터지고, 터진 것이 가스로 돌아온다. **사슬을 닫는 커널이다.**
+//
+// **비용**: N 스레드 × O(1). 이웃도 격자도 안 본다 — 자기 알갱이 하나만 읽고 쓴다.
+//
+// **왜 이것 없이는 별 비율이 안 잡히나.** 별이 되돌아갈 길이 없으면 판정을 반복할수록
+// 쌓이기만 한다(2026-08-16 실측: 3초 76% → 60초 99.9%). 실제 은하에서 별 비율이 유지되는
+// 것은 형성률과 사망률이 균형을 이루기 때문이고, **평형은 양쪽이 다 있어야 존재한다.**
+//
+// **상태 두 축**(design.md 1장):
+//   pos.w   0 = 가스 · >0 = 별(값이 질량) · <0 = 폭발 중(|값| 이 남은 시간)
+//   vel.w   ≥0 = 나이 · <0 = 잔해(더 이상 안 늙는다)
+//
+// **수명은 시간 배율 위에서 나온다**(`kYearsPerSimUnit`). 무거울수록 짧다:
+//   T = T_sun · (M/M_sun)^-2.5      태양급 100억 년이면 20배 별은 1000만 년
+// 지수가 -2.5 라 **20배 무거운 별이 천 배 빨리 죽는다.** 그래서 밝은 별이 먼저 사라지고
+// 붉은 별만 남아 은하 색이 통째로 늙는다.
+__global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
+                         float sunMass, float sunLifeSim, float explodeSim,
+                         float kickSpeed, unsigned seed) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float4 p = pos[i];
+    if (p.x < 0.f) return;                   // 삼켜졌거나 빈 자리
+
+    // ── 폭발 중이면 시간만 흘려보낸다 ──────────────────────────────────
+    if (p.w < 0.f) {
+        p.w += dt;                            // 음수가 0 을 향해 올라온다
+        if (p.w >= 0.f) p.w = 0.f;            // 다 타면 가스로 — 여기서 사슬이 닫힌다
+        pos[i] = p;
+        return;
+    }
+    if (p.w == 0.f) return;                   // 가스는 늙지 않는다
+
+    float4 v = vel[i];
+    if (v.w < 0.f) return;                    // 잔해는 더 이상 안 늙는다
+
+    v.w += dt;
+    // 질량이 클수록 수명이 급격히 짧다. powf 가 비싸 보이지만 별인 알갱이만 지나므로
+    // 실제로 도는 수는 전체의 일부다.
+    const float ratio = fmaxf(p.w / sunMass, 1e-3f);
+    const float life  = sunLifeSim * powf(ratio, -2.5f);
+
+    if (v.w > life) {
+        // ── 최후 ────────────────────────────────────────────────────
+        // 질량이 셋을 가른다. 지금은 잔해 둘을 「작고 흰 점」으로 뭉뚱그린다(스펙의 미룬 것).
+        if (ratio < 8.0f) {
+            // 백색왜성 — 껍질을 날리고 심만 남는다. 남은 심은 더 이상 안 늙는다.
+            p.w *= 0.1f;
+            v.w = -1.0f;
+        } else {
+            // 중성자별·블랙홀 후보는 **터진다.** 바깥층이 날아가고 그 자리가 가스로 돌아온다.
+            // 블랙홀 전환은 자리가 여덟뿐이라 별도 판정이 필요하고, 이번 증분에서는
+            // 폭발까지만 한다(스펙의 「최후가 셋으로 갈린다」는 아직 미충족).
+            p.w = -explodeSim;                // 폭발 시작 — 이 시간 동안 보인다
+            v.w = 0.f;
+
+            // 바깥 방향으로 튕긴다. **어느 쪽이 바깥인지 모르므로 알갱이 번호 해시로
+            // 방향을 정한다** — 통계적으로 등방이라 무리 전체로 보면 사방으로 흩어진다.
+            // 같은 알갱이는 언제나 같은 방향이라 판이 볼 때마다 달라지지 않는다
+            // (`kInitCharge` 가 쓰는 것과 같은 수법).
+            unsigned h = (unsigned)i * 2654435761u + seed;
+            h ^= h >> 13; h *= 1274126177u; h ^= h >> 16;
+            const float a = (float)(h & 0xFFFF) * (6.2831853f / 65536.0f);   // 방위각
+            const float z = (float)((h >> 16) & 0xFFFF) * (2.0f / 65536.0f) - 1.0f;  // cos(극각)
+            const float r = sqrtf(fmaxf(1.0f - z * z, 0.f));
+            v.x += kickSpeed * r * __cosf(a);
+            v.y += kickSpeed * r * __sinf(a);
+            v.z += kickSpeed * z;
+        }
+        vel[i] = v;
+        pos[i] = p;
+        return;
+    }
+    vel[i] = v;
+}
+
 // 별이 몇 개인지 센다. `starCount()` 가 불릴 때만 돈다 — 매 스텝 세면 그 자체가 비용이다.
 //
 // 블록 안에서 모으고 블록마다 한 번만 전역에 더한다(kCountAlive 와 같은 수법).
@@ -2542,6 +2618,21 @@ void Sim::step() {
         d.advanceBlackHoles(dt);
     }
     d.checkCollapse();
+
+    // 별이 늙고 터지고 가스로 돌아온다. **매 스텝 돈다** — 나이가 dt 만큼 정확히 늘어야
+    // 수명이 시간 배율 위에서 뜻을 갖는다. `doCooling`(2스텝마다) 안에 두면 나이가
+    // 두 배로 빨리 가거나 절반만 가서 수명 계산이 통째로 어긋난다.
+    //
+    // 별 형성과 짝이라 같은 스위치로 켜고 끈다 — 형성만 있고 죽음이 없으면 별이 쌓이기만
+    // 하고(실측: 60초에 99.9%), 죽음만 있고 형성이 없으면 아무 일도 안 일어난다.
+    if (!g_failed && d.cfg.starFormationEnabled && d.allocN > 0) {
+        kStarAge<<<(d.allocN + 255) / 256, 256>>>(
+            d.pos, d.vel, d.allocN, dt,
+            fmaxf(d.cfg.starSunMass, 1.0f), fmaxf(d.cfg.starSunLifeSim, 1e-3f),
+            fmaxf(d.cfg.starExplodeSim, 1e-4f), d.cfg.starKickSpeed,
+            (unsigned)(d.stepCount * 2654435761u + 7919u));
+        CK(cudaGetLastError());
+    }
 
     d.simTime += dt;
     ++d.stepCount;
