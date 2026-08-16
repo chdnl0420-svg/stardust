@@ -315,22 +315,6 @@ void App::tick() {
         stepsLastFrame = Sim::failed() ? 0 : reps;
     }
 
-    // 무게중심을 화면 가운데에 붙여 둔다.
-    //
-    // 은하 둘이 서로를 끌면 쌍 전체가 한쪽으로 흘러가 결국 화면 밖으로 나간다. 카메라를
-    // 무게중심에 매어 두면 따라다니지 않아도 된다 — 물리는 그대로 두고 보는 자리만 옮긴다.
-    // 매 프레임 재면 GPU 리덕션이 그만큼 도므로 여섯 프레임에 한 번만 잰다.
-    if (ui.keepCenterOfMass) {
-        if (++comTimer >= 6) {
-            comTimer = 0;
-            double cx = 0.5, cy = 0.5;
-            sim.measureCentroid(cx, cy);
-            // screenToSim 의 역이다 — 화면 한가운데가 시뮬 좌표 (0.5 - pan) 에 닿는다.
-            panX = 0.5f - (float)cx;
-            panY = 0.5f - (float)cy;
-        }
-    }
-
     // 카드가 힘겨워하면 스스로 짐을 던다.
     guardPerformance();
 

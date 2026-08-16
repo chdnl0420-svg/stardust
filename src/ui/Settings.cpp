@@ -405,10 +405,6 @@ void TabBounds(App& app) {
         app.needsRestart = true;
     }
     UnderNote("\"반대편에서 나옴\"은 우주 거미줄처럼 끝없이 이어진 우주를 볼 때 쓴다.");
-
-    Line();
-    Toggle("com", "무게중심을 화면 가운데에 붙여두기",
-           "은하가 화면 밖으로 흘러가지 않는다", &app.ui.keepCenterOfMass);
 }
 
 void TabLook(App& app) {

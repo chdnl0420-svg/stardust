@@ -100,23 +100,9 @@ void ClampPan(App& app) {
 
     const float mx = 0.5f - spanU * 0.5f / z;
     const float my = 0.5f - spanV * 0.5f / z;
-    float lx = (mx > 0.0f) ? mx : 0.0f;
-    float ly = (my > 0.0f) ? my : 0.0f;
+    const float lx = (mx > 0.0f) ? mx : 0.0f;
+    const float ly = (my > 0.0f) ? my : 0.0f;
 
-    // **무게중심 따라가기가 켜져 있으면 테두리가 드러나는 것을 감수한다.**
-    //
-    // 위 한계는 「판 밖이 안 보이게」 하려는 것인데, 이 판의 은하는 실제로 판 모서리까지
-    // 흘러간다(2026-08-16 실측: 100초에 무게중심이 0.98, 0.92). 그때 테두리를 가리려고
-    // 카메라를 붙잡으면 **은하를 통째로 놓친다** — 실측에서 배율 3 일 때 panX 가 정확히
-    // 0.2037(= 0.5 − 1.7778/6)에서 멎어 은하가 화면 밖으로 0.28 만큼 밀려났다.
-    // 테두리가 보이는 쪽이 아무것도 안 보이는 쪽보다 낫다.
-    //
-    // 판의 어느 지점이든 화면 한가운데에 놓을 수 있는 [-0.5, 0.5] 까지만 연다 —
-    // 그 밖은 판 자체가 없어 열어 봐야 검은 화면이다.
-    if (app.ui.keepCenterOfMass) {
-        if (lx < 0.5f) lx = 0.5f;
-        if (ly < 0.5f) ly = 0.5f;
-    }
     if (app.panX >  lx) app.panX =  lx;
     if (app.panX < -lx) app.panX = -lx;
     if (app.panY >  ly) app.panY =  ly;
