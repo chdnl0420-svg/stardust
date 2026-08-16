@@ -959,12 +959,20 @@ __global__ void kCool(const float4* pos, const float4* vel, int n, int G,
     // 이웃의 평균 흐름(자기 기준). 냉각은 이쪽으로 끌려가는 것이다.
     const float mx = sdx * inv, my = sdy * inv, mz = sdz * inv;
 
-    if (dispCnt) {
-        // 방향별 잔차 분산. 평균 흐름(m)을 뺀 나머지라 차등회전이 여기서 사라진다.
-        // 음수가 나올 수 있다(부동소수점 오차) — 그대로 두면 압력이 뒤집혀 빨아들이므로 자른다.
-        const float vxx = fmaxf(sqx * inv - mx * mx, 0.f);
-        const float vyy = fmaxf(sqy * inv - my * my, 0.f);
-        const float vzz = fmaxf(sqz * inv - mz * mz, 0.f);
+    // **이웃이 둘은 되어야 흩어짐을 잴 수 있다.**
+    //
+    // 하나뿐이면 분산이 **정확히 0** 이 나온다 — `sqx/1 - mx²` 에서 `mx = ax`, `sqx = ax²`
+    // 이므로 `ax² - ax² = 0` 이다. 표본 하나로는 흩어진 정도를 잴 수 없다는 통계의 사실이
+    // 식에 그대로 드러난 것인데, 그 0 을 격자에 쌓으면 **그 칸의 압력과 별 문턱이 함께
+    // 0 으로 내려간다.** 2026-08-16 실측에서 이것 때문에 알갱이 100%가 별이 됐다 —
+    // 냉각을 완전히 꺼서 σ² 를 190배로 올려도 그대로였다.
+    if (dispCnt && used >= 2) {
+        // 표본분산은 n 이 아니라 **n-1** 로 나눈다(불편추정량). 이웃이 둘일 때 n 으로 나누면
+        // 참값의 절반이 나와, 알갱이가 성긴 자리일수록 압력이 체계적으로 약해진다.
+        const float invU = 1.f / (float)(used - 1);
+        const float vxx = fmaxf((sqx - (float)used * mx * mx) * invU, 0.f);
+        const float vyy = fmaxf((sqy - (float)used * my * my) * invU, 0.f);
+        const float vzz = fmaxf((sqz - (float)used * mz * mz) * invU, 0.f);
         const int c0 = gidx3(cx, cy, cz, G, G, periodic);
         atomicAdd(&dispX[c0], vxx);
         atomicAdd(&dispY[c0], vyy);
@@ -1046,6 +1054,69 @@ __global__ void kPressure(const float* dispX, const float* dispY, const float* d
     float4 a = accG[c];
     a.x += ax; a.y += ay; a.z += az;
     accG[c] = a;
+}
+
+// 가스가 별이 되는 자리. **문턱을 손으로 정하지 않고 Jeans 조건으로 판정한다.**
+//
+// **비용**: N 스레드 × O(1). 이웃을 훑지 않는다 — `kCool` 이 격자에 남긴 값을 읽기만 한다.
+// N=400만이면 400만 회이고, 그중 조건을 통과한 것만 격자 원자 연산 1회를 더 한다.
+//
+// **왜 Jeans 인가.** 실제 별은 중력이 압력을 이길 때 태어난다(진스 불안정). 그 조건은
+//   M_J = k · σ³ / √ρ        σ = 무작위 운동의 세기, ρ = 밀도
+// 이고 「그 자리 질량이 M_J 를 넘으면 무너진다」로 읽는다. 격자에서는 칸 부피가 고정이라
+// M_local = ρ·V 이므로 정리하면 훨씬 간단해진다:
+//   ρV > k·σ³/√ρ   →   ρ^1.5 > k'·σ³   →   **ρ > k_J · σ²**
+//
+// **차가우면 낮은 밀도에서도 뭉치고, 뜨거우면 더 빽빽해야 한다.** 이 한 줄이 물리 그대로다.
+//
+// 이것이 「이웃이 N개 이상」과 결정적으로 다른 점: 그 방식은 N 이 격자 크기와 `kCool` 의
+// 96 절단에 통째로 휘둘리는 임의 숫자다. Jeans 는 상수가 `k_J` 하나뿐이고, 그 하나도
+// 「별이 전체의 몇 %가 되게 할 것인가」로 눈금이 잡힌다.
+//
+// **덤으로 사슬 하나가 공짜로 돌아온다.** 재가 쌓인 자리는 잘 식어 σ 가 내려가는데,
+// σ² 가 분모 쪽에 있으므로 문턱이 저절로 낮아져 **작은 별이 태어난다.**
+// 「재가 많으면 작은 별을 만들어라」라는 줄을 코드에 적을 필요가 없다 — 그것이 연출이다.
+__global__ void kStarForm(float4* pos, int n, int G, int periodic,
+                          const float* dispX, const float* dispY, const float* dispZ,
+                          const float* dispCnt, float kJeans) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float4 p = pos[i];
+    if (p.x < 0.f) return;               // 삼켜졌거나 빈 자리
+    if (p.w != 0.f) return;              // 이미 별이거나(>0) 폭발 중(<0)
+
+    const int cx = min(max((int)(p.x * G), 0), G - 1);
+    const int cy = min(max((int)(p.y * G), 0), G - 1);
+    const int cz = min(max((int)(p.z * G), 0), G - 1);
+    const int c  = gidx3(cx, cy, cz, G, G, periodic);
+
+    const float cnt = dispCnt[c];
+    // 혼자 있는 알갱이는 별이 될 수 없다. 분산도 못 재고(이웃이 없다) 질량도 하나뿐이다.
+    if (cnt < 2.f) return;
+
+    // 방향별 분산의 평균. 셋을 더해 셋으로 나누는 대신 개수로만 나누면 3σ² 가 되므로
+    // 그만큼 k_J 에 흡수시킨다 — 나눗셈 하나를 아낀다.
+    const float s2 = (dispX[c] + dispY[c] + dispZ[c]) / cnt;
+
+    // ρ > k_J · σ². σ² 가 0 에 가까우면(잘 식은 자리) 문턱이 0 으로 내려가는데,
+    // 그때는 cnt >= 2 조건이 바닥 노릇을 한다.
+    if (cnt > kJeans * s2) {
+        p.w = cnt;                       // 별 질량 = 그 칸에 모인 알갱이 수
+        pos[i] = p;
+    }
+}
+
+// 별이 몇 개인지 센다. `starCount()` 가 불릴 때만 돈다 — 매 스텝 세면 그 자체가 비용이다.
+//
+// 블록 안에서 모으고 블록마다 한 번만 전역에 더한다(kCountAlive 와 같은 수법).
+__global__ void kCountStars(const float4* pos, int n, int* out) {
+    __shared__ int s;
+    if (threadIdx.x == 0) s = 0;
+    __syncthreads();
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n && pos[i].x >= 0.f && pos[i].w > 0.f) atomicAdd(&s, 1);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(out, s);
 }
 
 // 살아 있는 알갱이를 센다.
@@ -2067,6 +2138,15 @@ void Sim::Impl::doCooling(float dt) {
                                          wantPressure ? dispCnt : nullptr);
     std::swap(vel, velTmp);
     CK(cudaGetLastError());
+
+    // 별 판정. **방금 갱신한 분산을 그대로 읽으므로 이웃을 다시 훑지 않는다** — O(N) 이다.
+    // 압력이 꺼져 있으면 σ² 가 없어 Jeans 조건을 세울 수 없으므로 함께 켜져 있을 때만 돈다.
+    if (wantPressure && cfg.starFormationEnabled) {
+        kStarForm<<<(allocN + 255) / 256, 256>>>(pos, allocN, G, periodic() ? 1 : 0,
+                                                 dispX, dispY, dispZ, dispCnt,
+                                                 cfg.starJeansK);
+        CK(cudaGetLastError());
+    }
 }
 
 // 한 칸에 중력이 접촉을 이길 만큼 쌓이면 그 자리가 무너져 블랙홀이 된다.
@@ -2487,7 +2567,17 @@ int Sim::activeCount() const {
     if (d.aliveShown >= 0 && d.aliveShown <= d.active) return d.aliveShown;
     return d.active;
 }
-int Sim::starCount() const { return 0; }
+int Sim::starCount() const {
+    Impl& d = *impl_;
+    if (g_failed || d.allocN <= 0) return 0;
+    // 세는 커널을 여기서만 돌린다 — 매 스텝 세면 그 자체가 비용이고, 이 값은
+    // 화면·상태 표시에만 쓰여 그때그때 재면 충분하다.
+    CK(cudaMemset(d.redI, 0, sizeof(int)));
+    kCountStars<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.allocN, d.redI);
+    int h = 0;
+    CK(cudaMemcpy(&h, d.redI, sizeof(int), cudaMemcpyDeviceToHost));
+    return h;
+}
 BlackHoleState Sim::blackHole() const { return impl_->heaviest(); }
 int Sim::blackHoleCount() const { return impl_->bhCount; }
 BlackHoleState Sim::blackHoleAt(int i) const {

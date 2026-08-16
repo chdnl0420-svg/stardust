@@ -138,8 +138,21 @@ struct SimConfig {
     bool  coolingEnabled       = true;
     float coolingRate          = 0.25f;
     bool  starFormationEnabled = false;
-    float starDensityThreshold = 70.0f;   // 이 밀도를 넘고
-    float starTempThreshold    = 0.05f;   // 이 온도보다 차가우면 별이 된다
+    // **Jeans 상수** — 별이 되는 문턱은 이 하나가 정한다.
+    //
+    //   ρ > starJeansK · σ²      (ρ = 그 칸의 알갱이 수, σ² = 그 칸의 속도 분산)
+    //
+    // 실제 진스 조건 `M_J = k·σ³/√ρ` 를 격자(칸 부피 고정)에서 정리한 형태다.
+    // **차가우면 낮은 밀도에서도 뭉치고, 뜨거우면 더 빽빽해야 한다.**
+    //
+    // 이 값의 눈금은 「별이 전체의 몇 %가 되는가」로 잡는다 — 크게 하면 문턱이 높아져
+    // 별이 적어지고, 작게 하면 많아진다. 압력이 켜져 있어야 σ² 가 재어지므로
+    // 별 형성은 압력을 함께 켠 상태에서만 돈다.
+    float starJeansK           = 20000.0f;
+    // 아래 둘은 Jeans 이전의 방식(밀도 문턱 + 온도 문턱)이 쓰던 값이다. 코어는 더 이상
+    // 읽지 않지만 저장 파일 호환을 위해 자리만 남긴다.
+    float starDensityThreshold = 70.0f;
+    float starTempThreshold    = 0.05f;
 
     bool  expansionEnabled     = false;  // 주기 경계에서만 물리적 의미가 있다
     float hubble               = 0.3f;

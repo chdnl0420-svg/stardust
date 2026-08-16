@@ -150,7 +150,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "particleCount=%d\ngridSize=%d\n"
         "boundary=%s\nlaw=%s\npreset=%s\n"
         "gravity=%.4f\nsofteningCells=%.3f\ntimeScale=%.3f\nsortInterval=%d\n"
-        "pressure=%d\npressureK=%.4f\ngamma=%.3f\n"
+        "pressure=%d\npressureK=%.4f\ngamma=%.3f\nstarJeansK=%.1f\n"
         "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
         // simYears 는 simTime 을 천문 시간으로 옮긴 값이다(kYearsPerSimUnit).
         // 별의 나이·수명을 밖에서 확인하려면 무차원 시뮬 시간만으로는 안 된다.
@@ -183,7 +183,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.law == GravityLaw::InverseSquare ? "inverse_square" : "inverse_r",
         presetSlug(app.cfg.preset),
         app.cfg.gravity, app.cfg.softeningCells, app.cfg.timeScale, app.cfg.sortInterval,
-        app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.gamma,
+        app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.gamma, app.cfg.starJeansK,
         app.cfg.temperatureEnabled ? 1 : 0, app.cfg.coolingEnabled ? 1 : 0,
         app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
         app.running ? 1 : 0, app.sim.simTime(), app.sim.simTime() * kYearsPerSimUnit,
@@ -313,6 +313,10 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "sortInterval"))   app.cfg.sortInterval   = clampI(getInt(kv, "sortInterval", app.cfg.sortInterval), 1, 120);
         if (has(kv, "pressure"))       app.cfg.pressureEnabled = getInt(kv, "pressure", 1) != 0;
         if (has(kv, "pressureK"))      app.cfg.pressureK      = clampF(getFloat(kv, "pressureK", app.cfg.pressureK), 0.0f, 2.0f, app.cfg.pressureK);
+        // Jeans 상수 — 별 비율을 5% 안팎으로 맞추려면 밖에서 돌려 볼 수 있어야 한다.
+        // 상한을 크게 잡는다: σ² 가 잘 식은 자리에서 0.0002 까지 내려가므로 문턱을 올리려면
+        // 그만큼 큰 수가 필요하다.
+        if (has(kv, "starJeansK"))     app.cfg.starJeansK     = clampF(getFloat(kv, "starJeansK", app.cfg.starJeansK), 0.0f, 1.0e7f, app.cfg.starJeansK);
         if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
         if (has(kv, "temperature"))    app.cfg.temperatureEnabled = getInt(kv, "temperature", 1) != 0;
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;
