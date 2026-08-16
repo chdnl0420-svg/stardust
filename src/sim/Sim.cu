@@ -1301,7 +1301,7 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
                          float kickSpeed, unsigned seed,
                          float* ashGrid, int G, int periodic, float ashYield,
                          float4* bhCand, int* bhCandN, int* bhBlocked, int bhSlots,
-                         float bhRatio) {
+                         float bhRatio, float windRate) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -1333,7 +1333,31 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
     v.w += dt;
     // 질량이 클수록 수명이 급격히 짧다. powf 가 비싸 보이지만 별인 알갱이만 지나므로
     // 실제로 도는 수는 전체의 일부다.
-    const float ratio = fmaxf(p.w / sunMass, 1e-3f);
+    float ratio = fmaxf(p.w / sunMass, 1e-3f);
+
+    // ── 별풍 — **별은 죽을 때만 질량을 돌려주는 게 아니다** ──────────────────
+    //
+    // 태양도 초당 100만 톤을 잃고, O형 별은 **수명 동안 절반까지** 잃는다. 그 바람이
+    // 실제 은하에서 가스를 되돌리는 큰 몫이고, 이 판에는 그것이 없어서 별이 되면 죽을
+    // 때까지 아무것도 안 돌려줬다.
+    //
+    // 잃는 속도는 밝기에 붙는다(복사압이 바깥층을 밀어낸다) — 실제 `Ṁ ∝ L^1.6` 이라
+    // 질량으로는 매우 가파르다. 여기서는 `ratio` 에 선형으로 둔다. **곱의 최댓값에 상한이
+    // 있어야 하고**(에딩턴 한계 150 에서 잘린다) 지수를 올리면 그 상한이 흐려진다.
+    //
+    // **다 날리면 가스로 돌아간다.** 실제로는 심이 남지만(그것이 백색왜성이고 수명 끝에
+    // 따로 만든다), 알갱이 하나로 심과 바깥층을 동시에 표현할 수 없다. 무거운 별일수록
+    // 빨리 가벼워지고, 가벼워지면 `T ∝ M^-2.5` 로 수명이 늘어 **최후가 바뀐다** —
+    // 블랙홀이 될 뻔한 별이 중성자별로 끝나는 것도 실제로 일어나는 일이다.
+    if (windRate > 0.f) {
+        p.w -= p.w * windRate * ratio * dt;
+        if (p.w < sunMass * 0.05f) {          // 다 날아갔다 — 사슬이 여기서도 닫힌다
+            pos[i] = make_float4(p.x, p.y, p.z, 0.f);
+            vel[i] = make_float4(v.x, v.y, v.z, 0.f);
+            return;
+        }
+        ratio = fmaxf(p.w / sunMass, 1e-3f);  // 줄어든 질량으로 수명을 다시 잰다
+    }
     const float life  = sunLifeSim * powf(ratio, -2.5f);
 
     if (v.w > life) {
@@ -3537,7 +3561,7 @@ void Sim::step() {
             d.cfg.starCollapseToBH ? d.bhCand : nullptr,
             d.cfg.starCollapseToBH ? d.bhCandN : nullptr,
             d.bhBlockedCount, kMaxBlackHoles,
-            fmaxf(d.cfg.starBHRatio, 1.0f));
+            fmaxf(d.cfg.starBHRatio, 1.0f), d.cfg.starWindRate);
         CK(cudaGetLastError());
 
         // 커널이 남긴 블랙홀 후보를 호스트가 실제로 만든다.
