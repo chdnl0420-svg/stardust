@@ -2025,7 +2025,11 @@ void Sim::Impl::doCooling(float dt) {
     // 여덟 스텝에 한 번 하고 dt 를 그만큼 곱한다. 식히기는 여러 스텝에 걸친 평균이라
     // 결과가 같고, 값은 8분의 1이 된다. 접촉이 켜져 있으면 그쪽이 이미 매 스텝
     // 줄을 세워 두므로 얹혀 간다(공짜다).
-    const int every = cfg.contactEnabled ? 1 : 8;
+    // **압력을 쓰면 주기를 짧게 한다.** 압력은 이 격자를 매 스텝 읽는데, 여덟 스텝 묵은
+    // 기울기로 계속 밀면 **위상이 어긋난 힘이 일을 한다** — 이미 밀려난 자리를 같은 방향으로
+    // 또 밀어 매번 에너지가 들어간다(round-02 실측: 냉각 없이 40초에 온도 2.2배).
+    // 정렬 비용이 네 배가 되지만 에너지가 새는 것보다는 싸다.
+    const int every = cfg.contactEnabled ? 1 : (cfg.pressureEnabled ? 2 : 8);
     if ((stepCount % every) != 0) return;
     dt *= (float)every;
 
