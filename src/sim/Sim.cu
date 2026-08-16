@@ -1490,6 +1490,45 @@ __global__ void kCountStates(const float4* pos, const float4* vel, int n,
     else                       atomicAdd(&out[0], 1);   // 가스
 }
 
+// **분산 텐서의 교차항이 정말 무시할 만한가** — 격자를 여섯으로 늘릴지 정하는 창.
+//
+// 설계 때 「원반에서 지배적인 것은 대각 성분」이라 보고 대각 셋만 들었다. 그것은 **추정**
+// 이었고, 이 커널이 그 추정을 실측으로 바꾼다. 격자를 안 늘린다 — 칸마다 값이 필요한 게
+// 아니라 **판 전체의 비 하나**만 알면 되므로 합만 모은다.
+//
+// `kCoolCell` 과 같은 방식으로 칸 평균에서의 차를 구하되, `|dvx·dvy|` 와 `dvx²` 의 합을
+// 견준다. 절댓값을 쓰는 이유: 교차항은 부호가 섞여 그냥 더하면 **상쇄돼 0 으로 보인다.**
+// 크기가 실제로 작은 것과 부호가 섞인 것은 다르다.
+//
+// **비용**: N 스레드 × 원자 연산 셋. `starCount()` 처럼 부를 때만 돈다.
+__global__ void kCrossTerms(const float4* pos, const float4* vel, int n, int G, int periodic,
+                            const float* sumX, const float* sumY, const float* sumZ,
+                            const float* cnt, double* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+    const float4 v = vel[i];
+    if (v.w < -50.f) return;                      // 암흑물질은 이 통계에 안 든다
+    if (!isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) return;
+    const int cx = min(max((int)(p.x * G), 0), G - 1);
+    const int cy = min(max((int)(p.y * G), 0), G - 1);
+    const int cz = min(max((int)(p.z * G), 0), G - 1);
+    const int c  = gidx3(cx, cy, cz, G, G, periodic);
+    const float nc = cnt[c];
+    if (nc < 2.f) return;
+    const float inv = 1.f / nc;
+    const float dvx = sumX[c] * inv - v.x;
+    const float dvy = sumY[c] * inv - v.y;
+    const float dvz = sumZ[c] * inv - v.z;
+    atomicAdd(&out[0], (double)(fabsf(dvx * dvy) + fabsf(dvy * dvz) + fabsf(dvz * dvx)));
+    atomicAdd(&out[1], (double)(dvx * dvx + dvy * dvy + dvz * dvz));
+    atomicAdd(&out[2], 1.0);
+    // **부호를 살린 합.** 위 절댓값 합과 견주면 「크기가 작은 것」과 「부호가 섞여
+    // 상쇄되는 것」을 가를 수 있다 — 격자에 쌓으면 실제로 일어나는 것은 후자다.
+    atomicAdd(&out[3], (double)(dvx * dvy + dvy * dvz + dvz * dvx));
+}
+
 // **회전곡선** — 반지름 구간별 접선 속도의 평균. 암흑물질이 있는지 보는 창이다.
 //
 // 보이는 물질만 있으면 바깥으로 갈수록 도는 속도가 케플러처럼 `v ∝ 1/√r` 로 떨어져야 한다.
@@ -4163,6 +4202,25 @@ void Sim::rotationCurve(float* out4) const {
     double h[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     if (cudaMemcpy(h, d.redD, sizeof(double) * 8, cudaMemcpyDeviceToHost) != cudaSuccess) return;
     for (int i = 0; i < 4; ++i) out4[i] = (h[4 + i] > 0.5) ? (float)(h[i] / h[4 + i]) : 0.f;
+}
+
+// 분산 텐서의 **교차항 크기 ÷ 대각항 크기.** 0 에 가까우면 대각 셋만 들어도 된다는 뜻이고,
+// 그것이 설계 때의 추정이었다. `doCooling` 이 채운 칸별 속도 합을 그대로 읽으므로
+// 이웃을 다시 훑지 않는다 — 압력이 꺼져 있으면 그 격자가 없어 0 을 돌려준다.
+double Sim::dispCrossRatio() const {
+    Impl& d = *impl_;
+    if (g_failed || d.allocN <= 0 || !d.redD || !d.velSumX || !d.dispCnt) return 0.0;
+    if (cudaMemset(d.redD, 0, sizeof(double) * 4) != cudaSuccess) return 0.0;
+    kCrossTerms<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.allocG,
+                                                 d.periodic() ? 1 : 0,
+                                                 d.velSumX, d.velSumY, d.velSumZ,
+                                                 d.dispCnt, d.redD);
+    double h[4] = {0, 0, 0, 0};
+    if (cudaMemcpy(h, d.redD, sizeof(double) * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return 0.0;
+    // **부호를 살린 합**으로 돌려준다. 절댓값 합(h[0])은 상관 없는 등방 난류에서도
+    // 0.637 이 나오므로(E|xy|·3 ÷ E[x²+y²+z²]) 그 값만으로는 아무것도 못 가른다.
+    // 압력에 실제로 기여하는 것은 상쇄되고 남는 몫이라 이쪽을 본다.
+    return (h[1] > 1e-30) ? (h[3] / h[1]) : 0.0;
 }
 
 double Sim::bornAshMean() const {
