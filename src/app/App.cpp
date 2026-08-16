@@ -558,6 +558,18 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     // 같이 바뀌어야 한다** — 압력을 끈 채 난수만 빼면 원반을 붙잡는 것이 아무것도 없다.
     cfg.pressureEnabled = true;
 
+    // 별 형성 — **켠다(2026-08-16).**
+    //
+    // 코어 기본값이 `false` 라(`Sim.h` `starFormationEnabled`) 프리셋이 안 켜면 **앱을 열어
+    // 그냥 두었을 때 별이 하나도 안 생긴다.** 2026-08-16 실측에서 100초를 돌려도 `starCount`
+    // 가 0 이었다 — 이 판이 만든 것(별의 한살이·초신성·재 사슬·흑체 색)이 통째로 안 보인다.
+    // 스물다섯 바퀴 동안 못 봤던 것은 측정 스크립트가 매번 `starFormation=1` 을 명시해
+    // 켜고 잰 탓이다. **스크립트가 켜 주는 것은 사용자가 보는 것이 아니다.**
+    //
+    // 우주 구조 형성 장면은 예외로 둔다 — 거기서 보려는 것은 격자 규모의 필라멘트이지
+    // 개별 별이 아니고, 별이 되면 그 알갱이는 더 안 뭉쳐 구조가 흐려진다.
+    cfg.starFormationEnabled = (preset != Preset::CosmicWeb);
+
     // 팽창 — 주기 경계에서만 물리적 의미가 있고, 켠 상태와 끈 상태를 비교하는 것이 목적이라
     //        프리셋 전환 시에는 항상 꺼 두고 사용자가 직접 켜게 한다.
     cfg.expansionEnabled = false;
