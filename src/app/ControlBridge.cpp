@@ -183,7 +183,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "contact=%d\ncontactStiffness=%.0f\ncontactDamping=%.3f\n"
         // 자동 업데이트 상태. version 은 지금 도는 빌드, latest 는 저장소의 최신이다.
         "version=%s\nupdateChecked=%d\nupdateAvailable=%d\nlatestVersion=%s\nupdateError=%s\n"
-        "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
+        "zoom=%.4f\npanX=%.4f\npanY=%.4f\nkeepCenterOfMass=%d\n"
         "recording=%d\nrecordedFrames=%d\n"
         "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
         // 아직 소비되지 않은 예약 스텝. 밖에서 "요청한 스텝이 다 돌았는지"를 알 유일한 신호다 —
@@ -235,7 +235,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.contactEnabled ? 1 : 0, app.cfg.contactStiffness, app.cfg.contactDamping,
         STARDUST_VERSION, up.checked ? 1 : 0, up.available ? 1 : 0,
         up.latest.c_str(), up.error.c_str(),
-        app.zoom, app.panX, app.panY,
+        app.zoom, app.panX, app.panY, app.ui.keepCenterOfMass ? 1 : 0,
         app.recording ? 1 : 0, app.recordedFrames,
         t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
         t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame, pendingSteps_,
@@ -445,6 +445,12 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "zoom")) app.zoom = clampF(getFloat(kv, "zoom", app.zoom), 0.05f, 64.0f, app.zoom);
         if (has(kv, "panX")) app.panX = clampF(getFloat(kv, "panX", app.panX), -8.0f, 8.0f, app.panX);
         if (has(kv, "panY")) app.panY = clampF(getFloat(kv, "panY", app.panY), -8.0f, 8.0f, app.panY);
+        // 무게중심 따라가기. **이 판의 은하는 실제로 판 모서리까지 흘러간다**(round-19·22)
+        // — 켜지 않으면 `ClampPan` 이 pan 을 판 안쪽으로 막아 카메라가 은하를 놓치고,
+        // 그러면 화면으로 확인해야 하는 항목을 하나도 못 본다. 설정 창 체크박스로만
+        // 켤 수 있어 자동 검증에서 손이 닿지 않았다.
+        if (has(kv, "keepCenterOfMass"))
+            app.ui.keepCenterOfMass = getInt(kv, "keepCenterOfMass", 0) != 0;
         // 보는 방향(라디안). 창을 오른쪽 단추로 끌면 바뀌는 값과 같은 것이라,
         // 밖에서 각도를 지정해 여러 방향의 그림을 견줄 수 있다.
         if (has(kv, "camYaw"))
