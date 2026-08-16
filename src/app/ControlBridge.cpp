@@ -366,6 +366,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         // 밀도 그림과 대비가 통째로 다르다.
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);
         if (has(kv, "ashCoolK"))       app.cfg.ashCoolK       = clampF(getFloat(kv, "ashCoolK", app.cfg.ashCoolK), 0.0f, 10.0f, app.cfg.ashCoolK);
+        if (has(kv, "nebulaK"))        app.cfg.nebulaK        = clampF(getFloat(kv, "nebulaK", app.cfg.nebulaK), 0.0f, 5.0f, app.cfg.nebulaK);
         if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
         if (has(kv, "temperature"))    app.cfg.temperatureEnabled = getInt(kv, "temperature", 1) != 0;
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;

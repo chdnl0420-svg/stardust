@@ -1611,6 +1611,49 @@ __global__ void kScatterLight(const float4* pos, int n, int G, float* out, ViewR
     }
 }
 
+// 별빛을 퍼뜨린다 — **성운이 별빛을 받아 빛나는 것을 만드는 자리다.**
+//
+// 실제 반사성운은 별빛이 먼지에 산란되어 보인다. 그 빛이 어디까지 가느냐는 원래
+// 복사 전달을 풀어야 하지만, **화면에서 보이는 것은 「별 주변이 부옇게 밝다」 하나뿐이다.**
+// 그래서 별빛 격자를 흐리게 만든 것으로 갈음한다.
+//
+// **비용**: G² 스레드 × (2R+1) 읽기. 가로·세로로 나눠 두 번 돌리므로 R=6 이면
+// 128² × 13 × 2 = 43만 회다. 2차원으로 한 번에 하면 128² × 169 = 277만 이라 여섯 배다.
+//
+// 설계(3.2)는 빛 확산에 별도 3D 버퍼와 FFT 를 잡았는데, **화면 격자에서 2D 로 흐리면
+// 그 둘이 다 필요 없다.** 시선 방향으로 어차피 겹쳐 보이므로 3D 로 퍼뜨린 뒤 투영하는
+// 것과 눈에 보이는 결과가 거의 같다.
+__global__ void kBlurLine(const float* src, float* dst, int G, int radius, int horizontal) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= G || y >= G) return;
+
+    float sum = 0.f, wsum = 0.f;
+    for (int k = -radius; k <= radius; ++k) {
+        const int sx = horizontal ? min(max(x + k, 0), G - 1) : x;
+        const int sy = horizontal ? y : min(max(y + k, 0), G - 1);
+        // 가우시안에 가깝게 — 가운데가 진하고 가장자리가 옅어야 「부옇게」 보인다.
+        const float w = __expf(-(float)(k * k) / (float)(radius * radius) * 2.0f);
+        sum  += src[sy * G + sx] * w;
+        wsum += w;
+    }
+    dst[y * G + x] = (wsum > 0.f) ? sum / wsum : 0.f;
+}
+
+// 퍼진 별빛을 가스에 입힌다.
+//
+//   최종 = 별빛(그대로) + 가스밀도 × 퍼진별빛 × 계수
+//
+// **가스는 스스로 안 빛나므로 곱셈이다** — 별빛이 없는 자리의 가스는 아무리 짙어도 검다.
+// 그것이 실제 반사성운의 성질이고, 그래서 같은 구름이 근처에 별이 있으면 빛나고 없으면
+// 안 보인다.
+__global__ void kAddNebula(const float* starLight, const float* spread, const float* gas,
+                           float* out, int n, float k) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = starLight[i] + gas[i] * spread[i] * k;
+}
+
 __global__ void kDivideInto(const float* num, const float* den, float* out, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -3495,6 +3538,25 @@ const float* Sim::fieldDevicePtr(Field field) {
         kScatterLight<<<(d.allocN + 255) / 256, 256>>>(
             d.pos, d.allocN, G, d.proj, rot,
             fmaxf(d.cfg.starSunMass, 1.0f), nova);
+
+        // ── 성운: 별빛을 퍼뜨려 가스에 입힌다 ─────────────────────────
+        //
+        // 화면 격자 셋을 돌려 쓴다(`proj`·`projA`·`projB`) — 새로 잡지 않는다.
+        //   1) projA ← 별빛을 가로로 흐림
+        //   2) projB ← 그것을 세로로 흐림 = **퍼진 별빛**
+        //   3) projA ← 가스 밀도(재사용, 위 값은 이미 projB 로 넘어갔다)
+        //   4) proj  ← 별빛 + 가스 × 퍼진빛
+        if (d.cfg.nebulaK > 0.f && d.projA && d.projB) {
+            const dim3 b2(16, 16), g2((G + 15) / 16, (G + 15) / 16);
+            const int radius = 6;
+            kBlurLine<<<g2, b2>>>(d.proj,  d.projA, G, radius, 1);
+            kBlurLine<<<g2, b2>>>(d.projA, d.projB, G, radius, 0);
+            // 가스 밀도는 기존 밀도 격자를 그대로 투영해 쓴다. 별도 「가스만」 격자를
+            // 만들지 않는 이유는 별이 이미 밝아 더해져도 눈에 안 띄기 때문이다.
+            kClearF<<<blocks, 256>>>(d.projA, cells);
+            kProjectXY<<<grd3(G), blk3()>>>(d.rho, d.projA, G, d.stride(), rot);
+            kAddNebula<<<blocks, 256>>>(d.proj, d.projB, d.projA, d.proj, cells, d.cfg.nebulaK);
+        }
         CK(cudaGetLastError());
         return d.proj;
     }
