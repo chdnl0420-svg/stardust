@@ -1871,6 +1871,13 @@ struct Sim::Impl {
     }
 
     cudaEvent_t evA = nullptr, evB = nullptr;
+    // 구간별 시간을 재는 이벤트. **동기화는 스텝 끝에서 한 번만 한다** —
+    // 구간마다 `cudaEventSynchronize` 를 부르면 그 자체가 GPU 를 세워, 재는 행위가
+    // 재려는 대상을 바꾼다. 찍기만 하고 마지막에 몰아서 읽는다.
+    //   ev1 중력(정렬 + scatter + 푸아송 + 격자가속도 + 압력) 끝
+    //   ev2 냉각·압력 격자 갱신 + 별 판정 끝
+    //   ev3 적분 + 블랙홀 끝
+    cudaEvent_t ev1 = nullptr, ev2 = nullptr, ev3 = nullptr;
 
     // 패딩 포함 한 변. 고립 경계는 합성곱이 반대편으로 감기지 않게 두 배로 잡는다.
     int  stride() const { return (cfg.boundary == Boundary::Isolated) ? allocG * 2 : allocG; }
@@ -2175,7 +2182,10 @@ void Sim::Impl::allocate() {
         FK(cufftPlan3d(&planC2R, S, S, S, CUFFT_C2R));
         planReady = !g_failed;
     }
-    if (!evA) { CK(cudaEventCreate(&evA)); CK(cudaEventCreate(&evB)); }
+    if (!evA) {
+        CK(cudaEventCreate(&evA)); CK(cudaEventCreate(&evB));
+        CK(cudaEventCreate(&ev1)); CK(cudaEventCreate(&ev2)); CK(cudaEventCreate(&ev3));
+    }
 }
 
 // 고립 경계용 그린함수를 미리 변환해 둔다. 격자가 바뀔 때만 다시 만든다.
@@ -2699,6 +2709,7 @@ void Sim::step() {
 
     d.computeAccel();
     d.doContact();
+    CK(cudaEventRecord(d.ev1));      // 여기까지가 중력(+압력 적용)
 
     // CFL — 한 스텝에 한 칸을 넘게 가면 격자가 그 움직임을 못 따라가 알갱이가 튄다.
     CK(cudaMemset(d.redF, 0, sizeof(float)));
@@ -2740,6 +2751,7 @@ void Sim::step() {
     // 식히는 것은 힘을 더하기 전에 한다 — 이번 스텝의 dt 로 이웃과의 무작위 운동을 걷어낸다.
     // 속도를 줄이는 쪽이라 방금 CFL 이 정한 dt 를 위태롭게 하지 않는다.
     d.doCooling(dt);
+    CK(cudaEventRecord(d.ev2));      // 여기까지가 냉각·분산 갱신·별 판정
 
     const float haloV2 = d.cfg.haloEnabled ? (d.cfg.haloSpeed * d.cfg.haloSpeed) : 0.f;
     const float haloCore2 = d.cfg.haloCore * d.cfg.haloCore;
@@ -2866,6 +2878,20 @@ void Sim::step() {
     CK(cudaEventSynchronize(d.evB));
     float ms = 0.f;
     CK(cudaEventElapsedTime(&ms, d.evA, d.evB));
+
+    // 구간별 시간. **evB 를 이미 기다렸으므로 앞의 이벤트들은 전부 끝나 있다** —
+    // 여기서 추가로 세우는 것이 없다. 어느 커널이 프레임을 먹는지 이 셋으로 갈린다.
+    {
+        float a = 0.f, b = 0.f, c = 0.f;
+        cudaEventElapsedTime(&a, d.evA, d.ev1);   // 중력(정렬·뿌리기·푸아송·격자가속도·압력)
+        cudaEventElapsedTime(&b, d.ev1, d.ev2);   // 냉각·분산 갱신·별 판정
+        cudaEventElapsedTime(&c, d.ev2, d.evB);   // 적분·블랙홀·별 나이
+        // 기존 이름을 그대로 쓴다 — 밖(HUD·status·MCP)이 이미 이 이름으로 읽고 있고,
+        // 이름을 바꾸면 그쪽을 다 고쳐야 한다. 뜻만 주석으로 못 박는다.
+        d.tm.scatterMs = a;      // = 중력 구간
+        d.tm.poissonMs = b;      // = 냉각·압력·별 구간
+        d.tm.gatherMs  = c;      // = 적분·블랙홀 구간
+    }
     d.tm.totalMs = ms;
 }
 
