@@ -178,6 +178,10 @@ std::string ControlBridge::statusBody(const App& app) const {
         "gravity=%.4f\nsofteningCells=%.3f\ntimeScale=%.3f\nsortInterval=%d\n"
         "pressure=%d\npressureK=%.4f\ngamma=%.3f\nstarJeansK=%.1f\n"
         "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
+        // **블랙홀 전환은 창이 없어 확인 불가였다(2026-08-18에 더함).** 물리 토글 일곱 중
+        // 이것 하나만 status 에 안 나와, 밖에서 켜고 껐는지 되읽을 방법이 없었다.
+        // 판이 비는지 아닌지를 가르는 스위치라 특히 확인할 값이 있다(작업 #20).
+        "starCollapseToBH=%d\n"
         // simYears 는 simTime 을 천문 시간으로 옮긴 값이다(kYearsPerSimUnit).
         // 별의 나이·수명을 밖에서 확인하려면 무차원 시뮬 시간만으로는 안 된다.
         "running=%d\nsimTime=%.5f\nsimYears=%.6g\nactiveCount=%d\nstarCount=%d\n"
@@ -259,6 +263,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.gamma, app.cfg.starJeansK,
         app.cfg.temperatureEnabled ? 1 : 0, app.cfg.coolingEnabled ? 1 : 0,
         app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
+        app.cfg.starCollapseToBH ? 1 : 0,
         app.running ? 1 : 0, app.sim.simTime(), app.sim.simTime() * kYearsPerSimUnit,
         app.sim.activeCount(), app.sim.starCount(),
         app.view.mode == RenderMode::Points ? "points" : "field",
