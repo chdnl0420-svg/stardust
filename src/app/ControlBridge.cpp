@@ -262,9 +262,14 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.running ? 1 : 0, app.sim.simTime(), app.sim.simTime() * kYearsPerSimUnit,
         app.sim.activeCount(), app.sim.starCount(),
         app.view.mode == RenderMode::Points ? "points" : "field",
+        // **`Ash` 가 빠져 있어 재 보기가 `density` 로 보고됐다(2026-08-18에 고침).**
+        // 실제로는 설정이 됐는데 이 줄이 그것을 표현하지 못해, 밖에서는 「안 먹었다」와
+        // 구분되지 않았다. 전수조사(r80)에서 `colorBy=ash` 가 FAIL 로 나온 원인이다 —
+        // 기능이 아니라 **보고하는 창이 좁았던 것**이다.
         app.view.colorBy == ColorBy::Dispersion ? "dispersion"
             : app.view.colorBy == ColorBy::Speed ? "speed"
-            : app.view.colorBy == ColorBy::Light ? "light" : "density",
+            : app.view.colorBy == ColorBy::Light ? "light"
+            : app.view.colorBy == ColorBy::Ash   ? "ash" : "density",
         app.view.cmap == ColorMap::Gray ? "gray"
             : app.view.cmap == ColorMap::Thermal ? "thermal"
             : app.view.cmap == ColorMap::Blackbody ? "blackbody" : "astro",
@@ -509,8 +514,21 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
             // **`app.look` 도 함께 바꾼다.** 설정 보드가 `ApplyLook` 을 부르면 그것이
             // `look` 을 보고 `colorBy` 를 다시 정하므로, 여기서 `colorBy` 만 바꾸면
             // 보드를 건드리는 순간 되돌아간다.
+            // **`look` 을 필요할 때만 건드린다(2026-08-18에 고침).**
+            //
+            // 전에는 `Light` 가 아니면 무조건 `Density` 로 밀었다. 그래서 `colorBy=ash` 를
+            // 보내면 위 파서가 제대로 `ColorBy::Ash` 를 넣는데도 `look` 이 `Density` 가 되고,
+            // `ApplyLook` 이 다음 프레임에 `colorBy` 를 밀도로 되돌렸다 — **재 보기가 밖에서
+            // 아예 안 켜졌다.** 전수조사(r80)에서 잡았다.
+            //
+            // `ColorBy` 는 다섯 갈래인데 `Look` 은 셋(Density·Dispersion·Light)이라
+            // `Speed`·`Ash` 는 짝이 없다. 짝 없는 것을 `Density` 로 미는 것이 잘못이었다 —
+            // `ApplyLook` 은 `look == Light` 일 때만 `colorBy` 를 정하므로(그 함수 주석에
+            // 「여기서 `app.look` 을 덮어쓰지 않는다」고 적혀 있다) **`look` 을 그대로 두면
+            // `colorBy` 가 유지된다.** 빛에서 벗어날 때만 밀도로 내린다.
             const bool wantLight = (app.view.colorBy == ColorBy::Light);
-            app.look = wantLight ? App::Look::Light : App::Look::Density;
+            if (wantLight)                              app.look = App::Look::Light;
+            else if (app.look == App::Look::Light)      app.look = App::Look::Density;
             // **컬러맵도 함께 바꾼다.** `ApplyLook` 이 이 짝을 맞추지만 그것은 시작 시
             // 한 번만 불린다 — 여기서 안 바꾸면 빛으로 보면서 밀도용 색을 쓰게 되고,
             // 그러면 「무거운 별은 푸르고 가벼운 별은 붉다」가 화면에 안 나온다.
