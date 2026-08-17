@@ -1,0 +1,466 @@
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*C:\symbols*https://msdl.microsoft.com/download/symbols
+Opened log file 'D:\Project\Nbody\tools\dumps\081526-11968-01.txt'
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.469 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 46
+
+Microsoft (R) Windows Debugger Version 10.0.29617.1000 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\WINDOWS\Minidump\081526-11968-01.dmp]
+Mini Kernel Dump File: Only registers and stack trace are available
+
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+WARNING: Empty Dump Data Extension block was ignored
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*C:\symbols*https://msdl.microsoft.com/download/symbols
+Symbol search path is: srv*C:\symbols*https://msdl.microsoft.com/download/symbols
+Executable search path is: 
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\atlmfc.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\concurrency.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\cpp_rest.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Kernel.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\ObjectiveC.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\stl.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Usb4Kd.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Data.Json.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Media.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\windows.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\winrt.natvis'
+Windows 10 Kernel Version 26100 MP (20 procs) Free x64
+Product: WinNt, suite: TerminalServer SingleUserTS
+Kernel base = 0xfffff807`ee600000 PsLoadedModuleList = 0xfffff807`ef4f5470
+Debug session time: Sat Aug 15 19:07:58.514 2026 (UTC + 9:00)
+System Uptime: 0 days 3:24:04.292
+Loading Kernel Symbols
+...............................................................
+................................................................
+................................................................
+................................................................
+.
+Loading User Symbols
+PEB is paged out (Peb.Ldr = 00000051`ddb6d018).  Type ".hh dbgerr001" for details
+Loading unloaded module list
+..............
+For analysis of this file, run !analyze -v
+1: kd> !analyze -v; q
+Loading Kernel Symbols
+...............................................................
+................................................................
+................................................................
+................................................................
+.
+Loading User Symbols
+PEB is paged out (Peb.Ldr = 00000051`ddb6d018).  Type ".hh dbgerr001" for details
+Loading unloaded module list
+..............
+*******************************************************************************
+*                                                                             *
+*                        Bugcheck Analysis                                    *
+*                                                                             *
+*******************************************************************************
+
+KERNEL_SECURITY_CHECK_FAILURE (139)
+A kernel component has corrupted a critical data structure.  The corruption
+could potentially allow a malicious user to gain control of this machine.
+Arguments:
+Arg1: 0000000000000003, A LIST_ENTRY has been corrupted (i.e. double remove).
+Arg2: ffffd0889cdb1fb0, Address of the trap frame for the exception that caused the BugCheck
+Arg3: ffffd0889cdb1f08, Address of the exception record for the exception that caused the BugCheck
+Arg4: 0000000000000000, Reserved
+
+Debugging Details:
+------------------
+
+*** WARNING: Unable to verify timestamp for nvlddmkm.sys
+
+KEY_VALUES_STRING: 1
+
+    Key  : Analysis.CPU.mSec
+    Value: 1031
+
+    Key  : Analysis.Elapsed.mSec
+    Value: 4183
+
+    Key  : Analysis.IO.Other.Mb
+    Value: 0
+
+    Key  : Analysis.IO.Read.Mb
+    Value: 1
+
+    Key  : Analysis.IO.Write.Mb
+    Value: 0
+
+    Key  : Analysis.Init.CPU.mSec
+    Value: 328
+
+    Key  : Analysis.Init.Elapsed.mSec
+    Value: 1102
+
+    Key  : Analysis.Memory.CommitPeak.Mb
+    Value: 83
+
+    Key  : Analysis.Version.DbgEng
+    Value: 10.0.29617.1000
+
+    Key  : Analysis.Version.Description
+    Value: 10.2604.29.1 amd64fre
+
+    Key  : Analysis.Version.Ext
+    Value: 1.2604.29.1
+
+    Key  : Bugcheck.Code.LegacyAPI
+    Value: 0x139
+
+    Key  : Bugcheck.Code.TargetModel
+    Value: 0x139
+
+    Key  : Dump.Attributes.AsUlong
+    Value: 0x21808
+
+    Key  : Dump.Attributes.DiagDataWrittenToHeader
+    Value: 1
+
+    Key  : Dump.Attributes.ErrorCode
+    Value: 0x0
+
+    Key  : Dump.Attributes.KernelGeneratedTriageDump
+    Value: 1
+
+    Key  : Dump.Attributes.LastLine
+    Value: Dump completed successfully.
+
+    Key  : Dump.Attributes.ProgressPercentage
+    Value: 0
+
+    Key  : FailFast.Name
+    Value: CORRUPT_LIST_ENTRY
+
+    Key  : FailFast.Type
+    Value: 3
+
+    Key  : Failure.Bucket
+    Value: 0x139_3_CORRUPT_LIST_ENTRY_nvlddmkm!unknown_function
+
+    Key  : Failure.Exception.Code
+    Value: 0xc0000409
+
+    Key  : Failure.Exception.Record
+    Value: 0xffffd0889cdb1f08
+
+    Key  : Failure.Hash
+    Value: {313b10a2-72d5-e118-5040-eef20d8afced}
+
+    Key  : Hypervisor.Enlightenments.ValueHex
+    Value: 0x7417df84
+
+    Key  : Hypervisor.Flags.AnyHypervisorPresent
+    Value: 1
+
+    Key  : Hypervisor.Flags.ApicEnlightened
+    Value: 0
+
+    Key  : Hypervisor.Flags.ApicVirtualizationAvailable
+    Value: 1
+
+    Key  : Hypervisor.Flags.AsyncMemoryHint
+    Value: 0
+
+    Key  : Hypervisor.Flags.CoreSchedulerRequested
+    Value: 0
+
+    Key  : Hypervisor.Flags.CpuManager
+    Value: 1
+
+    Key  : Hypervisor.Flags.DeprecateAutoEoi
+    Value: 1
+
+    Key  : Hypervisor.Flags.DynamicCpuDisabled
+    Value: 1
+
+    Key  : Hypervisor.Flags.Epf
+    Value: 0
+
+    Key  : Hypervisor.Flags.ExtendedProcessorMasks
+    Value: 1
+
+    Key  : Hypervisor.Flags.HardwareMbecAvailable
+    Value: 1
+
+    Key  : Hypervisor.Flags.MaxBankNumber
+    Value: 0
+
+    Key  : Hypervisor.Flags.MemoryZeroingControl
+    Value: 0
+
+    Key  : Hypervisor.Flags.NoExtendedRangeFlush
+    Value: 0
+
+    Key  : Hypervisor.Flags.NoNonArchCoreSharing
+    Value: 1
+
+    Key  : Hypervisor.Flags.Phase0InitDone
+    Value: 1
+
+    Key  : Hypervisor.Flags.PowerSchedulerQos
+    Value: 0
+
+    Key  : Hypervisor.Flags.RootScheduler
+    Value: 0
+
+    Key  : Hypervisor.Flags.SynicAvailable
+    Value: 1
+
+    Key  : Hypervisor.Flags.UseQpcBias
+    Value: 0
+
+    Key  : Hypervisor.Flags.Value
+    Value: 55185662
+
+    Key  : Hypervisor.Flags.ValueHex
+    Value: 0x34a10fe
+
+    Key  : Hypervisor.Flags.VpAssistPage
+    Value: 1
+
+    Key  : Hypervisor.Flags.VsmAvailable
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.AccessStats
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.CrashdumpEnlightened
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.CreateVirtualProcessor
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.DisableHyperthreading
+    Value: 0
+
+    Key  : Hypervisor.RootFlags.HostTimelineSync
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.HypervisorDebuggingEnabled
+    Value: 0
+
+    Key  : Hypervisor.RootFlags.IsHyperV
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.LivedumpEnlightened
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.MapDeviceInterrupt
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.MceEnlightened
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.Nested
+    Value: 0
+
+    Key  : Hypervisor.RootFlags.StartLogicalProcessor
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.Value
+    Value: 1015
+
+    Key  : Hypervisor.RootFlags.ValueHex
+    Value: 0x3f7
+
+    Key  : WER.System.BIOSRevision
+    Value: 5.32.0.0
+
+
+BUGCHECK_CODE:  139
+
+BUGCHECK_P1: 3
+
+BUGCHECK_P2: ffffd0889cdb1fb0
+
+BUGCHECK_P3: ffffd0889cdb1f08
+
+BUGCHECK_P4: 0
+
+FILE_IN_CAB:  081526-11968-01.dmp
+
+TAG_NOT_DEFINED_202b:  *** Unknown TAG in analysis list 202b
+
+
+DUMP_FILE_ATTRIBUTES: 0x21808
+  Kernel Generated Triage Dump
+
+FAULTING_THREAD:  ffff938874488080
+
+TRAP_FRAME:  ffffd0889cdb1fb0 -- (.trap 0xffffd0889cdb1fb0)
+.trap 0xffffd0889cdb1fb0
+NOTE: The trap frame does not contain all registers.
+Some register values may be zeroed or incorrect.
+rax=ffff9388711f2ee8 rbx=0000000000000000 rcx=0000000000000003
+rdx=0000000000000000 rsi=0000000000000000 rdi=0000000000000000
+rip=fffff807a4c7dcba rsp=ffffd0889cdb2140 rbp=ffff93885efed010
+ r8=ffff938874a9c338  r9=ffff9388744881c0 r10=1fffff00f47f1596
+r11=5405010155500000 r12=0000000000000000 r13=0000000000000000
+r14=0000000000000000 r15=0000000000000000
+iopl=0         nv up ei pl nz ac pe cy
+nvlddmkm+0xcfdcba:
+fffff807`a4c7dcba ??              ???
+.trap
+Resetting default scope
+
+EXCEPTION_RECORD:  ffffd0889cdb1f08 -- (.exr 0xffffd0889cdb1f08)
+.exr 0xffffd0889cdb1f08
+ExceptionAddress: fffff807a4c7dcba (nvlddmkm+0x0000000000cfdcba)
+   ExceptionCode: c0000409 (Security check failure or stack buffer overrun)
+  ExceptionFlags: 00000001
+NumberParameters: 1
+   Parameter[0]: 0000000000000003
+Subcode: 0x3 FAST_FAIL_CORRUPT_LIST_ENTRY 
+
+BLACKBOXBSD: 1 (!blackboxbsd)
+
+
+BLACKBOXNTFS: 1 (!blackboxntfs)
+
+
+BLACKBOXWINLOGON: 1 (!blackboxwinlogon) (!blackboxwinlogonnotify)
+
+
+CUSTOMER_CRASH_COUNT:  1
+
+PROCESS_NAME:  Stardust.exe
+
+ERROR_CODE: (NTSTATUS) 0xc0000409 -                                                                     .                                                                                       .
+
+EXCEPTION_CODE_STR:  c0000409
+
+EXCEPTION_PARAMETER1:  0000000000000003
+
+EXCEPTION_STR:  0xc0000409
+
+STACK_TEXT:  
+ffffd088`9cdb1c88 fffff807`eecc04e9     : 00000000`00000139 00000000`00000003 ffffd088`9cdb1fb0 ffffd088`9cdb1f08 : nt!KeBugCheckEx
+ffffd088`9cdb1c90 fffff807`eecc0af2     : 00000000`ff030000 fffff807`a41ead43 00000000`c1d00002 00000000`00000000 : nt!KiBugCheckDispatch+0x69
+ffffd088`9cdb1dd0 fffff807`eecbe728     : ffffe789`00001000 00000000`00000002 00000000`00000001 00000000`00000002 : nt!KiFastFailDispatch+0xb2
+ffffd088`9cdb1fb0 fffff807`a4c7dcba     : 00000000`00000000 ffff9388`711f2ee8 ffff9388`5efed010 ffff9388`8566b920 : nt!KiRaiseSecurityCheckFailure+0x368
+ffffd088`9cdb2140 00000000`00000000     : ffff9388`711f2ee8 ffff9388`5efed010 ffff9388`8566b920 ffff9388`71261aa0 : nvlddmkm+0xcfdcba
+
+
+SYMBOL_NAME:  nvlddmkm+cfdcba
+
+MODULE_NAME: nvlddmkm
+
+IMAGE_NAME:  nvlddmkm.sys
+
+STACK_COMMAND: .process /r /p 0xffff938874505080; .thread /r /p 0xffff938874488080 ; kb
+
+BUCKET_ID_FUNC_OFFSET:  cfdcba
+
+FAILURE_BUCKET_ID:  0x139_3_CORRUPT_LIST_ENTRY_nvlddmkm!unknown_function
+
+OSPLATFORM_TYPE:  x64
+
+OSNAME:  Windows 10
+
+FAILURE_ID_HASH:  {313b10a2-72d5-e118-5040-eef20d8afced}
+
+Followup:     MachineOwner
+---------
+
+quit:
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Kernel.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Usb4Kd.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2606.22001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\winrt.natvis'
