@@ -373,7 +373,17 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "gridSize")) {
             int g = getInt(kv, "gridSize", app.cfg.gridSize);
             // 격자는 2의 거듭제곱만 쓴다(주기 wrap 을 비트 마스크로 처리하기 때문).
-            if (g == 1024 || g == 2048 || g == 4096) app.cfg.gridSize = g;
+            //
+            // **2D 시절 값(1024·2048·4096)만 받고 있었다 — 3D 로 옮긴 뒤 안 고쳤다.**
+            //
+            // 그래서 둘이 동시에 깨져 있었다. 32·64·128 을 보내면 **조용히 무시**돼
+            // 격자를 못 바꿨고(2026-08-17 실측: 세 값을 보냈는데 전부 128 로 돌았다),
+            // 2048 을 보내면 **그대로 들어갔다** — 3D 에서 2048³ 은 85억 칸이다.
+            // 2026-08-14 에 회귀 테스트가 그런 값을 요청했다가 시스템 메모리가 통째로
+            // 치솟은 그 경로가 아직 열려 있었다(CLAUDE.md 3번).
+            //
+            // 최대는 256 이다 — 그 위는 알갱이가 하나도 없어도 한 스텝이 25 ms 다.
+            if (g == 32 || g == 64 || g == 128 || g == 256) app.cfg.gridSize = g;
         }
         if (has(kv, "boundary"))
             app.cfg.boundary = (kv["boundary"] == "periodic") ? Boundary::Periodic
