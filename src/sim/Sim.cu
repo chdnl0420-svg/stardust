@@ -3480,7 +3480,19 @@ void Sim::step() {
     float vmax = 0.f;
     CK(cudaMemcpy(&vmax, d.redF, sizeof(float), cudaMemcpyDeviceToHost));
     const float cell = 1.0f / (float)d.allocG;
-    float dt = 0.0016f * d.cfg.timeScale;
+    // **배속을 1 위로는 `dt` 에 안 싣는다(2026-08-17에 고친 이중 적용).**
+    //
+    // `App::tick` 이 이미 배속만큼 **스텝을 여러 번** 돌린다(`reps`). 그런데 여기서 `dt`
+    // 에도 곱하고 있어서 **둘이 곱해졌다** — 배속 2.8 이면 `dt` 2.8배 × 스텝 3번 =
+    // **8.4배**로 흘렀다.
+    //
+    // 더 나쁜 것은 `dt` 를 늘린 쪽이다. `App::tick` 의 주석이 「시간 간격을 늘려서는 못
+    // 낸다(CFL 안정성 한계)」고 적어 두었는데 그 금지가 여기서 깨지고 있었다. 실측에서
+    // 최고 속도가 **광속의 82%** 까지 갔고, 우주가 「굉장히 역동적으로」 보인다는 지적이
+    // 거기서 나왔다.
+    //
+    // 1 아래로는 그대로 곱한다 — 느리게 볼 때는 스텝 수를 못 줄이므로 `dt` 로 낮춘다.
+    float dt = 0.0016f * fminf(d.cfg.timeScale, 1.0f);
     const float dtMax = (vmax > 1e-6f) ? (0.8f * cell / vmax) : dt;
     if (dt > dtMax) dt = dtMax;
 
