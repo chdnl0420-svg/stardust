@@ -284,7 +284,7 @@ struct BHDisk {
 __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* temp,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
-                             float sizePx, float sunMass, float pulsePhase, BHDisk bh,
+                             float sizePx, float sunMass, float sunLife, BHDisk bh,
                              const float* spread, const float* spreadT, int gridG,
                              float nebulaK, const float* gasCol, float dustTau,
                              const float* ashProj) {
@@ -386,7 +386,30 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
                 L  = 0.18f;
             }
             else if (vv.w < 0.f) { TK = 15000.f;   L *= 1e-3f; }   // 백색왜성 — 반지름이 태양의 100분의 1
-            else                   TK = 5800.f * __fsqrt_rn(ratio);
+            else {
+                // **적색거성 — 빠져 있던 현실이고, 실제 은하가 노란 이유다.**
+                //
+                // 2026-08-17 실측: 화면의 따뜻한 색이 6%, 푸른 색이 40% 로 실제와
+                // 반대였다. IMF 는 이미 들어 있어 별의 절반이 태양 0.17배 이하인데,
+                // 그 별들은 `L ∝ M^3.5` 라 태양의 0.3% 라 화면에 안 잡힌다. 그래서
+                // 남는 것이 무겁고 푸른 별뿐이었다.
+                //
+                // 실제 은하 빛의 큰 몫은 **주계열을 마치고 부푼 별**에서 온다. 수소가
+                // 다하면 바깥층이 100배로 부풀고 표면이 3500K 로 식는데, 면적이
+                // 10000배라 `L = 4πR²σT⁴` 로 태양의 1340배가 된다 — 식었는데 훨씬
+                // 밝다. 반지름이 질량을 약하게 따라가므로 `ratio` 를 한 번 곱한다.
+                //
+                // 이 단계는 수명의 마지막 10% 다(관측도 그 정도다). 저질량 별은 수명이
+                // 워낙 길어 여기 못 오고, 그래서 붉은 왜성은 여전히 안 보인다 —
+                // 실제 하늘도 그렇다.
+                const float life = sunLife * __powf(ratio, -2.5f);
+                if (life > 0.f && vv.w > life * 0.9f) {
+                    TK = 3500.f;
+                    L  = 1340.f * ratio;
+                } else {
+                    TK = 5800.f * __fsqrt_rn(ratio);
+                }
+            }
         } else if (p.w < 0.f) {
             L = 1.0e4f; TK = 30000.f;                              // 폭발 중
         } else {
@@ -973,8 +996,9 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
                     app.zoom, app.panX, app.panY, app.ui.pointSizePx,
                     fmaxf(app.sim.config().starSunMass, 1.0f),
-                    // 펄서 위상. 90 프레임이 한 바퀴라 60fps 에서 약 1.5초 주기다.
-                    (float)(drawTick_ % 90u) * (6.2831853f / 90.0f), bhDisk,
+                    // 태양급 별의 수명. 적색거성 판정에 쓴다 — `kStarAge` 가 쓰는 값과
+                    // 같아야 화면과 물리가 같은 순간을 가리킨다.
+                    fmaxf(app.sim.config().starSunLifeSim, 1e-3f), bhDisk,
                     nebSpread, nebSpreadT, gridG, nebK, gasCol, dustTau, ashProj);
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
