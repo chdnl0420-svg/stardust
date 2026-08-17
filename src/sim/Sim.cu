@@ -1190,11 +1190,70 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
             // 비용: 별이 되는 순간에만 도는 원자 연산 둘. 태어나는 수는 한 스텝에 수천이라
             // 셀 필요도 없는 양이다.
             if (bornStat && ashGrid) {
+                const float ashHere = ashGrid[c];
                 atomicAdd(&bornStat[0], 1.0);
-                atomicAdd(&bornStat[1], (double)ashGrid[c]);
+                atomicAdd(&bornStat[1], (double)ashHere);
+
+                // **껍질인가 중심인가** — 스펙의 확인 조건에 「폭발 지점 둘레에 **껍질
+                // 모양**으로」가 있는데 그것을 여태 못 봤다. 폭발 지점을 따로 기억하지
+                // 않고도 잴 수 있다: **껍질에서 태어난 별은 자기 칸보다 이웃 칸의 재가
+                // 더 진하다**(재의 봉우리가 옆에 있다는 뜻). 중심에서 태어났다면 자기
+                // 칸이 봉우리다.
+                //
+                // 이웃 여섯 칸만 본다(면으로 붙은 것). 스물여섯을 다 보면 네 배 비싸고,
+                // 봉우리가 어느 쪽인지만 알면 되므로 여섯이면 갈린다.
+                const int nb[6][3] = {{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
+                float ashMax = ashHere;
+                for (int k = 0; k < 6; ++k) {
+                    const int nx = cx + nb[k][0], ny = cy + nb[k][1], nz = cz + nb[k][2];
+                    if (nx < 0 || ny < 0 || nz < 0 || nx >= G || ny >= G || nz >= G) continue;
+                    const float a = ashGrid[gidx3(nx, ny, nz, G, G, periodic)];
+                    if (a > ashMax) ashMax = a;
+                }
+                // 1.5배는 「봉우리가 확실히 옆에 있다」의 선이다. 조금만 커도 껍질로 세면
+                // 격자 잡음이 그대로 통계에 들어온다.
+                if (ashMax > ashHere * 1.5f) atomicAdd(&bornStat[2], 1.0);
             }
         }
     }
+}
+
+// 재가 퍼진다 — **초신성 잔해는 한 자리에 머물지 않는다.**
+//
+// **왜 필요한가.** `kStarAge` 는 재를 폭발한 알갱이가 있던 **한 칸**에만 쌓는다. 알갱이는
+// 폭발 킥으로 흩어지는데 재는 그 자리에 남는다 — 그래서 재의 봉우리가 점 하나이고,
+// 새 별이 그 점 **위에서** 태어난다. 2026-08-17 실측: 봉우리 **둘레**에서 난 별이
+// **6%** 뿐이라 스펙이 말한 「폭발 지점 둘레에 껍질 모양으로」가 안 나왔다.
+//
+// 실제 초신성 잔해는 퍼진다(게 성운은 천 년에 몇 광년). 무거운 원소가 잔해와 함께
+// 날아가 넓은 껍질을 이루고, 그 껍질이 식어 다음 별의 재료가 된다.
+//
+// **이웃 여섯 칸과 섞는다.** 확산 방정식을 한 스텝 푸는 것과 같다:
+//   `a' = a + k·(이웃 평균 − a)`
+// 가운데를 낮추고 둘레를 올리므로 봉우리가 넓어진다. **제자리에서 고치면 옆 스레드가
+// 이미 퍼진 값을 읽어 한쪽으로 쏠리므로** 결과를 다른 격자에 쓰고 바꿔 끼운다.
+//
+// **비용**: G³ 스레드 × 이웃 6 읽기. 128³ 이면 1200만 회이고, `doCooling` 과 같은 주기로
+// 돌므로 매 스텝이 아니다.
+__global__ void kDiffuseAsh(const float* src, float* dst, int G, int periodic, float k) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int z = blockIdx.z * blockDim.z + threadIdx.z;
+    if (x >= G || y >= G || z >= G) return;
+    const int c = gidx3(x, y, z, G, G, periodic);
+    const float a = src[c];
+
+    float sum = 0.f; int used = 0;
+    const int nb[6][3] = {{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
+    for (int i = 0; i < 6; ++i) {
+        const int nx = x + nb[i][0], ny = y + nb[i][1], nz = z + nb[i][2];
+        if (!periodic && (nx < 0 || ny < 0 || nz < 0 || nx >= G || ny >= G || nz >= G)) continue;
+        sum += src[gidx3(nx, ny, nz, G, G, periodic)];
+        ++used;
+    }
+    // 가장자리는 이웃이 모자란다 — 있는 것만으로 평균을 낸다. 없는 쪽을 0 으로 세면
+    // 판 끝에서 재가 새어 나가는 것처럼 보인다.
+    dst[c] = (used > 0) ? (a + k * (sum / (float)used - a)) : a;
 }
 
 // 젊고 무거운 별의 자외선이 둘레 가스를 데운다 — **HII 영역.**
@@ -2775,8 +2834,8 @@ void Sim::Impl::allocate() {
     CK(cudaMemset(projT, 0, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&projTB, sizeof(float) * (size_t)G * G));
     CK(cudaMemset(projTB, 0, sizeof(float) * (size_t)G * G));
-    CK(cudaMalloc(&bornStat, sizeof(double) * 2));
-    CK(cudaMemset(bornStat, 0, sizeof(double) * 2));
+    CK(cudaMalloc(&bornStat, sizeof(double) * 4));
+    CK(cudaMemset(bornStat, 0, sizeof(double) * 4));
     CK(cudaMalloc(&specRho, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&specGreen, sizeof(cufftComplex) * spec));
     CK(cudaMalloc(&keys, sizeof(int) * N));
@@ -3091,6 +3150,17 @@ void Sim::Impl::doCooling(float dt) {
                                                  (unsigned)(stepCount * 2246822519u + 374761393u),
                                                  ashGrid, bornStat, vel);
         CK(cudaGetLastError());
+    }
+
+    // 재 확산 — **별 판정 뒤에 돈다.** 이번 스텝의 별은 퍼지기 전 재를 보고 정해져야
+    // 순서가 앞뒤로 안 섞인다. 임시 격자는 `velSumX` 를 빌린다 — 같은 G³ 이고 이 시점에는
+    // 1단계가 쓰고 2단계가 다 읽은 뒤라 자유롭다(자세한 근거는 `kDiffuseAsh` 주석).
+    if (ashGrid && cfg.ashDiffuseK > 0.f) {
+        // **0.4 에서 자른다.** 명시적 확산은 계수가 0.5 를 넘으면 값이 진동하며 발산한다.
+        const float k = fminf(cfg.ashDiffuseK * dt * 60.0f, 0.4f);
+        kDiffuseAsh<<<grd3(G), blk3()>>>(ashGrid, velSumX, G, periodic() ? 1 : 0, k);
+        CK(cudaGetLastError());
+        CK(cudaMemcpy(ashGrid, velSumX, sizeof(float) * gcells, cudaMemcpyDeviceToDevice));
     }
 }
 
@@ -4187,10 +4257,21 @@ double Sim::dispCrossRatio() const {
 
 double Sim::bornAshMean() const {
     if (!impl_->bornStat) return 0.0;
-    double h[2] = {0.0, 0.0};
-    if (cudaMemcpy(h, impl_->bornStat, sizeof(double) * 2, cudaMemcpyDeviceToHost) != cudaSuccess)
+    double h[4] = {0.0, 0.0, 0.0, 0.0};
+    if (cudaMemcpy(h, impl_->bornStat, sizeof(double) * 4, cudaMemcpyDeviceToHost) != cudaSuccess)
         return 0.0;
     return (h[0] > 0.5) ? (h[1] / h[0]) : 0.0;
+}
+
+// **껍질에서 태어난 별의 비율.** 새 별이 난 칸보다 **이웃 칸의 재가 진하면** 그 별은
+// 재의 봉우리 **둘레**에서 태어난 것이다 — 그것이 폭발 껍질이다. 중심에서 태어났다면
+// 자기 칸이 봉우리다. 폭발 지점을 따로 기억하지 않고도 껍질 구조를 가르는 창이다.
+double Sim::bornShellRatio() const {
+    if (!impl_->bornStat) return 0.0;
+    double h[4] = {0.0, 0.0, 0.0, 0.0};
+    if (cudaMemcpy(h, impl_->bornStat, sizeof(double) * 4, cudaMemcpyDeviceToHost) != cudaSuccess)
+        return 0.0;
+    return (h[0] > 0.5) ? (h[2] / h[0]) : 0.0;
 }
 
 // 보는 방향을 정한다(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그림 그대로다.

@@ -233,7 +233,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다(round-06 리뷰 P1 #2).
         "coreNebulaK=%.4f\ncoreGlowK=%.4f\ncoreIonizeK=%.4f\ncoreDark=%.4f\n"
         // 분산 텐서의 교차항 ÷ 대각항. 격자를 셋에서 여섯으로 늘릴지 정하는 값이다.
-        "dispCross=%.5f\n",
+        "dispCross=%.5f\n"
+        // 새 별이 재 봉우리의 둘레에서 났는지(껍질) 봉우리 자체에서 났는지(중심).
+        "bornShell=%.4f\n",
         Sim::failed() ? 0 : 1, Sim::failed() ? 1 : 0,
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
@@ -278,7 +280,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         rot[0], rot[1], rot[2], rot[3],
         sim.config().nebulaK, sim.config().starGlowK,
         sim.config().starIonizeK, sim.config().darkMatterFraction,
-        sim.dispCrossRatio());
+        sim.dispCrossRatio(), sim.bornShellRatio());
     return buf;
 }
 
@@ -412,6 +414,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "darkMatterFraction")) app.cfg.darkMatterFraction = clampF(getFloat(kv, "darkMatterFraction", app.cfg.darkMatterFraction), 0.0f, 0.9f, app.cfg.darkMatterFraction);
         if (has(kv, "starWindRate"))   app.cfg.starWindRate   = clampF(getFloat(kv, "starWindRate", app.cfg.starWindRate), 0.0f, 10.0f, app.cfg.starWindRate);
         if (has(kv, "dustExtinctionK")) app.cfg.dustExtinctionK = clampF(getFloat(kv, "dustExtinctionK", app.cfg.dustExtinctionK), 0.0f, 20.0f, app.cfg.dustExtinctionK);
+        if (has(kv, "ashDiffuseK"))    app.cfg.ashDiffuseK    = clampF(getFloat(kv, "ashDiffuseK", app.cfg.ashDiffuseK), 0.0f, 10.0f, app.cfg.ashDiffuseK);
         // 무엇으로 볼지. 「빛」은 별이 실제로 내는 밝기(L = M^3.5)로 그린다 —
         // 밀도 그림과 대비가 통째로 다르다.
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);
