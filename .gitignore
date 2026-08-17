@@ -1,0 +1,28 @@
+# ë¹Œë“œ ì‚°ì¶œë¬¼
+build/
+out/
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.log
+
+# í”„ë¡œí† íƒ€ì… ì¶œë ¥ â€” ì¬ìƒì„± ê°€ëŠ¥í•˜ê³  í¬ë‹¤
+proto/out/
+proto/out2/
+proto/out3/
+*.raw
+
+# vendoring í•œ ì™¸ë¶€ ë¼ì´ë¸ŒëŸ¬ë¦¬ (Dear ImGui ë“±)
+extern/
+
+# ì—ë””í„°
+.vs/
+.vscode/
+*.user
+
+# ¹èÆ÷ »êÃâ¹° ? ÀúÀå¼Ò°¡ ¾Æ´Ï¶ó ¸±¸®½º·Î ¿Ã¸°´Ù
+dist/
+*.bak

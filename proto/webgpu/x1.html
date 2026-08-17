@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>X1 단일격자융합 — O(N) 파이프라인 실측</title>
+<style>
+  body { font-family: Consolas, monospace; background:#0d0d10; color:#dde; padding:18px; }
+  h1 { font-size:15px; color:#6cf; margin:0 0 10px; }
+  pre { white-space:pre-wrap; line-height:1.45; font-size:12px; }
+  .hi { color:#7d7; }
+</style>
+</head>
+<body>
+<h1>X1 단일격자융합 — 이웃탐색 없는 O(N) 파이프라인 실측 (RTX 3070 Ti / WebGPU)</h1>
+<pre id="out">측정 준비 중...</pre>
+<script type="module">
+const lines = [];
+const outEl = document.getElementById('out');
+function log(s) { lines.push(s); outEl.textContent = lines.join('\n'); }
+
+const WGSL = /* wgsl */`
+struct Params {
+  n      : u32,
+  gw     : u32,
+  gh     : u32,
+  _pad0  : u32,
+  cell   : f32,
+  dt     : f32,
+  massFix: f32,
+  gravK  : f32,
+};
+
+@group(0) @binding(0) var<uniform> P : Params;
+@group(0) @binding(1) var<storage, read_write> pos   : array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> vel   : array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> gMass : array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> gMomX : array<atomic<i32>>;
+@group(0) @binding(5) var<storage, read_write> gMomY : array<atomic<i32>>;
+@group(0) @binding(6) var<storage, read_write> gAccX : array<f32>;
+@group(0) @binding(7) var<storage, read_write> gAccY : array<f32>;
+
+fn pcg(vIn: u32) -> u32 {
+  var state = vIn * 747796405u + 2891336453u;
+  var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+fn rnd01(s: u32) -> f32 { return f32(pcg(s)) * 2.3283064365386963e-10; }
+
+// ---------- 1. 파티클 생성 (회전 원반 두 개) ----------
+@compute @workgroup_size(256)
+fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  let u1 = rnd01(i * 3u + 1u);
+  let u2 = rnd01(i * 3u + 2u);
+  let u3 = rnd01(i * 3u + 3u);
+  // 두 원반: 극좌標 sqrt 분포로 면밀도 균일
+  let r = sqrt(u1) * 0.18;
+  let th = u2 * 6.2831853;
+  let side = select(-1.0, 1.0, u3 > 0.5);
+  let cx = 0.5 + side * 0.16;
+  let cy = 0.5;
+  let px = cx + r * cos(th);
+  let py = cy + r * sin(th);
+  pos[i] = vec2<f32>(px, py);
+  // 회전 + 서로 향하는 상대속도
+  let vt = 0.9 * sqrt(max(r, 1e-4));
+  vel[i] = vec2<f32>(-sin(th) * vt - side * 0.10, cos(th) * vt);
+}
+
+// ---------- 2. 격자 클리어 ----------
+@compute @workgroup_size(256)
+fn clearGrid(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.gw * P.gh) { return; }
+  atomicStore(&gMass[i], 0u);
+  atomicStore(&gMomX[i], 0);
+  atomicStore(&gMomY[i], 0);
+}
+
+// ---------- 3. CIC 산란 (파티클 -> 격자, atomic) ----------
+fn depositCell(cx: i32, cy: i32, w: f32, v: vec2<f32>) {
+  let gx = clamp(cx, 0, i32(P.gw) - 1);
+  let gy = clamp(cy, 0, i32(P.gh) - 1);
+  let idx = u32(gy) * P.gw + u32(gx);
+  atomicAdd(&gMass[idx], u32(w * P.massFix));
+  atomicAdd(&gMomX[idx], i32(w * v.x * P.massFix));
+  atomicAdd(&gMomY[idx], i32(w * v.y * P.massFix));
+}
+
+@compute @workgroup_size(256)
+fn scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  let p = pos[i];
+  let v = vel[i];
+  let g = p / P.cell;
+  let ix = i32(floor(g.x));
+  let iy = i32(floor(g.y));
+  let fx = g.x - floor(g.x);
+  let fy = g.y - floor(g.y);
+  depositCell(ix,     iy,     (1.0 - fx) * (1.0 - fy), v);
+  depositCell(ix + 1, iy,     fx * (1.0 - fy),         v);
+  depositCell(ix,     iy + 1, (1.0 - fx) * fy,         v);
+  depositCell(ix + 1, iy + 1, fx * fy,                 v);
+}
+
+// ---------- 4. 격자 연산 (FFT 자리표시: 밀도 -> 유한차분 가속도) ----------
+// 실제 X1에서는 여기가 FFT 포아송. 지금은 "격자 전체를 한 번 훑는" 비용만 잰다.
+@compute @workgroup_size(16, 16)
+fn gridSolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x;
+  let y = gid.y;
+  if (x >= P.gw || y >= P.gh) { return; }
+  let idx = y * P.gw + x;
+  let xm = select(x - 1u, 0u, x == 0u);
+  let xp = select(x + 1u, P.gw - 1u, x + 1u >= P.gw);
+  let ym = select(y - 1u, 0u, y == 0u);
+  let yp = select(y + 1u, P.gh - 1u, y + 1u >= P.gh);
+  let mL = f32(atomicLoad(&gMass[y * P.gw + xm]));
+  let mR = f32(atomicLoad(&gMass[y * P.gw + xp]));
+  let mD = f32(atomicLoad(&gMass[ym * P.gw + x]));
+  let mU = f32(atomicLoad(&gMass[yp * P.gw + x]));
+  // 밀도 구배 방향 가속도 (부호: 밀한 쪽으로 끌림)
+  gAccX[idx] = (mR - mL) * P.gravK;
+  gAccY[idx] = (mU - mD) * P.gravK;
+}
+
+// ---------- 5. 격자 -> 파티클 보간 + 적분 ----------
+fn sampleAcc(cx: i32, cy: i32) -> vec2<f32> {
+  let gx = clamp(cx, 0, i32(P.gw) - 1);
+  let gy = clamp(cy, 0, i32(P.gh) - 1);
+  let idx = u32(gy) * P.gw + u32(gx);
+  return vec2<f32>(gAccX[idx], gAccY[idx]);
+}
+
+@compute @workgroup_size(256)
+fn gatherIntegrate(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  var p = pos[i];
+  var v = vel[i];
+  let g = p / P.cell;
+  let ix = i32(floor(g.x));
+  let iy = i32(floor(g.y));
+  let fx = g.x - floor(g.x);
+  let fy = g.y - floor(g.y);
+  let a = sampleAcc(ix,     iy)     * ((1.0 - fx) * (1.0 - fy))
+        + sampleAcc(ix + 1, iy)     * (fx * (1.0 - fy))
+        + sampleAcc(ix,     iy + 1) * ((1.0 - fx) * fy)
+        + sampleAcc(ix + 1, iy + 1) * (fx * fy);
+  v = v + a * P.dt;
+  p = p + v * P.dt;
+  // 주기 경계
+  p = fract(p + vec2<f32>(1.0, 1.0));
+  pos[i] = p;
+  vel[i] = v;
+}
+`;
+
+const PASSES = ['clearGrid', 'scatter', 'gridSolve', 'gatherIntegrate'];
+
+async function main() {
+  if (!navigator.gpu) { log('NO_WEBGPU'); return; }
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const hasTS = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({
+    requiredFeatures: hasTS ? ['timestamp-query'] : [],
+    requiredLimits: {
+      maxBufferSize: adapter.limits.maxBufferSize,
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxComputeWorkgroupsPerDimension: adapter.limits.maxComputeWorkgroupsPerDimension,
+    },
+  });
+  device.addEventListener?.('uncapturederror', e => log('GPU ERROR: ' + e.error.message));
+  log('device OK, timestamp-query=' + hasTS);
+
+  const module = device.createShaderModule({ code: WGSL });
+  const info = await module.getCompilationInfo();
+  for (const m of info.messages) {
+    if (m.type === 'error') { log('WGSL ERROR ' + m.lineNum + ':' + m.linePos + ' ' + m.message); }
+  }
+  if (info.messages.some(m => m.type === 'error')) { log('RESULT: SHADER_COMPILE_FAILED'); return; }
+
+  // layout:'auto'는 파이프라인이 실제 참조하는 바인딩만 레이아웃에 넣으므로
+  // 패스마다 레이아웃이 달라진다. 하나를 공유하려면 명시적으로 만든다.
+  const bglEntries = [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } }];
+  for (let b = 1; b <= 7; b++) {
+    bglEntries.push({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } });
+  }
+  const bgl = device.createBindGroupLayout({ entries: bglEntries });
+  const plyt = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+
+  const pipelines = {};
+  for (const p of PASSES.concat(['init'])) {
+    pipelines[p] = device.createComputePipeline({ layout: plyt, compute: { module, entryPoint: p } });
+  }
+
+  async function runCase(N, G) {
+    const cells = G * G;
+    const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const pv = new ArrayBuffer(32);
+    new Uint32Array(pv, 0, 4).set([N, G, G, 0]);
+    new Float32Array(pv, 16, 4).set([1.0 / G, 0.0015, 4096.0, 2.0e-7]);
+    device.queue.writeBuffer(paramsBuf, 0, pv);
+
+    const mk = (bytes) => device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE });
+    const bufs = {
+      pos:   mk(N * 8),
+      vel:   mk(N * 8),
+      gMass: mk(cells * 4),
+      gMomX: mk(cells * 4),
+      gMomY: mk(cells * 4),
+      gAccX: mk(cells * 4),
+      gAccY: mk(cells * 4),
+    };
+    const totalMB = (N * 16 + cells * 20) / 1048576;
+
+    const bindGroup = device.createBindGroup({
+      layout: bgl,
+      entries: [
+        { binding: 0, resource: { buffer: paramsBuf } },
+        { binding: 1, resource: { buffer: bufs.pos } },
+        { binding: 2, resource: { buffer: bufs.vel } },
+        { binding: 3, resource: { buffer: bufs.gMass } },
+        { binding: 4, resource: { buffer: bufs.gMomX } },
+        { binding: 5, resource: { buffer: bufs.gMomY } },
+        { binding: 6, resource: { buffer: bufs.gAccX } },
+        { binding: 7, resource: { buffer: bufs.gAccY } },
+      ],
+    });
+
+    const wgN = Math.ceil(N / 256);
+    const wgCells = Math.ceil(cells / 256);
+    const wgG = Math.ceil(G / 16);
+
+    // 초기화
+    {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipelines.init);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(wgN);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+
+    const dispatchOf = (name) => {
+      if (name === 'clearGrid') return [wgCells];
+      if (name === 'gridSolve') return [wgG, wgG];
+      return [wgN];
+    };
+
+    function encodeStep(enc, querySet, baseQuery) {
+      let q = baseQuery;
+      for (const name of PASSES) {
+        const desc = {};
+        if (querySet) { desc.timestampWrites = { querySet, beginningOfPassWriteIndex: q, endOfPassWriteIndex: q + 1 }; }
+        const pass = enc.beginComputePass(desc);
+        pass.setPipeline(pipelines[name]);
+        pass.setBindGroup(0, bindGroup);
+        const d = dispatchOf(name);
+        pass.dispatchWorkgroups(d[0], d[1] || 1);
+        pass.end();
+        q += 2;
+      }
+      return q;
+    }
+
+    // 워밍업
+    for (let i = 0; i < 20; i++) {
+      const enc = device.createCommandEncoder();
+      encodeStep(enc, null, 0);
+      device.queue.submit([enc.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+
+    // wall-clock: 100스텝
+    const STEPS = 100;
+    const t0 = performance.now();
+    for (let i = 0; i < STEPS; i++) {
+      const enc = device.createCommandEncoder();
+      encodeStep(enc, null, 0);
+      device.queue.submit([enc.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+    const t1 = performance.now();
+    const msPerStep = (t1 - t0) / STEPS;
+
+    // timestamp: 패스별 분해 (10스텝 평균)
+    let breakdown = null;
+    if (hasTS) {
+      const TSTEPS = 10;
+      const qCount = PASSES.length * 2 * TSTEPS;
+      const querySet = device.createQuerySet({ type: 'timestamp', count: qCount });
+      const resolveBuf = device.createBuffer({ size: qCount * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+      const readBuf = device.createBuffer({ size: qCount * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const enc = device.createCommandEncoder();
+      let q = 0;
+      for (let i = 0; i < TSTEPS; i++) { q = encodeStep(enc, querySet, q); }
+      enc.resolveQuerySet(querySet, 0, qCount, resolveBuf, 0);
+      enc.copyBufferToBuffer(resolveBuf, 0, readBuf, 0, qCount * 8);
+      device.queue.submit([enc.finish()]);
+      await readBuf.mapAsync(GPUMapMode.READ);
+      const ts = new BigUint64Array(readBuf.getMappedRange().slice(0));
+      readBuf.unmap();
+      const sums = new Array(PASSES.length).fill(0);
+      for (let i = 0; i < TSTEPS; i++) {
+        for (let p = 0; p < PASSES.length; p++) {
+          const b = ts[(i * PASSES.length + p) * 2];
+          const e = ts[(i * PASSES.length + p) * 2 + 1];
+          sums[p] += Number(e - b) / 1e6; // ns -> ms
+        }
+      }
+      breakdown = sums.map(s => s / TSTEPS);
+      querySet.destroy(); resolveBuf.destroy(); readBuf.destroy();
+    }
+
+    for (const k in bufs) bufs[k].destroy();
+    paramsBuf.destroy();
+    return { msPerStep, breakdown, totalMB };
+  }
+
+  log('');
+  log('== X1 (이웃탐색 없음): clearGrid + CIC산란 + 격자연산 + 보간·적분 ==');
+  log('격자연산 자리는 아직 FFT가 아니라 유한차분 1패스 — FFT 비용은 별도 측정 예정');
+  log('');
+  log('  N          격자      메모리     ms/step    FPS      패스별 분해 (clear/scatter/grid/gather) ms');
+
+  const CASES = [
+    [100_000, 1024], [1_000_000, 1024], [10_000_000, 1024],
+    [100_000, 2048], [1_000_000, 2048], [10_000_000, 2048],
+    [1_000_000, 4096], [10_000_000, 4096],
+  ];
+  for (const [N, G] of CASES) {
+    try {
+      const r = await runCase(N, G);
+      const bd = r.breakdown ? r.breakdown.map(x => x.toFixed(3)).join(' / ') : 'n/a';
+      log('  ' + String(N).padStart(10) + '  ' + (G + '^2').padStart(7) + '  '
+        + r.totalMB.toFixed(0).padStart(6) + 'MB  '
+        + r.msPerStep.toFixed(3).padStart(8) + '  '
+        + (1000 / r.msPerStep).toFixed(1).padStart(7) + '   ' + bd);
+    } catch (e) {
+      log('  ' + String(N).padStart(10) + '  ' + (G + '^2').padStart(7) + '  FAILED: ' + e.message);
+    }
+  }
+  log('');
+  log('RESULT: DONE');
+}
+
+main().catch(e => log('EXCEPTION: ' + (e && e.stack ? e.stack : e)));
+</script>
+</body>
+</html>

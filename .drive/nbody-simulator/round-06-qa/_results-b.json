@@ -1,0 +1,60 @@
+{
+ "rows": [
+  {
+   "verdict": "PASS",
+   "id": "A3",
+   "label": "일시정지 상태에서 한 스텝을 진행한다",
+   "detail": "simTime 0.00282 -> 0.00294 (dtUsed=0.000118)"
+  },
+  {
+   "verdict": "PASS",
+   "id": "A3b",
+   "label": "리셋으로 초기 상태로 돌아간다",
+   "detail": "simTime 0.02643 -> 0, activeCount=2000000"
+  },
+  {
+   "verdict": "PASS",
+   "id": "A6",
+   "label": "성능 섹션에서 단계별 소요 ms 를 본다",
+   "detail": "stepMs=1.7003 scatterMs=0.5101 poissonMs=0.5951 gatherMs=0.4251 gasMs=0 frameMs=3.005  (fps=329.11)"
+  },
+  {
+   "verdict": "PASS",
+   "id": "J1",
+   "label": "강한 중력에서도 파티클이 튕겨 나가지 않는다 (CFL 클램프)",
+   "detail": "중력2.0 800스텝: totalMass 2000000 -> 2000000 (상대변화 0.00e+0), maxSpeed=6.2224 dtUsed=0.000055 substeps=1"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "A4",
+   "label": "시간 배속을 조절해 같은 스텝에서 더 많은 물리 시간이 흐른다",
+   "detail": "200스텝 simTime  x0.25=0.02349 (dt=0.000101)  x3.0=0.02329 (dt=0.000101)"
+  },
+  {
+   "verdict": "PASS",
+   "id": "P1-repro",
+   "label": "[P1 재현] set 단독 변경이 코어에 전달되는가",
+   "detail": "timeScale=4.0 을 set 만: dtUsed=0.000102 / preset 을 거쳐: dtUsed=0.000102 (status 는 두 경우 모두 timeScale=4 로 보고)"
+  },
+  {
+   "verdict": "PASS",
+   "id": "C1",
+   "label": "중력 세기를 조절해 뭉치는 정도가 달라진다 (같은 물리 시간 기준)",
+   "detail": "t=0.02 까지: g=0.2 최대밀도=44.98 (simTime=0.04638, dt=0.000203) / g=1.8 최대밀도=453.76 (simTime=0.02891, dt=0.000066)"
+  },
+  {
+   "verdict": "PASS",
+   "id": "C1-note",
+   "label": "[참고] 같은 스텝 수로 비교하면 CFL 이 dt 를 줄여 차이가 사라진다",
+   "detail": "400스텝: g=0.2 밀도=453.76 simTime=0.08674 dt=0.000199 / g=1.8 밀도=453.76 simTime=0.02891 dt=0.000066"
+  },
+  {
+   "verdict": "FAIL",
+   "id": "F-status",
+   "label": "MCP 상태로 표시 설정을 되읽을 수 있다",
+   "detail": "statusBody 에 없는 필드: colormap, brightness, displayGamma, hud, zoom, panX, panY — 설정은 되지만 확인은 화면으로만 가능"
+  }
+ ],
+ "pass": 7,
+ "fail": 2
+}

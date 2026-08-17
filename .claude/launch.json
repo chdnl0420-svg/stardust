@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "nbody-proto",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["proto/webgpu/server.js"],
+      "port": 8123
+    }
+  ]
+}
