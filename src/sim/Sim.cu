@@ -1105,13 +1105,41 @@ __global__ void kStarForm(float4* pos, int n, int G, int periodic,
     const int cz = min(max((int)(p.z * G), 0), G - 1);
     const int c  = gidx3(cx, cy, cz, G, G, periodic);
 
-    const float cnt = dispCnt[c];
+    // **판정값은 CIC 8칸으로 보간해 읽는다(2026-08-17).**
+    //
+    // 전에는 자기 칸 하나만 읽었다. 그러면 **한 칸 안의 알갱이가 모두 같은 문턱을 보고
+    // 동시에 별이 된다** — 화면에서 네모난 영역이 통째로 켜지고, 그것이 칸 순서대로
+    // 번져 보인다. 사용자가 「입자들이 네모난 영역만큼 순서대로 생성되는 것 같다」고
+    // 알린 그 증상이다.
+    //
+    // `kScatter` 가 CIC 8칸으로 **뿌렸으니** 읽을 때도 같은 방식이어야 대칭이다. 그러면
+    // 알갱이마다 위치에 따라 값이 조금씩 달라 칸 경계가 사라진다.
+    //
+    // **비용**: 알갱이당 8칸 × 격자 4개 = 32 읽기. 원자 연산이 아니라 읽기이고, 별이
+    // 안 될 알갱이는 앞에서 대부분 걸러진다(가스가 아니면 반환).
+    float cnt = 0.f, s2num = 0.f;
+    {
+        const float fgx = p.x * G - 0.5f, fgy = p.y * G - 0.5f, fgz = p.z * G - 0.5f;
+        const int ix = (int)floorf(fgx), iy = (int)floorf(fgy), iz = (int)floorf(fgz);
+        const float fx = fgx - ix, fy = fgy - iy, fz = fgz - iz;
+        for (int k = 0; k < 8; ++k) {
+            const int ox = k & 1, oy = (k >> 1) & 1, oz = (k >> 2) & 1;
+            const float w = (ox ? fx : 1.f - fx) * (oy ? fy : 1.f - fy) * (oz ? fz : 1.f - fz);
+            if (w <= 0.f) continue;
+            const int nx = min(max(ix + ox, 0), G - 1);
+            const int ny = min(max(iy + oy, 0), G - 1);
+            const int nz = min(max(iz + oz, 0), G - 1);
+            const int nc = gidx3(nx, ny, nz, G, G, periodic);
+            cnt   += w * dispCnt[nc];
+            s2num += w * (dispX[nc] + dispY[nc] + dispZ[nc]);
+        }
+    }
     // 혼자 있는 알갱이는 별이 될 수 없다. 분산도 못 재고(이웃이 없다) 질량도 하나뿐이다.
     if (cnt < 2.f) return;
 
     // 방향별 분산의 평균. 셋을 더해 셋으로 나누는 대신 개수로만 나누면 3σ² 가 되므로
     // 그만큼 k_J 에 흡수시킨다 — 나눗셈 하나를 아낀다.
-    const float s2 = (dispX[c] + dispY[c] + dispZ[c]) / cnt;
+    const float s2 = s2num / cnt;   // 위에서 8칸 보간으로 모아 둔 값
 
     // ρ > k_J · σ². σ² 가 0 에 가까우면(잘 식은 자리) 문턱이 0 으로 내려가는데,
     // 그때는 cnt >= 2 조건이 바닥 노릇을 한다.
@@ -2081,8 +2109,17 @@ __global__ void kBlurLine(const float* src, float* dst, int G, int radius, int h
     for (int k = -radius; k <= radius; ++k) {
         const int sx = horizontal ? min(max(x + k, 0), G - 1) : x;
         const int sy = horizontal ? y : min(max(y + k, 0), G - 1);
-        // 가우시안에 가깝게 — 가운데가 진하고 가장자리가 옅어야 「부옇게」 보인다.
-        const float w = __expf(-(float)(k * k) / (float)(radius * radius) * 2.0f);
+        // 가우시안 — 가운데가 진하고 가장자리가 옅어야 「부옇게」 보인다.
+        //
+        // **계수를 2 에서 4.5 로 올렸다(2026-08-17).** 2 로는 반경 끝(k=radius)에서
+        // `e^(−2) = 13.5%` 가 **남은 채 잘린다.** 가로·세로로 두 번 돌리므로 그 잘린 자리가
+        // 정사각형 경계가 되어, 밝은 별의 후광이 **네모난 빛덩이**로 보였다 —
+        // 사용자가 「빛이 번지는 게 네모로 표현된 것 같다」고 알린 그것이다.
+        //
+        // 4.5 면 끝에서 `e^(−4.5) = 1.1%` 라 잘리는 자리가 눈에 안 걸리고, **멀수록 약해져
+        // 0 에 닿는** 모양이 된다. 분리 가능한 가우시안이므로 가로·세로 두 번으로 실제
+        // **원형** 번짐이 나온다 — 네모였던 것은 자른 자리 때문이지 방식 때문이 아니었다.
+        const float w = __expf(-(float)(k * k) / (float)(radius * radius) * 4.5f);
         sum  += src[sy * G + sx] * w;
         wsum += w;
     }
