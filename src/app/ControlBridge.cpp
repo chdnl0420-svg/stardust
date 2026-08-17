@@ -232,6 +232,19 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 코어가 실제로 들고 있는 값. **밖에서 보낸 설정이 여기까지 왔는지**를 보는 창이다 —
         // `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다(round-06 리뷰 P1 #2).
         "coreNebulaK=%.4f\ncoreGlowK=%.4f\ncoreIonizeK=%.4f\ncoreDark=%.4f\n"
+        // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
+        //
+        // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
+        // 그것이 `gridSize` 버그가 숨어 있던 구조적 이유다 — 2D 시절 값만 받아 32/64/128 을
+        // 조용히 무시했는데, 값이 코어에 닿았는지 볼 창이 없으니 아무도 못 찾았다. UI 에서는
+        // 컨트롤을 움직이면 라벨이 바뀌니 **동작하는 것처럼 보인다.**
+        //
+        // 위 넷과 같은 `core*` 이름을 쓴다 — 이 접두어가 「코어가 실제로 들고 있는 값」을
+        // 뜻하고, `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다.
+        "coreCoolRate=%.4f\ncoreFormEff=%.5f\ncoreSunMass=%.2f\ncoreKick=%.4f\n"
+        "coreAshYield=%.3f\ncoreAshCool=%.3f\ncoreWind=%.4f\ncoreDustTau=%.3f\n"
+        "coreAshDiff=%.3f\ncoreBhRs=%.4f\ncoreBhRatio=%.1f\ncoreExplode=%.4f\n"
+        "coreSunLife=%.2f\ncoreIonMin=%.2f\n"
         // 분산 텐서의 교차항 ÷ 대각항. 격자를 셋에서 여섯으로 늘릴지 정하는 값이다.
         "dispCross=%.5f\n"
         // 새 별이 재 봉우리의 둘레에서 났는지(껍질) 봉우리 자체에서 났는지(중심).
@@ -280,6 +293,15 @@ std::string ControlBridge::statusBody(const App& app) const {
         rot[0], rot[1], rot[2], rot[3],
         sim.config().nebulaK, sim.config().starGlowK,
         sim.config().starIonizeK, sim.config().darkMatterFraction,
+        // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
+        // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
+        sim.config().coolingRate, sim.config().starFormEfficiency,
+        sim.config().starSunMass, sim.config().starKickSpeed,
+        sim.config().starAshYield, sim.config().ashCoolK,
+        sim.config().starWindRate, sim.config().dustExtinctionK,
+        sim.config().ashDiffuseK, sim.config().blackHoleRs,
+        sim.config().starBHRatio, sim.config().starExplodeSim,
+        sim.config().starSunLifeSim, sim.config().nebulaIonMin,
         sim.dispCrossRatio(), sim.bornShellRatio());
     return buf;
 }
