@@ -251,6 +251,27 @@ __global__ void kShade(const float* rho, const float* tempSum, int G, uchar4* ou
 // 파티클을 화면에 더한다. 겹칠수록 밝아지므로 밀집한 곳이 자연히 도드라진다.
 // uchar4 에는 atomicAdd 가 없어 float3 누적 버퍼에 모았다가 뒤에서 색으로 바꾼다.
 // 코어가 3D 로 바뀌면서 위치·속도가 float4 가 됐다(x, y, z, 안 씀).
+// 화면 격자(G²)를 **네 칸 섞어** 읽는다.
+//
+// **가장 가까운 칸 하나만 읽으면 같은 칸의 알갱이가 모두 같은 값을 받아 격자 무늬가
+// 그대로 드러난다.** 알갱이는 격자보다 훨씬 촘촘한데 값이 칸 단위로 계단이 지기 때문이다.
+// 특히 먼지처럼 **밝기를 깎는** 쪽은 그 계단이 **검은 네모**로 보인다 — 2026-08-17 에
+// 사용자가 화면에서 그것을 발견했다.
+//
+// 성운·먼지·재가 모두 같은 방식으로 격자를 읽으므로 여기 한 번만 적는다.
+__device__ __forceinline__ float sampleGrid2D(const float* g, float u, float v, int G) {
+    const float fx = u * G - 0.5f, fy = v * G - 0.5f;
+    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+    const float tx = fx - x0, ty = fy - y0;
+    int x1 = x0 + 1, y1 = y0 + 1;
+    x0 = min(max(x0, 0), G - 1); x1 = min(max(x1, 0), G - 1);
+    y0 = min(max(y0, 0), G - 1); y1 = min(max(y1, 0), G - 1);
+    return g[y0 * G + x0] * (1.f - tx) * (1.f - ty)
+         + g[y0 * G + x1] * tx * (1.f - ty)
+         + g[y1 * G + x0] * (1.f - tx) * ty
+         + g[y1 * G + x1] * tx * ty;
+}
+
 // 블랙홀 자리와 지평선 반지름. **커널 인자로 값을 통째로 넘긴다** — 최대 여덟 개라
 // 128 바이트고, 별도 버퍼를 잡아 매 프레임 채우는 것보다 싸다.
 struct BHDisk {
@@ -307,19 +328,9 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
         // 격자에 있으므로 이 방법 말고는 알갱이 렌더에 실을 길이 없다.
         // 회색으로 쌓아 두면 아래 `kAccumToRGBA` 가 컬러맵을 씌운다 — 밀도 모드와 같다.
         if (!ashProj || gridG <= 0) return;
-        // **네 칸을 섞어 읽는다.** 가장 가까운 칸 하나만 읽으면 같은 칸의 알갱이가 모두
-        // 같은 값을 받아 **격자 무늬가 그대로 드러난다** — 재는 알갱이가 아니라 격자에
-        // 있는 값이라 이 이음매가 특히 눈에 걸린다(`kShade` 가 같은 이유로 같은 일을 한다).
-        const float agx = p.x * gridG - 0.5f, agy = p.y * gridG - 0.5f;
-        int ax0 = (int)floorf(agx), ay0 = (int)floorf(agy);
-        const float atx = agx - ax0, aty = agy - ay0;
-        int ax1 = ax0 + 1, ay1 = ay0 + 1;
-        ax0 = min(max(ax0, 0), gridG - 1); ax1 = min(max(ax1, 0), gridG - 1);
-        ay0 = min(max(ay0, 0), gridG - 1); ay1 = min(max(ay1, 0), gridG - 1);
-        const float a = ashProj[ay0 * gridG + ax0] * (1.f - atx) * (1.f - aty)
-                      + ashProj[ay0 * gridG + ax1] * atx * (1.f - aty)
-                      + ashProj[ay1 * gridG + ax0] * (1.f - atx) * aty
-                      + ashProj[ay1 * gridG + ax1] * atx * aty;
+        // 네 칸을 섞어 읽는다 — 재는 알갱이가 아니라 격자에 있는 값이라 이음매가
+        // 특히 눈에 걸린다(위 헬퍼 주석).
+        const float a = sampleGrid2D(ashProj, p.x, p.y, gridG);
         if (a <= 0.f) return;
         // 재는 범위가 매우 넓다(빈 곳 0, 진한 곳 수억). 로그로 눌러야 구조가 보인다.
         const float w = __logf(1.f + a);
@@ -383,13 +394,13 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
             // 안 하므로(위 투영 코드) 그쪽과 일관된다.
             L = 0.f; TK = 0.f;
             if (!spread || nebulaK <= 0.f || gridG <= 0) return;
-            const int gx = min(max((int)(p.x * gridG), 0), gridG - 1);
-            const int gy = min(max((int)(p.y * gridG), 0), gridG - 1);
-            const float sp = spread[gy * gridG + gx];
+            // **네 칸을 섞어 읽는다** — 한 칸만 읽으면 격자 무늬가 드러난다(위 헬퍼 주석).
+            const float sp = sampleGrid2D(spread, p.x, p.y, gridG);
             if (sp <= 1e-12f) return;                    // 별빛이 없는 자리의 가스는 검다
             L  = sp * nebulaK;
             // 반사광의 색은 **비추는 별의 색**이다. 퍼진 온도합을 퍼진 밝기로 나눈다.
-            TK = spreadT ? (spreadT[gy * gridG + gx] / sp) : 6500.f;
+            // 분자도 **같은 방식으로** 보간해야 경계에서 색이 튀지 않는다.
+            TK = spreadT ? (sampleGrid2D(spreadT, p.x, p.y, gridG) / sp) : 6500.f;
         }
 
         // ── 블랙홀 강착원반 ────────────────────────────────────────────────
@@ -446,14 +457,22 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
         // 아니라 **앞에 있는 먼지가 뒤쪽 별빛을 먹어서** 검다. 소광은 `I = I₀·e^(−τ)` 이고
         // `τ` 는 시선 방향으로 쌓인 먼지 양에 비례한다.
         //
-        // **앞뒤를 가리지 않고 균일하게 깎는다.** 제대로 하려면 그 알갱이보다 **앞에 있는**
-        // 가스만 세야 하는데 그것은 z 방향 프리픽스 합이라 격자를 한 겹 더 쌓아야 한다.
-        // 균일하게 깎아도 「가스가 짙은 자리는 어둡다」는 그대로 나오고, 그것이 화면에서
-        // 보이는 전부다.
+        // **별이 구름 「안에」 있다는 것을 셈에 넣는다.**
+        //
+        // 처음에는 `e^(−τ)` 로 균일하게 깎았다. 그것은 **모든 별이 구름 뒤에 있다**고 보는
+        // 것이라, 뭉친 자리에서 `τ` 가 수백이 되면 **화면이 완전히 검어진다** —
+        // 2026-08-17 에 사용자가 「검은 네모들」로 발견했고, 네 칸 보간으로 계단을 없애자
+        // 이번엔 부드러운 검은 구멍이 남았다. **근사 자체가 짙은 자리에서 무너진 것이다.**
+        //
+        // 실제로는 별이 구름 앞·속·뒤에 고루 있다. 광학깊이가 0~τ 로 고르다고 보고 적분하면
+        //   ⟨e^(−t)⟩ = (1 − e^(−τ)) / τ
+        // 가 나온다. τ→0 이면 1(안 가려짐), τ=1 이면 0.63, τ=3 이면 0.32,
+        // **τ 가 아무리 커도 `1/τ` 로 천천히 줄 뿐 0 이 되지 않는다** — 구름 앞쪽 별은
+        // 언제나 보이기 때문이다. z 방향 프리픽스 합 없이 앞뒤를 근사하는 정확한 식이다.
         if (gasCol && dustTau > 0.f) {
-            const int gx2 = min(max((int)(p.x * gridG), 0), gridG - 1);
-            const int gy2 = min(max((int)(p.y * gridG), 0), gridG - 1);
-            L *= __expf(-gasCol[gy2 * gridG + gx2] * dustTau);
+            // 네 칸을 섞어 읽는다 — 한 칸만 읽으면 칸 경계가 계단으로 드러난다.
+            const float tau = sampleGrid2D(gasCol, p.x, p.y, gridG) * dustTau;
+            if (tau > 1e-4f) L *= (1.f - __expf(-tau)) / tau;
             if (L <= 0.f) return;
         }
 
