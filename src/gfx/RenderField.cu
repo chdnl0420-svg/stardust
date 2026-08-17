@@ -1025,7 +1025,20 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     if (!devSmoothNeb_)  cudaMalloc(&devSmoothNeb_,  bytes3);
                     if (!devSmoothNebT_) cudaMalloc(&devSmoothNebT_, bytes3);
                     if (!devSmoothGas_)  cudaMalloc(&devSmoothGas_,  bytes3);
-                    const float a3 = smoothPrimed_ ? 0.35f : 1.0f;
+                    // **0.35 → 0.08 (2026-08-18).** 사용자가 「앱 시작하자마자 여기저기서
+                    // 주황색 불이 파바박 하고 켜졌다 꺼졌다 해」라고 알렸다.
+                    //
+                    // 공간 문턱은 smoothstep 으로 이었지만 **시간에 대한 변화가 남아 있었다** —
+                    // 앱을 켠 직후에는 별이 하나씩 태어나고, 별 하나가 켜지면 그 칸의 별빛이
+                    // 확 뛴다. 그러면 성운이 문턱을 넘어 켜지고, 그 별이 옮겨가거나 죽으면
+                    // 다시 꺼진다. 0.35 는 세 프레임(0.05초)이면 다 따라가므로 **블렌딩이
+                    // 사실상 없는 값**이었다.
+                    //
+                    // 0.08 이면 스무 프레임(0.33초)에 걸쳐 옮겨간다 — 사용자가 말한
+                    // 「스르륵 색이 빠지고 다시 스르륵 켜지고」가 그 시간 폭이다.
+                    // 성운은 실제로도 수만 년 규모로 변하는 것이라 화면에서 급히 뒤집힐
+                    // 이유가 없다.
+                    const float a3 = smoothPrimed_ ? 0.08f : 1.0f;
                     const int b3 = (cells3 + 255) / 256;
                     if (devSmoothNeb_ && nebSpread) {
                         kBlendGrid<<<b3, 256>>>((float*)devSmoothNeb_, nebSpread, cells3, a3);
