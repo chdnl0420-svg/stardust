@@ -489,7 +489,7 @@ __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
 // 비용: N 스레드 × 8칸 보간. N=200만이면 1600만 번의 격자 읽기.
 __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
                            int n, int G, float dt, int periodic,
-                           BHPack bh, float c2, int* eaten,
+                           BHPack bh, float c2, int* eaten, float* eatenP,
                            const float4* accContact) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -527,6 +527,23 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
             // (그 몫을 정하는 근거는 `packBH` 의 셋째 칸 주석).
             const int slot = atomicAdd(&eaten[b], 1);
             if ((float)slot < bh.q[b].z) {
+                // **삼킨 물질의 운동량을 블랙홀에 넘긴다(2026-08-18).**
+                //
+                // 전에는 질량만 늘고 **운동량은 사라졌다.** 그것이 둘을 깨뜨렸다 —
+                // 판 전체의 운동량 보존이 삼킬 때마다 어긋나고, 블랙홀에 **감속 기제가
+                // 없어져** 중력으로만 계속 가속됐다. 사용자가 「블랙홀이 왜 이렇게 빠르게
+                // 날아다녀」, 「우주도 너무 빠르게 움직여」라고 알린 것의 뿌리다
+                // (실측: 정상 회전 속도 0.25 인데 `maxSpeed` 1.7~2.9 로 7~12배).
+                //
+                // 실제 블랙홀은 삼킨 물질과 운동량을 주고받으며 둘레 속도에 맞춰지고,
+                // 그래서 은하 중심에 **가라앉아 거의 안 움직인다**(동역학적 마찰).
+                // 여기서 속도 합을 쌓아 두면 호스트가 스텝 끝에서
+                // `v_new = (M·v_bh + Σm·v_p) / (M + Σm)` 로 반영한다 — 알갱이 하나의
+                // 질량이 1 이므로 개수(`eaten`)가 곧 Σm 이다.
+                const float4 vin = vel[i];
+                atomicAdd(&eatenP[b * 3 + 0], vin.x);
+                atomicAdd(&eatenP[b * 3 + 1], vin.y);
+                atomicAdd(&eatenP[b * 3 + 2], vin.z);
                 pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
                 vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
                 return;
@@ -2579,6 +2596,9 @@ struct Sim::Impl {
     int   bhCount = 0;
     // 이번 스텝에 삼킨 수 — 블랙홀마다 하나씩.
     int *eaten = nullptr;
+    // 이번 스텝에 삼킨 물질의 속도 합(블랙홀당 x·y·z 셋). 개수가 곧 질량이라
+    // 이 합을 개수로 나누면 삼킨 물질의 평균 속도가 나온다 — 동역학적 마찰의 재료다.
+    float *eatenP = nullptr;
     // 각 블랙홀이 놓인 자리의 격자 가속도(둘레 물질이 블랙홀을 끄는 힘).
     // 커널이 채우고 host 가 읽어 블랙홀을 움직인다.
     float4 *bhAcc = nullptr;
@@ -2850,7 +2870,7 @@ void Sim::Impl::freeAll() {
     F((void*&)flag); F((void*&)scan);
     F(sortTmp); F(redTmp);
     F((void*&)redD); F((void*&)redI); F((void*&)redU); F((void*&)redF);
-    F((void*&)eaten); F((void*&)bhAcc);
+    F((void*&)eaten); F((void*&)eatenP); F((void*&)bhAcc);
     sortTmpBytes = 0; redTmpBytes = 0;
     if (planReady) { cufftDestroy(planR2C); cufftDestroy(planC2R); planReady = false; }
 }
@@ -2937,6 +2957,8 @@ void Sim::Impl::allocate() {
     // 삼킨 수와 블랙홀 자리의 가속도는 블랙홀마다 하나씩. 잡은 직후에 반드시 비운다 —
     // 미초기화 값을 그대로 읽어 질량에 더하면 블랙홀이 난데없이 무거워진다.
     CK(cudaMalloc(&eaten, sizeof(int) * kMaxBlackHoles));
+    CK(cudaMalloc(&eatenP, sizeof(float) * 3 * kMaxBlackHoles));
+    CK(cudaMemset(eatenP, 0, sizeof(float) * 3 * kMaxBlackHoles));
     CK(cudaMalloc(&bhAcc, sizeof(float4) * kMaxBlackHoles));
     CK(cudaMemset(eaten, 0, sizeof(int) * kMaxBlackHoles));
     CK(cudaMemset(bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
@@ -3701,7 +3723,7 @@ void Sim::step() {
 
     kIntegrate<<<(d.allocN + 255) / 256, 256>>>(
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
-        bhPack, d.cfg.lightSpeedSq, d.eaten,
+        bhPack, d.cfg.lightSpeedSq, d.eaten, d.eatenP,
         // 세 힘 중 하나라도 켜져 있으면 그 가속도를 함께 넘긴다.
         (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
             ? d.accContact : nullptr);
@@ -3717,6 +3739,10 @@ void Sim::step() {
         // 삼킨 만큼 무거워지고 지평선이 자란다.
         int e[kMaxBlackHoles] = {0};
         CK(cudaMemcpy(e, d.eaten, sizeof(int) * d.bhCount, cudaMemcpyDeviceToHost));
+        // 삼킨 물질의 속도 합. 커널이 **실제로 삼킨 것만** 쌓으므로 아래에서 자른 개수와
+        // 짝이 맞는다(둘 다 에딩턴 몫이 상한이다).
+        float ep[3 * kMaxBlackHoles] = {0.f};
+        CK(cudaMemcpy(ep, d.eatenP, sizeof(float) * 3 * d.bhCount, cudaMemcpyDeviceToHost));
         bool any = false;
         for (int i = 0; i < d.bhCount; ++i) {
             if (e[i] <= 0) continue;
@@ -3725,6 +3751,22 @@ void Sim::step() {
             // 여기서 같은 상한으로 잘라야 질량이 부풀지 않는다(상한 식은 `packBH` 와 같다).
             const int cap = (int)fmaxf(1.0f, d.bhs[i].mass * 0.0004f);
             if (e[i] > cap) e[i] = cap;
+            // **운동량을 받는다 — 질량만 늘리면 보존이 깨지고 감속 기제가 없어진다.**
+            //
+            // `v_new = (M·v_bh + Σm·v_p) / (M + Σm)` 이고 알갱이 하나의 질량이 1 이라
+            // `Σm = e[i]` 다. **질량을 더하기 전에 계산해야** `M` 이 삼키기 전 값이다.
+            //
+            // 이것이 동역학적 마찰이다 — 블랙홀이 둘레 물질보다 빠르면 느린 물질을 삼켜
+            // 느려지고, 느리면 빨라진다. 그래서 실제 블랙홀은 은하 중심에 가라앉아 거의
+            // 안 움직인다. 전에는 이 항이 없어 중력으로만 계속 가속됐다.
+            {
+                const float M   = d.bhs[i].mass;
+                const float m   = (float)e[i];
+                const float inv = 1.0f / fmaxf(M + m, 1e-6f);
+                d.bhs[i].vx = (M * d.bhs[i].vx + ep[i * 3 + 0]) * inv;
+                d.bhs[i].vy = (M * d.bhs[i].vy + ep[i * 3 + 1]) * inv;
+                d.bhs[i].vz = (M * d.bhs[i].vz + ep[i * 3 + 2]) * inv;
+            }
             d.bhs[i].mass += (float)e[i];
             // 자라는 규칙은 setRsFrom 이 쥔다(세제곱근 — 그 자리의 주석 참조).
             d.setRsFrom(i);
@@ -3732,7 +3774,11 @@ void Sim::step() {
         }
         // 다음 스텝을 위해 비운다. **여기서 비워 두어야** 아래에서 블랙홀이 합쳐지며
         // 배열이 당겨져도 남은 수가 엉뚱한 블랙홀의 것으로 섞이지 않는다.
-        if (any) CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
+        if (any) {
+            CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
+            // 운동량 합도 함께 비운다 — 안 비우면 다음 스텝에 지난 몫이 한 번 더 섞인다.
+            CK(cudaMemset(d.eatenP, 0, sizeof(float) * 3 * kMaxBlackHoles));
+        }
 
         // 삼킨 것이 있으면 살아 있는 수를 다시 센다. 열다섯 스텝에 한 번만 하는데,
         // 세려면 결과를 호스트로 가져와야 하고 그 복사가 GPU 를 세우기 때문이다.
