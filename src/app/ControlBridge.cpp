@@ -430,6 +430,10 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);
         if (has(kv, "ashCoolK"))       app.cfg.ashCoolK       = clampF(getFloat(kv, "ashCoolK", app.cfg.ashCoolK), 0.0f, 10.0f, app.cfg.ashCoolK);
         if (has(kv, "nebulaK"))        app.cfg.nebulaK        = clampF(getFloat(kv, "nebulaK", app.cfg.nebulaK), 0.0f, 5.0f, app.cfg.nebulaK);
+        // 이온화 문턱. **밖에서 쓸어 볼 수 있어야 한다** — 격자에 쌓인 별빛의 스케일을
+        // 커널 밖에서는 알 수 없어, 값을 추측해 넣었더니 문턱이 전혀 안 걸렸다
+        // (2026-08-17: 0.3 에서 따뜻한 색 94.6%). 상한을 크게 열어 두고 실측으로 찾는다.
+        if (has(kv, "nebulaIonMin"))   app.cfg.nebulaIonMin   = clampF(getFloat(kv, "nebulaIonMin", app.cfg.nebulaIonMin), 0.0f, 100000.0f, app.cfg.nebulaIonMin);
         // 별 후광 — 밝은 별이 얼마나 넓게 보이나. 0 이면 옛 그림(전부 같은 크기)이라
         // 켠 것과 끈 것을 견줄 수 있어야 한다.
         if (has(kv, "starGlowK"))      app.cfg.starGlowK      = clampF(getFloat(kv, "starGlowK", app.cfg.starGlowK), 0.0f, 5.0f, app.cfg.starGlowK);

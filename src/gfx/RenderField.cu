@@ -286,7 +286,8 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
                              float sizePx, float sunMass, float sunLife, BHDisk bh,
                              const float* spread, const float* spreadT, int gridG,
-                             float nebulaK, const float* gasCol, float dustTau,
+                             float nebulaK, float nebulaIonMin,
+                             const float* gasCol, float dustTau,
                              const float* ashProj) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -451,6 +452,15 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
             const float sp = sampleGrid2D(spread, p.x, p.y, gridG);
             if (sp <= 1e-12f) return;                    // 별빛이 없는 자리의 가스는 검다
             L  = sp * nebulaK;
+            // **이온화 문턱 — 이만큼 못 되면 이온화되지 않아 안 빛난다.**
+            //
+            // 이 줄이 없으면 별빛이 조금이라도 있는 모든 칸이 옅게 빛나 판 전체가
+            // 주황으로 덮인다(2026-08-17 실측: 따뜻한 색 94.4%, 푸른색 0.02%). 세기를
+            // 낮추는 것으로는 안 되는데, 밝기 기준이 상위 5% 백분위수라 함께 내려가
+            // 비율이 그대로이기 때문이다 — 다섯 배 낮춰도 90.3% 였다.
+            //
+            // 실제 HII 영역의 경계가 뚜렷한 이유가 이 문턱이다(스트룀그렌 반경).
+            if (L < nebulaIonMin) return;
             // **색은 별에서 받지 않는다.** Hα 는 재결합선이라 온도로 색을 정하는 이
             // 경로와 맞지 않는데, 컬러맵이 붉은색을 내는 온도를 넣어 그 색을 얻는다.
             // `tempToColorT` 가 1710K 아래에서 붉은 쪽을 내므로 1500 을 쓴다.
@@ -1042,7 +1052,8 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     // 태양급 별의 수명. 적색거성 판정에 쓴다 — `kStarAge` 가 쓰는 값과
                     // 같아야 화면과 물리가 같은 순간을 가리킨다.
                     fmaxf(app.sim.config().starSunLifeSim, 1e-3f), bhDisk,
-                    nebSpread, nebSpreadT, gridG, nebK, gasCol, dustTau, ashProj);
+                    nebSpread, nebSpreadT, gridG, nebK,
+                    app.sim.config().nebulaIonMin, gasCol, dustTau, ashProj);
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //
