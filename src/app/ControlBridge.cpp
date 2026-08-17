@@ -189,6 +189,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // (round-06 QA-2 — 컬러맵·밝기·대비·HUD·줌팬 4항목이 자동 검증 불가로 남았다).
         "renderMode=%s\ncolorBy=%s\ncolormap=%s\n"
         "brightness=%.3f\ndisplayGamma=%.3f\nhud=%d\n"
+        // 점 크기도 창을 낸다 — 전수조사(r80)에서 이것만 되읽을 수 없었다. 알갱이를
+        // 몇 픽셀로 그리는지는 화면 인상을 크게 바꾸는 값이라 확인할 수 있어야 한다.
+        "pointSizePx=%.2f\n"
         "contact=%d\ncontactStiffness=%.0f\ncontactDamping=%.3f\n"
         // 자동 업데이트 상태. version 은 지금 도는 빌드, latest 는 저장소의 최신이다.
         "version=%s\nupdateChecked=%d\nupdateAvailable=%d\nlatestVersion=%s\nupdateError=%s\n"
@@ -279,6 +282,7 @@ std::string ControlBridge::statusBody(const App& app) const {
             : app.view.cmap == ColorMap::Thermal ? "thermal"
             : app.view.cmap == ColorMap::Blackbody ? "blackbody" : "astro",
         app.view.brightness, app.view.gamma, app.view.showHud ? 1 : 0,
+        app.ui.pointSizePx,
         app.cfg.contactEnabled ? 1 : 0, app.cfg.contactStiffness, app.cfg.contactDamping,
         STARDUST_VERSION, up.checked ? 1 : 0, up.available ? 1 : 0,
         up.latest.c_str(), up.error.c_str(),
