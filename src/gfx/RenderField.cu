@@ -620,6 +620,9 @@ void RenderField::shutdown() {
     if (devAccum_)   { cudaFree(devAccum_);  devAccum_  = nullptr; }
     if (devSmooth_)  { cudaFree(devSmooth_); devSmooth_ = nullptr; }
     if (devSmoothT_) { cudaFree(devSmoothT_); devSmoothT_ = nullptr; }
+    if (devSmoothNeb_)  { cudaFree(devSmoothNeb_);  devSmoothNeb_  = nullptr; }
+    if (devSmoothNebT_) { cudaFree(devSmoothNebT_); devSmoothNebT_ = nullptr; }
+    if (devSmoothGas_)  { cudaFree(devSmoothGas_);  devSmoothGas_  = nullptr; }
     if (devStat_)    { cudaFree(devStat_);   devStat_   = nullptr; }
     smoothCells_ = 0; smoothPrimed_ = false; liveMean_ = 0.f;
 }
@@ -894,6 +897,28 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 nebSpread  = app.sim.lightSpreadDevicePtr();
                 nebSpreadT = app.sim.lightSpreadTempDevicePtr();
                 nebK       = app.sim.config().nebulaK;
+
+                // **이 격자들도 앞 프레임과 섞는다.** 밝기 격자만 섞고 여기를 안 섞으면,
+                // 알갱이가 칸 경계를 넘나들 때마다 그 칸의 성운 밝기와 먼지 두께가 통째로
+                // 뛰어 **네모난 자리가 번쩍인다** — 2026-08-17 에 사용자가 발견했다.
+                // 도는 동안에만 섞는 것은 밝기 쪽과 같은 규칙이다(멈추면 섞을 것이 없다).
+                if (app.running && gridG > 0) {
+                    const int cells3 = gridG * gridG;
+                    const size_t bytes3 = sizeof(float) * (size_t)cells3;
+                    if (!devSmoothNeb_)  cudaMalloc(&devSmoothNeb_,  bytes3);
+                    if (!devSmoothNebT_) cudaMalloc(&devSmoothNebT_, bytes3);
+                    if (!devSmoothGas_)  cudaMalloc(&devSmoothGas_,  bytes3);
+                    const float a3 = smoothPrimed_ ? 0.35f : 1.0f;
+                    const int b3 = (cells3 + 255) / 256;
+                    if (devSmoothNeb_ && nebSpread) {
+                        kBlendGrid<<<b3, 256>>>((float*)devSmoothNeb_, nebSpread, cells3, a3);
+                        nebSpread = (const float*)devSmoothNeb_;
+                    }
+                    if (devSmoothNebT_ && nebSpreadT) {
+                        kBlendGrid<<<b3, 256>>>((float*)devSmoothNebT_, nebSpreadT, cells3, a3);
+                        nebSpreadT = (const float*)devSmoothNebT_;
+                    }
+                }
                 // 암흑성운 — 같은 가스가 뒤쪽 빛을 가린다. 가스 기둥은 격자 값이라
                 // 크기가 알갱이 수에 붙으므로 **평균으로 나눠** 「평균의 몇 배인가」로
                 // 바꾼 뒤 소광 계수를 곱한다(성운이 쓰는 정규화와 같은 것).
@@ -902,6 +927,13 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 const int nAll = app.sim.particleCount();
                 const float invMeanGas = (nAll > 0) ? ((float)cells2 / (float)nAll) : 1.0f;
                 dustTau = app.sim.config().dustExtinctionK * invMeanGas;
+                // 먼지 격자도 같이 섞는다 — 밝기를 깎는 쪽이라 튀면 가장 눈에 띈다.
+                if (app.running && devSmoothGas_ && gasCol) {
+                    const float a4 = smoothPrimed_ ? 0.35f : 1.0f;
+                    kBlendGrid<<<(cells2 + 255) / 256, 256>>>((float*)devSmoothGas_, gasCol,
+                                                              cells2, a4);
+                    gasCol = (const float*)devSmoothGas_;
+                }
             }
             if (n > 0) {
                 kSplatPoints<<<(n + 255) / 256, 256>>>(
