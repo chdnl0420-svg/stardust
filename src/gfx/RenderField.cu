@@ -156,6 +156,26 @@ __global__ void kBlendGrid(float* dst, const float* src, int n, float a) {
     dst[i] += (src[i] - dst[i]) * a;
 }
 
+// **오를 때와 내릴 때의 빠르기가 다른 블렌딩.**
+//
+// 성운에 쓴다. 이온화와 재결합은 **속도가 다르다** — O 형 별 근처에서 수소가 이온화되는
+// 데는 수천 년이지만, 이온이 전자를 다시 붙잡아 중성으로 돌아가는 데는 밀도에 따라
+// 수만~수십만 년이 걸린다. **켜지는 것보다 꺼지는 것이 훨씬 느리다.**
+//
+// 양방향을 같은 빠르기로 섞으면 그 비대칭이 사라지고, 별 하나가 옮겨갈 때마다 그 자리가
+// 곧바로 어두워진다 — 2026-08-18 사용자가 「주황색이 갑자기 파바박 등장해」라고 알린 것이
+// 그것이다. 계수를 0.35 에서 0.08 로 낮춰도 남았는데, 느리게 만드는 것만으로는 **양쪽이
+// 같이 느려져** 켜짐·꺼짐이 계속 번갈아 일어나기 때문이다.
+//
+// 내려가는 쪽만 훨씬 느리게 하면 한 번 이온화된 자리가 오래 남아, 별이 지나가도 그 자리는
+// 서서히 식는다. 실제 HII 영역이 그렇게 보인다.
+__global__ void kBlendGridAsym(float* dst, const float* src, int n, float aUp, float aDown) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float d = src[i] - dst[i];
+    dst[i] += d * ((d > 0.f) ? aUp : aDown);
+}
+
 // 격자를 화면 픽셀로 샘플링해 RGBA8 을 만든다.
 // zoom/pan 은 화면 중앙을 기준으로 시뮬레이션 공간 [0,1]² 을 확대·이동한다.
 __global__ void kShade(const float* rho, const float* tempSum, int G, uchar4* out, int W, int H,
@@ -1052,12 +1072,18 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     // 이유가 없다.
                     const float a3 = smoothPrimed_ ? 0.08f : 1.0f;
                     const int b3 = (cells3 + 255) / 256;
+                    // **성운은 비대칭으로 섞는다** — 이온화는 빠르고 재결합은 느리다
+                    // (`kBlendGridAsym` 주석). 첫 프레임은 섞을 것이 없어 그대로 받는다.
+                    const float aUp   = smoothPrimed_ ? 0.15f : 1.0f;
+                    const float aDown = smoothPrimed_ ? 0.015f : 1.0f;
                     if (devSmoothNeb_ && nebSpread) {
-                        kBlendGrid<<<b3, 256>>>((float*)devSmoothNeb_, nebSpread, cells3, a3);
+                        kBlendGridAsym<<<b3, 256>>>((float*)devSmoothNeb_, nebSpread, cells3,
+                                                    aUp, aDown);
                         nebSpread = (const float*)devSmoothNeb_;
                     }
                     if (devSmoothNebT_ && nebSpreadT) {
-                        kBlendGrid<<<b3, 256>>>((float*)devSmoothNebT_, nebSpreadT, cells3, a3);
+                        kBlendGridAsym<<<b3, 256>>>((float*)devSmoothNebT_, nebSpreadT, cells3,
+                                                    aUp, aDown);
                         nebSpreadT = (const float*)devSmoothNebT_;
                     }
                 }
