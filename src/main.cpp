@@ -14,6 +14,7 @@
 
 #include "app/App.h"
 #include "app/ControlBridge.h"
+#include "sim/ViewRot.h"   // 우클릭 드래그를 화면 기준 회전으로 쌓는다(viewRotOrbit)
 #include "app/Forensics.h"
 #include "app/Prefs.h"
 #include "app/Version.h"
@@ -149,7 +150,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
 
-        // 오른쪽 단추 — 시점 돌리기. 판이 3D 라 한 방향에서만 보면 두께를 알 수 없다.
+        // 오른쪽 단추 — **누르고 있는 동안 마우스가 시점을 조준한다.**
+        //
+        // **화면은 하나다.** 처음에는 누를 때 자유 비행으로, 놓을 때 궤도로 바꿨는데
+        // 그러면 놓는 순간 보던 시점이 사라지고 전체 뷰로 튄다. 사용자 지적(2026-08-18):
+        // 「궤도 화면과 자유모드 화면이 별도로 있어서는 안돼. 자유 모드로 이동하다가
+        // 같이 화면 같은 각도에서 궤도화면으로 움직이고 다시 우클릭하고있으면 자유모드로」.
+        //
+        // 그래서 카메라는 **언제나 자유 비행 하나**이고, 우클릭은 조준을 잡느냐만 가른다.
+        // 놓으면 커서가 풀려 UI 를 만질 수 있고, 좌클릭 드래그는 같은 시점에서 옆으로
+        // 밀어 옮긴다 — 보던 각도는 그대로 남는다.
         case WM_RBUTTONDOWN:
             if (g_app && !ImGui::GetIO().WantCaptureMouse) {
                 SetCapture(hwnd);
@@ -168,33 +178,77 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSEMOVE:
             if (g_orbiting && g_app) {
                 POINT now; GetCursorPos(&now);
-                // 화면을 가로로 한 번 지나가면 한 바퀴(360도) 돈다.
-                const float turn = 6.2831853f / (float)(g_w > 0 ? g_w : 1);
-                g_app->camYaw += (now.x - g_orbitLast.x) * turn;
-                g_app->camPitch += (now.y - g_orbitLast.y) * turn;
-                // 좌우는 한 바퀴가 제자리라 접어 두고(값이 끝없이 커지는 것을 막는다),
-                // 위아래는 세로로 선 자리(±90도)에서 멈춘다 — 넘어가면 판이 뒤집혀
-                // 어느 쪽이 위인지 알 수 없게 된다.
-                const float twoPi = 6.2831853f, half = 1.5533431f;   // 89도
-                if (g_app->camYaw >  twoPi) g_app->camYaw -= twoPi;
-                if (g_app->camYaw < -twoPi) g_app->camYaw += twoPi;
-                if (g_app->camPitch >  half) g_app->camPitch =  half;
-                if (g_app->camPitch < -half) g_app->camPitch = -half;
+                // 화면을 가로로 한 번 지나가면 반 바퀴(180도) 돈다.
+                // 한 바퀴로 두었더니 조금만 움직여도 확 돌아 겨냥이 어려웠다
+                // (2026-08-18 사용자 보고: 「카메라 회전이 너무 빨라」).
+                const float turn = 3.1415927f / (float)(g_w > 0 ? g_w : 1);
+                // **화면 기준으로 돌린다** — 가로로 끌면 지금 보이는 화면의 세로축,
+                // 세로로 끌면 화면의 가로축이 축이다. 그래서 어느 방향으로 아무리 돌려도
+                // 걸리거나 뒤집히지 않고, 끄는 방향과 도는 방향이 늘 일치한다.
+                // (판에 고정된 축으로 돌리면 기울여 놓았을 때 비스듬히 빙글빙글 돈다 —
+                //  사용자가 「판 기준으로 돌아서 멀미가나」로 알린 것이 그것이다.)
+                //
+                // **가로는 부호를 뒤집는다** — 마우스를 오른쪽으로 끌면 시점이 오른쪽을
+                // 보고, 그래서 판은 왼쪽으로 흘러야 한다. 안 뒤집으면 끄는 쪽과 도는 쪽이
+                // 반대다(2026-08-18 사용자 보고: 「우클릭 좌우가 반대로 움직여」).
+                viewRotOrbit(g_app->camRot,
+                             -(now.x - g_orbitLast.x) * turn,
+                              (now.y - g_orbitLast.y) * turn);
                 g_orbitLast = now;
             } else if (g_dragging && g_app) {
                 POINT now; GetCursorPos(&now);
-                // 화면 픽셀 이동량을 시뮬레이션 공간 이동량으로 바꾼다.
-                // 짧은 변이 [0,1] 에 대응하므로 그 값으로 나눈다.
-                const float unit = (float)(g_w < g_h ? g_w : g_h) * g_app->zoom;
                 const float s = g_app->ui.dragSensitivity;
-                g_app->panX += (now.x - g_dragLast.x) * s / unit;
-                g_app->panY += (now.y - g_dragLast.y) * s / unit;
-                ClampPan(*g_app);
+                if (g_app->camFly) {
+                    // **자유 비행 — 카메라를 화면 축 방향으로 밀어 옮긴다.**
+                    //
+                    // 궤도 모드의 `pan` 은 판을 화면에 어떻게 놓을지의 값이라 여기서는
+                    // 뜻이 없다(카메라가 공간 안에 있으므로). 대신 카메라 자체를 지금
+                    // 보이는 화면의 가로축·세로축으로 옮긴다 — 회전 행렬의 첫 두 행이
+                    // 곧 그 축이다.
+                    //
+                    // 부호: 마우스를 오른쪽으로 끌면 **판이 오른쪽으로 따라와야** 하므로
+                    // 카메라는 왼쪽(가로축의 반대)으로 간다. 세로는 창 좌표가 아래로
+                    // 커지는 것과 화면 세로축이 위로 커지는 것이 맞물려 그대로 더한다.
+                    const float unit = (float)(g_w < g_h ? g_w : g_h);
+                    const float dx = (now.x - g_dragLast.x) * s / unit;
+                    const float dy = (now.y - g_dragLast.y) * s / unit;
+                    const float* rx = g_app->camRot + 0;   // 화면 가로축
+                    const float* ry = g_app->camRot + 3;   // 화면 세로축
+                    for (int k = 0; k < 3; ++k)
+                        g_app->camPos[k] += -rx[k] * dx + ry[k] * dy;
+                } else {
+                    // 화면 픽셀 이동량을 시뮬레이션 공간 이동량으로 바꾼다.
+                    // 짧은 변이 [0,1] 에 대응하므로 그 값으로 나눈다.
+                    const float unit = (float)(g_w < g_h ? g_w : g_h) * g_app->zoom;
+                    g_app->panX += (now.x - g_dragLast.x) * s / unit;
+                    g_app->panY += (now.y - g_dragLast.y) * s / unit;
+                    ClampPan(*g_app);
+                }
                 g_dragLast = now;
             } else if (g_painting && g_app) {
                 float u, v;
                 g_app->screenToSim(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), g_w, g_h, u, v);
                 g_app->applyToolAt(u, v, false);   // 형태 추가는 드래그 중엔 안 넣는다
+            }
+            return 0;
+
+        // **휠(가운데 단추) 클릭 — 보기를 처음으로 되돌린다.**
+        //
+        // 돌리고 옮기고 확대하다 보면 지금 어디를 어느 방향으로 보고 있는지 알 수 없게
+        // 된다. 회전 상태가 행렬이 되면서 「각도를 0 으로 되돌린다」로는 풀 수 없어졌고,
+        // 되돌릴 수단이 하나 있어야 한다. 회전·이동·배율 셋을 한 번에 처음으로 돌린다.
+        case WM_MBUTTONDOWN:
+            if (g_app && !ImGui::GetIO().WantCaptureMouse) {
+                viewRotIdentity(g_app->camRot);       // 위에서 곧장 내려다보기
+                g_app->panX = 0.0f;
+                g_app->panY = 0.0f;
+                g_app->zoom = MinZoom();              // 판이 화면에 꼭 맞는 배율
+                ClampPan(*g_app);
+                // 자유 비행이면 카메라 자리도 처음으로 — 안 되돌리면 판 밖 어딘가에
+                // 떠 있는 채로 방향만 바뀌어 아무것도 안 보인다.
+                g_app->camPos[0] = 0.5f;
+                g_app->camPos[1] = 0.5f;
+                g_app->camPos[2] = -0.6f;
             }
             return 0;
 
@@ -527,6 +581,57 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
         fpsAccum += dtMs; ++fpsFrames;
         if (fpsAccum > 300.0f) { app.fps = fpsFrames * 1000.0f / fpsAccum; fpsAccum = 0; fpsFrames = 0; }
 
+        // ── 자유 비행 카메라 — 키로 움직인다 ────────────────────────────────
+        //
+        // **메시지가 아니라 매 프레임 눌린 상태를 읽는다.** `WM_KEYDOWN` 은 처음 한 번
+        // 오고 나서 자동 반복이 붙는 방식이라, 누르고 있는 동안 매끄럽게 움직이려면
+        // 그 반복 간격에 끌려다니게 된다. 지금 눌려 있는지를 직접 보는 편이 프레임과
+        // 정확히 맞는다.
+        //
+        // **방향은 화면 축이다** — 회전 행렬의 각 행이 화면의 가로·세로·깊이축이므로
+        // 그대로 쓰면 「보는 방향으로 앞」이 된다.
+        //   W/S 앞뒤(셋째 행) · A/D 좌우(첫째 행) · Q/E 위아래(둘째 행)
+        //
+        // 창이 뒤에 있거나 ImGui 가 키보드를 잡고 있으면(설정 창에 값을 적는 중) 건너뛴다.
+        if (app.camFly && app.windowActive && !ImGui::GetIO().WantCaptureKeyboard) {
+            const float dt = dtMs * 0.001f;
+            float sp = app.camSpeed * dt;
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) sp *= 2.0f;   // 빠르게
+            const float* rx = app.camRot + 0;   // 화면 가로축
+            const float* ry = app.camRot + 3;   // 화면 세로축
+            const float* rz = app.camRot + 6;   // 화면 깊이축(보는 방향)
+            float mv[3] = { 0.f, 0.f, 0.f };
+            auto add = [&mv](const float* axis, float k) {
+                mv[0] += axis[0] * k; mv[1] += axis[1] * k; mv[2] += axis[2] * k;
+            };
+            if (GetAsyncKeyState('W') & 0x8000) add(rz,  1.f);
+            if (GetAsyncKeyState('S') & 0x8000) add(rz, -1.f);
+            if (GetAsyncKeyState('D') & 0x8000) add(rx,  1.f);
+            if (GetAsyncKeyState('A') & 0x8000) add(rx, -1.f);
+            // E 가 위, Q 가 아래다. 화면 세로축은 값이 커질수록 화면 아래쪽이라
+            // 부호가 뒤집혀 보인다 — 눌러 본 방향에 맞춘다(2026-08-18).
+            if (GetAsyncKeyState('E') & 0x8000) add(ry, -1.f);
+            if (GetAsyncKeyState('Q') & 0x8000) add(ry,  1.f);
+            // Z/C — 보는 방향을 축으로 화면을 굴린다(roll). 원반을 비스듬히 볼 때
+            // 수평을 맞추는 데 쓴다. 초당 한 바퀴의 1/6(60도)이고 Shift 면 두 배다.
+            float roll = 0.f;
+            if (GetAsyncKeyState('C') & 0x8000) roll += 1.f;
+            if (GetAsyncKeyState('Z') & 0x8000) roll -= 1.f;
+            if (roll != 0.f) {
+                float rs = 1.0472f * dt;                            // 60도/초
+                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) rs *= 2.f;
+                viewRotRoll(app.camRot, roll * rs);
+            }
+            // 대각선으로 갈 때 빨라지지 않게 길이를 맞춘다.
+            const float L = std::sqrt(mv[0]*mv[0] + mv[1]*mv[1] + mv[2]*mv[2]);
+            if (L > 1e-6f) {
+                const float k = sp / L;
+                app.camPos[0] += mv[0] * k;
+                app.camPos[1] += mv[1] * k;
+                app.camPos[2] += mv[2] * k;
+            }
+        }
+
         // 창이 뒤에 있으면 계산을 쉰다(설정에서 끄면 뒤에서도 계속 돈다).
         // 오래 돌려 놓고 다른 일을 하려면 꺼야 하고, 배터리를 아끼려면 켜야 한다.
         if (app.ui.pauseWhenHidden && !app.windowActive) Sleep(30);
@@ -564,8 +669,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
                 else if (app.settingsOpen) app.settingsOpen = false;
                 else { app.drawerOpen = false; app.shapeDrawerOpen = false; }
             }
-            // S 로 설정을, M 으로 재는 창을 여닫는다.
-            if (ImGui::IsKeyPressed(ImGuiKey_S, false)) app.settingsOpen = !app.settingsOpen;
+            // **설정은 F1 로 연다.** 예전에는 S 였는데, 자유 비행에서 S 가 뒤로 가기라
+            // 누를 때마다 설정 창이 열렸다(2026-08-18 사용자 보고: 「s누르면 옵션 창이
+            // 켜져」). 모드마다 다르게 두면 손이 헷갈리므로 **어느 모드에서나 S 는 안 쓴다.**
+            // 아래 막대의 단추로도 열 수 있다.
+            if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) app.settingsOpen = !app.settingsOpen;
+            // M 으로 재는 창을 여닫는다.
             if (ImGui::IsKeyPressed(ImGuiKey_M, false)) app.metersOpen = !app.metersOpen;
             // H 로 막대까지 전부 감춘다(녹화·감상용).
             if (ImGui::IsKeyPressed(ImGuiKey_H, false)) {

@@ -268,7 +268,7 @@ void UpdateDangerStepMs(App& app) {
 void App::tick() {
     // 보는 방향을 먼저 넘긴다 — 이 프레임의 그림이 그 방향으로 투영된다.
     // 구조(개수·격자·경계)와 달리 판을 다시 잡지 않으므로 재시작 중에도 그냥 넘긴다.
-    sim.setViewAngles(camYaw, camPitch);
+    sim.setViewRot(camRot);
 
     // 설정 보드·제어 채널이 만진 값을 매 프레임 코어에 넘긴다.
     //

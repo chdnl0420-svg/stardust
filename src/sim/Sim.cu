@@ -26,6 +26,8 @@
 //                        영향을 한 번에 처리할 수 있다.
 //   그린함수            : 점 하나가 주변에 만드는 장(場)의 모양. 밀도와 합성곱하면 전체 장이 나온다.
 #include "Sim.h"
+#include "StarLook.h"        // 갓 태어난 별이 먼지 고치에서 드러나는 과정(점 렌더와 공유)
+#include "ViewRot.h"         // 보는 방향 — 격자 렌더와 점 렌더가 같은 값을 써야 한다
 #include "app/Forensics.h"   // 사고 기록 — 코어가 쥔 값(재할당·실패)을 코어가 직접 적는다
 
 #include <cuda_runtime.h>
@@ -118,18 +120,75 @@ __device__ __forceinline__ int gidx3(int x, int y, int z, int G, int S, int peri
 //     실제 은하의 감김각은 10~25도다 — 여기서는 18도를 쓴다.
 //
 //  3) 두께 — 안쪽이 얇고 바깥으로 갈수록 두껍다. 실제 원반이 나팔처럼 벌어진다.
-__device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s) {
-    const float u1 = rnd01(s), u2 = rnd01(s * 3u + 1u), u4 = rnd01(s * 13u + 7u);
-
+// 중심에서의 거리만 뽑는다. **원반과 구형이 이것을 나눠 쓴다** — 그래야 모양만 다르고
+// 질량이 어떻게 퍼졌는지는 같아, 「구형으로 시작해서 원반이 되는가」를 공정하게 잰다.
+__device__ __forceinline__ float galaxyRadius(float R, unsigned s) {
     // 반지름 — 표면 밀도가 exp(-r/h) 라도, **그 반지름에 있는 별의 수**는 원둘레가 곱해져
     // r·exp(-r/h) 다. 지수분포를 그대로 쓰면 중심에 과하게 몰려 팔이 안 보인다(실측).
     // r·exp(-r/h) 는 지수 둘의 합이라, 균등난수 두 개의 로그를 더하면 그 분포가 나온다.
     // 스케일 길이. 짧게 잡으면 알갱이가 중심에 몰려 정작 팔이 보이는 반지름대가 비고,
     // 화면에는 밝은 점 하나에 흐릿한 테두리만 남는다(2026-08-14 실측).
-    const float h = R * 0.42f;
-    float r = -h * (__logf(fmaxf(u1, 1e-6f)) + __logf(fmaxf(u4, 1e-6f)));
-    if (r > R * 1.6f) r = R * 1.6f;                  // 아주 먼 꼬리는 자른다
-    r = fmaxf(r, R * 0.015f);
+    const float h    = R * 0.42f;
+    const float rMax = R * 1.6f;
+
+    // **넘친 것을 경계에 몰아넣지 않는다 — 이것이 은하를 두르던 선이었다(2026-08-18).**
+    //
+    // 전에는 `if (r > rMax) r = rMax;` 한 줄이었고 주석은 「아주 먼 꼬리는 자른다」였다.
+    // 그런데 클램프는 **자르는 것이 아니라 몰아넣는 것**이다 — 넘친 알갱이가 버려지지 않고
+    // **정확히 같은 반지름의 원 위에 쌓인다.**
+    //
+    // 감마분포(k=2)의 꼬리 확률은 `(1+x)e^(-x)`, `x = rMax/h = 3.81` 이라 **10.66%** 다
+    // (실측 10.74%). 알갱이 100만이면 **106,572개**가 반지름 0.48 인 한 원에 놓이고,
+    // 그 원의 둘레가 15,635 픽셀이라 **픽셀당 6.8개** — 원반 안쪽 배경(픽셀당 0.074개)의
+    // **92배**다. 사용자가 「바깥쪽에 라인 생기는거」로 알린 것이 이것이다.
+    //
+    // 절단분포를 제대로 뽑는 방법은 **버리고 다시 뽑는 것**이다. 네 번이면 남는 것이
+    // `0.1066^4 = 1.29e-4` 라 100만 개에 129개, 픽셀당 0.008개라 보이지 않는다.
+    // **루프 횟수가 고정이라 비용에 상한이 있다** — 이 프로젝트에서 상한 없는 반복은
+    // 카드를 죽인다(CLAUDE.md 2번).
+    float r = 0.f;
+    unsigned rs = s ^ 0x85EBCA6Bu;        // 각도·두께와 겹치지 않는 씨앗
+    for (int k = 0; k < 4; ++k) {
+        const float a = rnd01(rs), b = rnd01(rs * 13u + 7u);
+        r = -h * (__logf(fmaxf(a, 1e-6f)) + __logf(fmaxf(b, 1e-6f)));
+        if (r <= rMax) break;
+        rs = rs * 1664525u + 1013904223u; // 다음 뽑기(선형합동)
+    }
+    // 네 번 다 넘친 129개. 여기서는 몰려도 픽셀당 0.008개라 선이 되지 않는다.
+    if (r > rMax) r = rMax;
+    // 중심 쪽 하한도 같은 성격이지만 걸리는 확률이 0.06%(100만에 640개)이고 그 자리는
+    // 원반에서 가장 빽빽한 곳이라 배경에 묻힌다 — 다시 뽑을 값어치가 없다.
+    return fmaxf(r, R * 0.015f);
+}
+
+// **구형으로 깐다 — 원반은 결과이지 초기 조건이 아니다(2026-08-18).**
+//
+// 실제 은하는 ①가스가 구형으로 뭉치고 ②조금 회전하며 ③서로 부딪혀 식으면서 ④회전축
+// 방향으로만 납작해져 **원반이 된다.** 이 판은 ①~④를 건너뛰고 ⑤결과부터 깔고 있었다.
+// 사용자 지적: 「입자를 구형태로 깔아야될꺼같은데 지금은 2차원 원반 형태로 깔고있어서
+// 문제가있어」.
+//
+// 이 판의 첫째 원칙과도 어긋난다 — 나선팔은 손으로 안 그리기로 했는데(그 주석: 「팔이
+// 저절로 생기는지 보려고 만든 판에서 팔을 처음부터 그려 넣으면, 무엇을 확인하든 이미
+// 답이 그려져 있다」) **원반 자체는 손으로 그리고 있었다.**
+//
+// 거리 분포는 원반과 **똑같이** 두고 방향만 구 전체에 고르게 편다. 그래야 「구형이라서
+// 달라진 것」만 갈린다.
+__device__ __forceinline__ float3 spherePoint(float R, unsigned s) {
+    const float r = galaxyRadius(R, s);
+    // 구 위에 고르게 뿌리려면 z 를 균등하게 뽑고 그 위도의 원에서 각을 뽑는다.
+    const float cz = rnd01(s * 3u + 1u) * 2.0f - 1.0f;
+    const float sz = sqrtf(fmaxf(1.0f - cz * cz, 0.0f));
+    const float ph = rnd01(s * 7u + 5u) * 6.2831853f;
+    return make_float3(r * sz * __cosf(ph), r * sz * __sinf(ph), r * cz);
+}
+
+__device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s) {
+    const float u2 = rnd01(s * 3u + 1u);
+    const float r  = galaxyRadius(R, s);
+
+    // (중심에서의 거리를 뽑는 부분은 `galaxyRadius` 로 옮겼다 — 구형 배치가 같은 것을
+    //  쓴다. 경계에 몰아넣지 않고 다시 뽑는 까닭도 그 함수 주석에 있다.)
 
     // **각은 균등하게 둔다 — 나선팔을 손으로 그리지 않는다(2026-08-16).**
     //
@@ -160,12 +219,52 @@ __device__ __forceinline__ float3 bulgePoint(float R, unsigned seed) {
     return make_float3(r * sz * __cosf(ph), r * sz * __sinf(ph), r * cz);
 }
 
+// 은하주변물질(CGM) — 원반을 감싼 가스 저장고의 자리.
+//
+// `bulgePoint` 와 다른 점은 **반지름 분포**다. 팽대부는 `r = R·u²` 라 중심에 몰리는데,
+// CGM 은 반대로 **바깥까지 넓게 퍼져 있어야** 원반이 다 쓴 뒤에도 공급이 이어진다.
+//
+// 관측된 CGM 밀도는 대략 `ρ ∝ r^-1.5` 다. 그러면 반지름 r 안에 든 질량이 `M(r) ∝ r^1.5`
+// 이고, 이것을 뒤집으면 `r = R·u^(2/3)` 이 나온다 — 균등난수 하나로 그 분포가 그대로 된다.
+//
+// 안쪽 하한을 둔다. 원반이 이미 차지한 자리에 겹쳐 놓으면 저장고가 아니라 그냥 원반이
+// 두꺼워지는 것이 되고, 떨어져 들어오는 것을 잴 수도 없다.
+__device__ __forceinline__ float3 haloGasPoint(float rMin, float rMax, unsigned seed) {
+    const float u = rnd01(seed);
+    const float r = rMin + (rMax - rMin) * __powf(fmaxf(u, 1e-6f), 0.6667f);
+    // 구 위에 고르게 뿌린다(bulgePoint 와 같은 방법).
+    const float cz = rnd01(seed * 3u + 1u) * 2.0f - 1.0f;
+    const float sz = sqrtf(fmaxf(1.0f - cz * cz, 0.0f));
+    const float ph = rnd01(seed * 7u + 5u) * 6.2831853f;
+    return make_float3(r * sz * __cosf(ph), r * sz * __sinf(ph), r * cz);
+}
+
+// CGM 가스가 원반에 견줘 얼마나 느리게 도는가.
+//
+// **각운동량이 모자라야 떨어진다.** 1.0 이면 원 궤도라 영원히 그 자리를 돌고, 0 이면
+// 곧장 자유낙하한다. 실제 은하 헤일로의 가스는 원반보다 느리게 도는 것이 관측돼 있고
+// (lagging halo), 그래서 나선을 그리며 안쪽으로 들어온다.
+//
+// 0.5 는 각운동량이 절반이라는 뜻이고, 그러면 근일점이 처음 반지름의 1/4 언저리까지
+// 내려와 원반과 만난다. 거기서 압력(속도 분산)과 부딪혀 각운동량을 더 잃고 정착한다.
+__device__ __constant__ float kHaloGasSpin = 0.5f;
+
+// 알갱이가 CGM 가스로 뽑혔는가. **`kPlace` 와 `kSetOrbit` 이 같은 답을 내야 한다** —
+// 자리는 `kPlace` 가 놓고 속도는 `kSetOrbit` 이 주는데, 둘이 다른 알갱이를 고르면
+// 원반에 있는 것이 느리게 돌거나 헤일로에 있는 것이 원 궤도를 받는다.
+//
+// 표시를 따로 두지 않고 **알갱이 번호에서 같은 해시**를 뽑는다. 그 사이(배치 → 전하 →
+// 궤도)에 정렬이 없어 번호가 그대로라 안전하다.
+__device__ __forceinline__ bool isHaloGas(unsigned s, float frac) {
+    return frac > 0.f && rnd01(s * 17u + 3u) < frac;
+}
+
 // 알갱이를 처음 놓는다.
 //
 // 비용: N 스레드 × O(1). 한 프레임이 아니라 판을 새로 깔 때 한 번만 돈다.
 __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
                        float bulgeFrac, float bulgeR, float thickness, unsigned seed,
-                       float darkFrac) {
+                       float darkFrac, float haloGasFrac, float sphereFrac) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const unsigned s = (unsigned)i * 2654435761u + seed;
@@ -194,11 +293,38 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
         return;
     }
 
+    // ── 은하주변물질(CGM) — 원반이 다 쓰고 나면 채워 줄 가스 저장고 ──────────────
+    //
+    // **이것이 없어서 은하가 한 번 쓰고 말랐다.** 별의 99.7% 는 수명이 우주 나이보다
+    // 길어 가스로 안 돌아오므로, 밖에서 받지 않으면 원반 가스는 한 번 쓰면 끝이다
+    // (근거와 실측은 `SimConfig::haloGasFraction` 주석).
+    //
+    // **구형으로 둔다.** 원반은 두께 0.02 로 납작하니, 같은 반지름이라도 구에 뿌리면
+    // 대부분이 원반 위아래의 빈 공간에 놓인다. 실제 CGM 도 원반이 아니라 구형 헤일로다.
+    // 판이 [0,1] 이고 중심이 0.5 라 반지름 상한은 0.45 다(0.5+0.45=0.95, 벽에 안 닿는다).
+    //
+    // 속도는 여기서 0 으로 두고 `kSetOrbit` 이 **느린 회전**을 준다 — 그 느림이
+    // 「떨어져 들어온다」의 전부다. 표시를 남기지 않고 같은 해시(`isHaloGas`)로 고른다.
+    //
+    // 나선·블랙홀 장면에만 둔다. 충돌·거미줄·빈 판은 원반 하나가 주인공이 아니라
+    // 저장고라는 개념이 성립하지 않는다.
+    if ((preset == 0 || preset == 3) && isHaloGas(s, haloGasFrac)) {
+        const float3 h = haloGasPoint(0.15f, 0.45f, s ^ 0x7FEB352Du);
+        pos[i] = make_float4(0.5f + h.x, 0.5f + h.y, 0.5f + h.z, 0.f);
+        vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);      // 가스다 — 나이 0, 별이 될 수 있다
+        return;
+    }
+
     if (preset == 0 || preset == 3) {            // 나선 은하 · 블랙홀
         const float R = 0.30f;
         if (u3 < bulgeFrac) {
             const float3 b = bulgePoint(bulgeR, s ^ 0x51ED2701u);
             x = 0.5f + b.x; y = 0.5f + b.y; z = 0.5f + b.z;
+        } else if (sphereFrac > 0.f && rnd01(s * 23u + 11u) < sphereFrac) {
+            // **구형으로 깐다** — 원반은 결과여야지 초기 조건이면 안 된다(`spherePoint`).
+            // 거리 분포는 원반과 같고 방향만 구에 고르게 편다.
+            const float3 p = spherePoint(R, s ^ 0x9E3779B9u);
+            x = 0.5f + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
         } else {
             const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
             x = 0.5f + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
@@ -260,7 +386,8 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
 // 비용: N 스레드 × O(1). 판을 깔 때 한 번.
 __global__ void kSetOrbit(float4* vel, const float4* pos,
                           const float* accMag, int n,
-                          float bulgeR, float2 base, float thickness) {
+                          float bulgeR, float2 base, float thickness,
+                          unsigned seed, float haloGasFrac) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -279,7 +406,18 @@ __global__ void kSetOrbit(float4* vel, const float4* pos,
     // 원반 쪽 흩어짐은 0 이다 — 압력(속도 분산 텐서)이 그 일을 한다(`orbitDispersion` 을 지운 이유).
     const float bulgeMix = (bulgeR > 0.f) ? __expf(-(r * r) / (bulgeR * bulgeR)) : 0.f;
     const float disp = 0.85f * bulgeMix;
-    const float spin = 1.0f - 0.55f * bulgeMix;
+    float spin = 1.0f - 0.55f * bulgeMix;
+
+    // **CGM 가스는 원반보다 느리게 돈다 — 그래서 떨어져 들어온다.**
+    //
+    // 원 궤도 속도를 그대로 주면 각운동량이 딱 맞아 그 반지름을 영원히 돈다. 그러면
+    // 저장고가 있어도 원반에 닿지 않아 아무 공급이 안 된다. 각운동량을 덜 주면 근일점이
+    // 안쪽으로 내려와 원반과 만나고, 거기서 압력에 부딪혀 정착한다.
+    //
+    // 실제 은하 헤일로의 가스도 원반보다 느리게 도는 것이 관측돼 있다(lagging halo).
+    // **자리를 놓은 `kPlace` 와 같은 해시를 쓴다** — 둘이 다른 알갱이를 고르면 원반에
+    // 있는 것이 느려지거나 헤일로에 있는 것이 원 궤도를 받는다.
+    if (isHaloGas((unsigned)i * 2654435761u + seed, haloGasFrac)) spin *= kHaloGasSpin;
 
     const unsigned s = (unsigned)i * 22695477u + 7u;
     const float g1 = rndNormal(s), g2 = rndNormal(s ^ 0xA341316Cu), g3 = rndNormal(s ^ 0x1B873593u);
@@ -1470,8 +1608,8 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
                          float sunMass, float sunLifeSim, float explodeSim,
                          float kickSpeed, unsigned seed,
                          float* ashGrid, int G, int periodic, float ashYield,
-                         float4* bhCand, int* bhCandN, int* bhBlocked, int bhSlots,
-                         float bhRatio, float windRate) {
+                         float4* bhCand, float4* bhCandV, int* bhCandN, int* bhBlocked,
+                         int bhSlots, float bhRatio, float windRate) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -1575,6 +1713,23 @@ __global__ void kStarAge(float4* pos, float4* vel, int n, float dt,
                     // 심이고 6할이 날아간다.** 날아간 몫은 폭발로 보이다가 가스로 돌아가
                     // 다음 별의 재료가 된다 — 사슬이 여기서 끊기지 않는다.
                     bhCand[slot] = make_float4(p.x, p.y, p.z, p.w * 0.4f);
+                    // **속도를 함께 넘긴다 — 이것이 없어 블랙홀이 은하 밖으로 튀어나갔다.**
+                    //
+                    // 여태 자리와 질량만 넘겼고, 받는 쪽(`addBlackHole`)이 구조체를 통째로
+                    // 0 으로 밀고 시작해 **속도가 사라졌다.** 은하 회전 속도 0.25 로 돌던
+                    // 별이 블랙홀이 되는 순간 그 자리에 멎는 것이라, 각운동량이 없어 중심으로
+                    // 곧장 떨어지고 반대편으로 솟아 판 밖으로 나간다. 한 번 나가면 그 자리
+                    // 밀도가 0 이라 동역학적 마찰의 `ga[i].w > 0` 조건이 거짓이 되어 **영원히
+                    // 직진한다.** 2026-08-18 실측: 중심에서 0.46, 각운동량 0.002 로 회전을
+                    // 물려받았을 때 기댓값(0.115)의 1.7% 였다.
+                    //
+                    // **운동량 보존이다.** 심이 무너지고 바깥층이 구형으로 날아가면 심의
+                    // 속도는 원래 속도 그대로다. 실제 초신성 킥(natal kick)이 여기 더해지지만
+                    // 그것은 수백 km/s 로 은하 회전(220 km/s)과 같은 규모라, 실제 항성질량
+                    // 블랙홀은 은하 원반 안에 남아 계속 돈다.
+                    //
+                    // `v.w` 는 나이라 블랙홀에는 뜻이 없다 — xyz 만 쓴다.
+                    if (bhCandV) bhCandV[slot] = make_float4(v.x, v.y, v.z, 0.f);
                     p.w = -explodeSim;      // 남은 바깥층이 폭발한다
                     // 심은 이미 블랙홀이 됐으므로 잔해를 또 남기지 않는다.
                     vel[i].w = 0.f;
@@ -2048,26 +2203,9 @@ __global__ void kReorder(const float4* srcP, const float4* srcV, const float* sr
 //
 // on 이 0 이면 예전 경로 그대로 z 로 곧장 합친다. 각도를 안 돌린 사람에게 회전 계산
 // 비용을 물리지 않으려는 것이다(격자 209만 칸을 매 프레임 도는 자리다).
-struct ViewRot {
-    float cy, sy;      // 좌우 돌리기(yaw) 의 코사인·사인
-    float cp, sp;      // 위아래 기울이기(pitch)
-    int   on;
-};
-
-// 판 안의 한 점을 돌려 화면 좌표로 옮긴다. 판 밖으로 나가면 false.
-//
-// 판은 정육면체라 비스듬히 보면 대각선이 한 변의 1.73배가 되어 모서리가 화면을 벗어난다.
-// 줄여서 다 담으면 똑바로 볼 때보다 작아 보이므로, 여기서는 자르고 확대·축소는 사용자에게
-// 맡긴다 — 알갱이는 대개 가운데 모여 있어 잘리는 것은 빈 모서리다.
-__device__ inline bool rotPoint(float px, float py, float pz, const ViewRot& r,
-                                float& ox, float& oy) {
-    const float fx = px - 0.5f, fy = py - 0.5f, fz = pz - 0.5f;
-    const float ax =  fx * r.cy + fz * r.sy;         // 세로축으로 돌린다
-    const float az = -fx * r.sy + fz * r.cy;
-    const float ay =  fy * r.cp - az * r.sp;         // 가로축으로 기울인다
-    ox = ax + 0.5f; oy = ay + 0.5f;
-    return (ox >= 0.f && ox < 1.f && oy >= 0.f && oy < 1.f);
-}
+// (`ViewRot`·`rotPoint` 를 `ViewRot.h` 로 옮겼다 — 2026-08-18. 여기에만 있어서 점
+//  렌더(`RenderField.cu` 의 `kSplatPoints`)가 회전을 못 받았고, 화면이 통째로 점 렌더인
+//  배율에서는 우클릭이 아무 일도 하지 않았다. 자세한 근거는 그 헤더 주석.)
 
 // 격자 칸 하나를 같은 규칙으로 옮긴다.
 __device__ inline bool rotCell(int x, int y, int z, int G, const ViewRot& r,
@@ -2164,7 +2302,8 @@ __device__ __forceinline__ float starTempK(float pw, float vw, float sunMass) {
 
 __global__ void kScatterLight(const float4* pos, const float4* vel, int n, int G,
                               float* out, float* outT, ViewRot rot,
-                              float sunMass, float novaBoost, float explodeSim) {
+                              float sunMass, float novaBoost, float explodeSim,
+                              float embedSim) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -2208,6 +2347,18 @@ __global__ void kScatterLight(const float4* pos, const float4* vel, int n, int G
         tempK = starTempK(p.w, vw, sunMass);
         if (p.w > 0.f && vw < 0.f) {
             lum *= (vw < -1.5f) ? 1e-6f : 1e-3f;   // 중성자별 · 백색왜성
+        } else if (p.w > 0.f) {
+            // **배태 단계 — 갓 태어난 별은 아직 고치 안에 있다**(근거는 `StarLook.h`).
+            //
+            // `vw` 는 별이 된 뒤 흐른 시간이다. 이것이 없을 때는 별이 되는 순간 밝기가
+            // 0 에서 `ratio^3.5` 로 한 프레임에 뛰었고, 무리로 태어나는 자리가 통째로
+            // 번쩍였다. 먼지가 걷히는 동안 어둡고 붉게, 걷히면 제 밝기·제 색으로 온다.
+            //
+            // 점 렌더(`RenderField.cu` 의 `kSplatPoints`)에 **같은 두 줄이 있다** —
+            // 한쪽만 고치면 화면과 격자가 다른 색을 낸다.
+            const float veil = starVeil(vw, p.w / sunMass, embedSim);
+            lum  *= veil;
+            tempK = dustRedden(tempK, veil);
         }
     } else {
         tempK = starTempK(p.w, 0.f, sunMass);
@@ -2553,6 +2704,7 @@ struct Sim::Impl {
     // 기존 `addBlackHole` 처럼 가장 가벼운 것을 밀어내면 그 블랙홀이 삼킨 질량이
     // 소리 없이 사라져 보존이 깨진다(설계 2.4).
     float4 *bhCand = nullptr;        // [kMaxBlackHoles] 자리(xyz) + 질량(w)
+    float4 *bhCandV = nullptr;       // [kMaxBlackHoles] 물려줄 속도(xyz) — 운동량 보존
     int    *bhCandN = nullptr;       // 이번 스텝의 후보 수
     int    *bhBlockedCount = nullptr;// 자리가 없어 중성자별로 남은 누적 횟수
     int     bhBlockedHost = 0;       // 호스트 쪽 사본(사고 기록·상태 표시용)
@@ -2601,15 +2753,13 @@ struct Sim::Impl {
     // 커널이 채우고 host 가 읽어 블랙홀을 움직인다.
     float4 *bhAcc = nullptr;
 
-    // 보는 방향(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그대로다.
-    float viewYaw = 0.f, viewPitch = 0.f;
-    ViewRot viewRot() const {
-        ViewRot r{};
-        r.on = (viewYaw != 0.f || viewPitch != 0.f) ? 1 : 0;
-        r.cy = cosf(viewYaw);   r.sy = sinf(viewYaw);
-        r.cp = cosf(viewPitch); r.sp = sinf(viewPitch);
-        return r;
-    }
+    // 보는 방향. 단위행렬이면 위에서 곧장 내려다보던 예전 그대로다.
+    // 각도 둘이 아니라 행렬인 까닭은 `ViewRot.h` 맨 위 주석(짐벌락)에 있다.
+    float viewM[9] = { 1.f,0.f,0.f, 0.f,1.f,0.f, 0.f,0.f,1.f };
+    // **격자 렌더는 화면 이동(pan)을 자기가 따로 처리한다**(`kShade` 의 `- panX`).
+    // 그래서 여기서는 넣지 않는다 — 넣으면 두 번 적용되어 그림이 어긋난다.
+    // 식은 `ViewRot.h` 의 `makeViewRot` 하나로 둔다 — 점 렌더도 같은 것을 쓴다.
+    ViewRot viewRot() const { return makeViewRot(viewM); }
 
     // 가장 무거운 것. 오래 「판에 하나」였던 자리들이 이것을 본다.
     BlackHoleState heaviest() const {
@@ -2649,7 +2799,10 @@ struct Sim::Impl {
     // i 번째 지평선을 그 질량에서 다시 낸다.
     void   setRsFrom(int i);
     // 블랙홀을 하나 더한다. 자리가 없으면 가장 가벼운 것을 밀어낸다. 그 번호를 돌려준다.
-    int    addBlackHole(float x, float y, float z, float mass, bool born);
+    // 속도는 기본이 0 이다 — 사용자가 마우스로 놓는 것과 판을 열 때 중심에 두는 것은
+    // 멈춘 채로 시작하는 것이 맞다. **별이 무너져 생기는 것만** 원래 속도를 물려준다.
+    int    addBlackHole(float x, float y, float z, float mass, bool born,
+                        float vx = 0.f, float vy = 0.f, float vz = 0.f);
     // 블랙홀을 한 스텝 움직이고, 겹친 것끼리 합친다.
     void   advanceBlackHoles(float dt);
 
@@ -2734,7 +2887,8 @@ void Sim::Impl::setRsFrom(int i) {
     bhs[i].rs = horizonOf(bhs[i].mass);
 }
 
-int Sim::Impl::addBlackHole(float x, float y, float z, float mass, bool born) {
+int Sim::Impl::addBlackHole(float x, float y, float z, float mass, bool born,
+                            float vx, float vy, float vz) {
     // 상한은 두지 않는다. 크게 놓으면 크게 되는 것이 맞고, 무게는 부르는 쪽에서 정한다
     // (마우스로 놓는 것은 addShape 이 개수의 50분의 1 로 낮춰 넘긴다).
     if (mass < 1.0f) mass = 1.0f;
@@ -2753,6 +2907,12 @@ int Sim::Impl::addBlackHole(float x, float y, float z, float mass, bool born) {
     bhs[i].active = true;
     bhs[i].born = born;
     bhs[i].x = x; bhs[i].y = y; bhs[i].z = z;
+    // **속도를 물려받는다 — 이 줄이 없어 블랙홀이 은하 밖으로 튀어나갔다.**
+    //
+    // 구조체를 통째로 0 으로 밀고 시작하므로, 여기서 다시 넣지 않으면 속도가 사라진다.
+    // 은하 회전 속도로 돌던 별이 블랙홀이 되는 순간 멎어 각운동량이 없어지고, 중심으로
+    // 자유낙하해 반대편으로 솟아 판 밖으로 나간다(자세한 근거는 `kStarAge` 의 후보 기록).
+    bhs[i].vx = vx; bhs[i].vy = vy; bhs[i].vz = vz;
     bhs[i].mass = mass;
     // **지평선은 질량에서만 나온다** — `setRsFrom` 이 `2GM/c²` 하나로 낸다.
     // 「처음 크기 × 세제곱근 성장」과 그 기준값(`bhMassAtBirth`·`bhRsAtBirth`)은
@@ -2828,6 +2988,11 @@ void Sim::Impl::advanceBlackHoles(float dt) {
         // 속도가 0 에 가까울 때 `1/v³` 이 발산하므로 무름 속도를 더한다. 실제 공식의
         // `erf(X) − 2X e^(−X²)/√π` 항이 하는 일 — 주변 속도 분산보다 느린 것은 마찰이
         // 급격히 줄어든다 — 을 같은 모양으로 대신한다.
+        // **밖에서 볼 창을 먼저 채운다.** 조건문 안에 두면 마찰이 안 걸린 스텝에 값이
+        // 남아 있어, 「안 걸렸다」와 「걸렸는데 약하다」가 구분되지 않는다. `drag` 를
+        // 0 으로 두고 시작해 실제로 건 스텝에만 덮는다.
+        bhs[i].rho  = ga[i].w * inv;
+        bhs[i].drag = 0.f;
         if (cfg.bhFrictionK > 0.f && ga[i].w > 0.f && bhs[i].mass > 0.f) {
             const float vx = bhs[i].vx, vy = bhs[i].vy, vz = bhs[i].vz;
             const float v2 = vx * vx + vy * vy + vz * vz;
@@ -2848,6 +3013,7 @@ void Sim::Impl::advanceBlackHoles(float dt) {
             const float maxMag = 0.5f / fmaxf(dt, 1e-9f);
             if (mag > maxMag) mag = maxMag;
             ax -= mag * vx; ay -= mag * vy; az -= mag * vz;
+            bhs[i].drag = mag;               // 밖에서 보는 창(바로 위 참조)
         }
 
         bhs[i].vx += ax * dt;
@@ -2928,7 +3094,7 @@ void Sim::Impl::freeAll() {
     F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
     F((void*&)velSumX); F((void*&)velSumY); F((void*&)velSumZ);
     F((void*&)ashGrid);
-    F((void*&)bhCand); F((void*&)bhCandN); F((void*&)bhBlockedCount);
+    F((void*&)bhCand); F((void*&)bhCandV); F((void*&)bhCandN); F((void*&)bhBlockedCount);
     F((void*&)specRho); F((void*&)specGreen);
     F((void*&)keys); F((void*&)order); F((void*&)cellStart); F((void*&)cellEnd);
     F((void*&)flag); F((void*&)scan);
@@ -2982,9 +3148,11 @@ void Sim::Impl::allocate() {
     // 블랙홀 후보 다리. 잡은 직후 반드시 비운다 — 미초기화 후보 수를 읽으면
     // 쓰레기 좌표로 블랙홀이 생긴다.
     CK(cudaMalloc(&bhCand, sizeof(float4) * kMaxBlackHoles));
+    CK(cudaMalloc(&bhCandV, sizeof(float4) * kMaxBlackHoles));
     CK(cudaMalloc(&bhCandN, sizeof(int)));
     CK(cudaMalloc(&bhBlockedCount, sizeof(int)));
     CK(cudaMemset(bhCand, 0, sizeof(float4) * kMaxBlackHoles));
+    CK(cudaMemset(bhCandV, 0, sizeof(float4) * kMaxBlackHoles));
     CK(cudaMemset(bhCandN, 0, sizeof(int)));
     CK(cudaMemset(bhBlockedCount, 0, sizeof(int)));
     CK(cudaMalloc(&rho, sizeof(float) * cells));
@@ -3099,10 +3267,14 @@ void Sim::Impl::placeInitial() {
                      : (cfg.preset == Preset::TidalPair)  ? 1
                      : (cfg.preset == Preset::CosmicWeb)  ? 2
                      : (cfg.preset == Preset::BlackHole)  ? 3 : 4;
+    // **씨앗 12345 는 `giveOrbits` 의 `kSetOrbit` 도 그대로 받아야 한다** — 두 커널이 같은
+    // 해시로 CGM 가스를 골라내므로, 씨앗이 다르면 자리와 속도가 서로 다른 알갱이에 간다.
     kPlace<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, preset,
                                           cfg.bulgeFraction, cfg.bulgeRadius,
                                           cfg.diskThickness, 12345u,
-                                          cfg.darkMatterFraction);
+                                          cfg.darkMatterFraction,
+                                          (preset == 0 || preset == 3) ? cfg.haloGasFraction : 0.f,
+                                          (preset == 0 || preset == 3) ? cfg.sphereStart : 0.f);
     CK(cudaGetLastError());
     active = (preset == 4) ? 0 : allocN;
     aliveShown = -1;                       // 판을 새로 열었으니 세어 둔 값은 버린다
@@ -3116,8 +3288,13 @@ void Sim::Impl::giveOrbits() {
                                              periodic() ? 1 : 0, packBH());
     // 은하 충돌은 둘을 서로에게 밀어 준다. 나머지는 제자리에서 돈다.
     const float2 base = make_float2(0.f, 0.f);
+    // CGM 가스에 느린 회전을 주려면 **`placeInitial` 이 쓴 것과 같은 씨앗**이 필요하다
+    // (`kPlace` 의 12345). 그 사이에 정렬이 없어 알갱이 번호가 유지되므로, 같은 해시가
+    // 같은 알갱이를 가리킨다.
+    const bool haloScene = (cfg.preset == Preset::SpiralDisk || cfg.preset == Preset::BlackHole);
     kSetOrbit<<<(allocN + 255) / 256, 256>>>(vel, pos, accMag, allocN,
-                                             cfg.bulgeRadius, base, cfg.diskThickness);
+                                             cfg.bulgeRadius, base, cfg.diskThickness,
+                                             12345u, haloScene ? cfg.haloGasFraction : 0.f);
     CK(cudaGetLastError());
 }
 
@@ -3621,7 +3798,12 @@ void Sim::reset() {
         // 여기서는 2% 로 둔다. 0.1% 로 하면 물리적으로는 옳지만 원반이 블랙홀을 거의
         // 못 느껴 「블랙홀 장면」이라는 이름이 무색해진다. 2% 면 안쪽이 눈에 띄게 감기면서도
         // 원반은 살아남아, 회전하며 빨려 드는 모습이 보인다.
-        const int i = d.addBlackHole(0.5f, 0.5f, 0.5f, 0.02f * (float)d.allocN, false);
+        //
+        // **그 2% 를 `centralBHFraction` 으로 빼냈다(2026-08-18).** 여기 박혀 있어 밖에서
+        // 만질 수 없었고, 「별에서 생긴 것보다 몇 배로 볼 것인가」를 시험할 방법이 없었다.
+        // 기본값은 그대로 0.02 라 이 변경만으로는 어떤 장면도 달라지지 않는다.
+        const int i = d.addBlackHole(0.5f, 0.5f, 0.5f,
+                                     fmaxf(d.cfg.centralBHFraction, 0.f) * (float)d.allocN, false);
         // 그 질량의 지평선은 화면에서 점보다 작다. 삼킴 판정과 그리기에 쓸 최소 크기를 준다.
         d.setRsFrom(i);
     }
@@ -3864,6 +4046,7 @@ void Sim::step() {
             // 블랙홀 전환이 꺼져 있으면 후보 버퍼를 안 넘긴다 — 커널이 `bhCand` 가 null 인
             // 것을 보고 그 갈래를 건너뛰어, 무거운 별도 그냥 터지고 가스로 돌아온다.
             d.cfg.starCollapseToBH ? d.bhCand : nullptr,
+            d.cfg.starCollapseToBH ? d.bhCandV : nullptr,
             d.cfg.starCollapseToBH ? d.bhCandN : nullptr,
             d.bhBlockedCount, kMaxBlackHoles,
             fmaxf(d.cfg.starBHRatio, 1.0f), d.cfg.starWindRate);
@@ -3878,14 +4061,19 @@ void Sim::step() {
         CK(cudaMemcpy(&nCand, d.bhCandN, sizeof(int), cudaMemcpyDeviceToHost));
         if (nCand > 0) {
             float4 cand[kMaxBlackHoles];
+            float4 candV[kMaxBlackHoles] = {};
             const int take = (nCand < kMaxBlackHoles) ? nCand : kMaxBlackHoles;
             CK(cudaMemcpy(cand, d.bhCand, sizeof(float4) * take, cudaMemcpyDeviceToHost));
+            // 물려줄 속도도 함께 가져온다 — 이것이 없으면 블랙홀이 그 자리에 멎어
+            // 각운동량을 잃고 판 밖으로 나간다(`kStarAge` 의 후보 기록 참조).
+            CK(cudaMemcpy(candV, d.bhCandV, sizeof(float4) * take, cudaMemcpyDeviceToHost));
             for (int c = 0; c < take; ++c) {
                 // **자리가 있을 때만 만든다.** `addBlackHole` 은 자리가 차면 가장 가벼운 것을
                 // 밀어내는데, 그건 사용자가 마우스로 놓을 때의 규칙이다. 저절로 생기는 쪽이
                 // 남의 자리를 빼앗으면 삼킨 질량이 사라진다.
                 if (d.bhCount < kMaxBlackHoles) {
-                    d.addBlackHole(cand[c].x, cand[c].y, cand[c].z, cand[c].w, true);
+                    d.addBlackHole(cand[c].x, cand[c].y, cand[c].z, cand[c].w, true,
+                                   candV[c].x, candV[c].y, candV[c].z);
                 } else {
                     ++d.bhBlockedHost;
                 }
@@ -4508,11 +4696,14 @@ double Sim::bornShellRatio() const {
     return (h[0] > 0.5) ? (h[2] / h[0]) : 0.0;
 }
 
-// 보는 방향을 정한다(라디안). 둘 다 0 이면 위에서 곧장 내려다보던 예전 그림 그대로다.
-void Sim::setViewAngles(float yaw, float pitch) {
-    impl_->viewYaw   = yaw;
-    impl_->viewPitch = pitch;
+// 보는 방향을 정한다. 단위행렬이면 위에서 곧장 내려다보던 예전 그림 그대로다.
+void Sim::setViewRot(const float m[9]) {
+    for (int i = 0; i < 9; ++i) impl_->viewM[i] = m[i];
 }
+
+// (`setViewPan` 을 지웠다 — 2026-08-18. 격자 렌더는 화면 이동을 자기가 처리하므로
+//  여기서 또 받으면 두 번 적용된다. 점 렌더 쪽 화면 이동은 `makeViewRot(m, panX, panY)`
+//  가 회전축을 옮기는 것으로 처리한다.)
 
 // 화면은 위에서 내려다본다. 3D 값을 z 로 합쳐 2D 로 투영해 넘긴다.
 const float* Sim::fieldDevicePtr(Field field) {
@@ -4557,7 +4748,8 @@ const float* Sim::fieldDevicePtr(Field field) {
         kScatterLight<<<(d.allocN + 255) / 256, 256>>>(
             d.pos, d.vel, d.allocN, G, d.proj, d.projT, rot,
             fmaxf(d.cfg.starSunMass, 1.0f), nova,
-            fmaxf(d.cfg.starExplodeSim, 1e-4f));
+            fmaxf(d.cfg.starExplodeSim, 1e-4f),
+            fmaxf(d.cfg.starEmbedTime, 0.f));
 
         // (성운 블록을 지웠다 — 2026-08-18. 별빛을 흐려 「퍼진 별빛」을 만들고 그것을
         //  가스에 곱해 별 둘레를 넓게 밝히던 자리다. 사용자 요청 — 「이런식으로 주위가

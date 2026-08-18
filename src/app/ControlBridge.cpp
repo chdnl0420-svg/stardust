@@ -1,5 +1,6 @@
 #include "app/ControlBridge.h"
 #include "app/Version.h"
+#include "sim/ViewRot.h"   // 보는 방향을 각도로 지정하거나 더 돌릴 때 쓴다
 
 #include <windows.h>
 #include <GL/gl.h>
@@ -239,9 +240,19 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 회전곡선 — 반지름 네 구간의 평균 접선 속도. 바깥 둘이 안 떨어지면 평평한 것이고,
         // 그것이 암흑물질 헤일로가 실제로 일하고 있다는 신호다.
         "rot1=%.5f\nrot2=%.5f\nrot3=%.5f\nrot4=%.5f\n"
+        // 보는 방향 — 행 우선 3×3 회전 행렬. **되읽을 창이 없어서 2026-08-18 에 회전
+        // 검증이 헛돌았다** — 이름이 비슷한 `rot1~rot4`(회전곡선)를 각도로 잘못 읽고
+        // 「각도를 바꿔도 값이 안 변한다」는 엉뚱한 결론을 낼 뻔했다.
+        // 각도가 아니라 행렬인 까닭은 `ViewRot.h`(짐벌락) 참조. 단위행렬 = 위에서 내려다봄.
+        "camRot=%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n"
+        // 자유 비행 카메라 — 켰는지, 어디에 있는지, 얼마나 빠른지, 시야각.
+        "camFly=%d\ncamPos=%.5f %.5f %.5f\ncamSpeed=%.4f\ncamFovY=%.4f\n"
         // 코어가 실제로 들고 있는 값. **밖에서 보낸 설정이 여기까지 왔는지**를 보는 창이다 —
         // `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다(round-06 리뷰 P1 #2).
-        "coreIonizeK=%.4f\ncoreDark=%.4f\n"
+        "coreIonizeK=%.4f\ncoreDark=%.4f\ncoreEmbed=%.4f\ncoreHaloGas=%.4f\n"
+        // 판을 열 때 중심에 놓는 블랙홀 — 켰는지와 그 무게. 여태 `reset` 안에 박혀 있어
+        // 밖에서 켤 수도 되읽을 수도 없었다.
+        "coreBhOn=%d\ncoreBhFrac=%.5f\ncoreSphere=%.4f\n"
         // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
         //
         // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
@@ -258,6 +269,14 @@ std::string ControlBridge::statusBody(const App& app) const {
         //  그대로다. 지평선은 `bhRs` 로 따로 나간다.)
         "coreAshDiff=%.3f\ncoreBhRatio=%.1f\ncoreExplode=%.4f\n"
         "coreSunLife=%.2f\n"
+        // (`coreNovaE`·`coreBhFric` 을 여기 되살렸다 — 2026-08-18. 초신성 에너지와 블랙홀
+        //  동역학적 마찰을 넣으면서 **인자만 더하고 이 포맷을 안 더해**, 위 `coreBhRs` 와
+        //  정확히 **반대 방향의 같은 사고**가 났다. 그 결과 `dispCross` 자리에
+        //  `novaEnergyK`(60) 가, `bornShell` 자리에 `bhFrictionK`(1.0) 가 나가고 진짜
+        //  두 값은 아예 안 나갔다. 컴파일러가 C4474 로 「114개 필요한데 116개」라고
+        //  알려 주고 있었는데 경고를 안 읽었다 — **이 경고는 status 가 통째로 밀렸다는
+        //  뜻이므로 무시하면 안 된다.**)
+        "coreNovaE=%.2f\ncoreBhFric=%.2f\n"
         // 분산 텐서의 교차항 ÷ 대각항. 격자를 셋에서 여섯으로 늘릴지 정하는 값이다.
         "dispCross=%.5f\n"
         // 새 별이 재 봉우리의 둘레에서 났는지(껍질) 봉우리 자체에서 났는지(중심).
@@ -310,7 +329,16 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 판 전체의 칸당 재 평균. 격자는 패딩 없이 G³ 다.
         (double)sim.totalAsh() / (double)((double)sim.gridSize() * sim.gridSize() * sim.gridSize()),
         rot[0], rot[1], rot[2], rot[3],
+        app.camRot[0], app.camRot[1], app.camRot[2],
+        app.camRot[3], app.camRot[4], app.camRot[5],
+        app.camRot[6], app.camRot[7], app.camRot[8],
+        app.camFly ? 1 : 0,
+        app.camPos[0], app.camPos[1], app.camPos[2],
+        app.camSpeed, app.camFovY,
         sim.config().starIonizeK, sim.config().darkMatterFraction,
+        sim.config().starEmbedTime, sim.config().haloGasFraction,
+        sim.config().blackHoleEnabled ? 1 : 0, sim.config().centralBHFraction,
+        sim.config().sphereStart,
         // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
         // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
         sim.config().coolingRate, sim.config().starFormEfficiency,
@@ -399,6 +427,36 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         return false;
     }
 
+    // **블랙홀 전부를 낸다.** `status` 는 `heaviest()` 하나만 내므로, 여럿이 서로 튕겨내는지
+    // 밖에서 볼 방법이 없었다 — 2026-08-18 에 블랙홀의 진동 진폭이 커지는 원인을 3체 방출과
+    // 마찰 부족 중 어느 쪽인지 가르려다 이 창이 없어 막혔다.
+    //
+    // **`status` 에 얹지 않고 따로 낸다.** 그쪽 버퍼는 4096 인데 이미 약 2.4 KB 를 쓰고
+    // 있어(그 함수 주석의 경고), 여덟 줄을 더하면 잘릴 위험이 있다. `snprintf` 는 모자라면
+    // 조용히 잘라내므로 그 사고는 밖에서 0 과 구분되지 않는다.
+    //
+    // 한 줄에 몰아 공백으로 나눈다 — 여덟 개 × 열 값을 키·값으로 풀면 80 줄이 된다.
+    //   bh<i>=<active> <x> <y> <z> <vx> <vy> <vz> <mass> <rs> <born> <rho> <drag>
+    //
+    // 끝의 `rho`·`drag` 가 **동역학적 마찰이 실제로 걸리는지**를 가른다. 마찰은
+    // `mag ∝ ρ/v³` 이라 그 자리 밀도가 0 이면 조건문 자체가 거짓이 되어 아예 안 걸린다.
+    // 「약하다」와 「안 걸린다」는 처방이 정반대라 이 둘을 구분할 창이 필요했다.
+    if (cmd == "blackholes") {
+        const int n = app.sim.blackHoleCount();
+        std::string out = "ok=1\nbhCount=" + std::to_string(n) + "\n";
+        char line[256];
+        for (int i = 0; i < n && i < kMaxBlackHoles; ++i) {
+            const BlackHoleState b = app.sim.blackHoleAt(i);
+            snprintf(line, sizeof(line),
+                     "bh%d=%d %.6f %.6f %.6f %.6f %.6f %.6f %.2f %.4e %d %.6e %.6e\n",
+                     i, b.active ? 1 : 0, b.x, b.y, b.z, b.vx, b.vy, b.vz,
+                     b.mass, b.rs, b.born ? 1 : 0, b.rho, b.drag);
+            out += line;
+        }
+        writeResponse(out);
+        return false;
+    }
+
     if (cmd == "set") {
         if (has(kv, "particleCount")) {
             int n = getInt(kv, "particleCount", app.cfg.particleCount);
@@ -463,7 +521,23 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "bhFrictionK"))   app.cfg.bhFrictionK    = clampF(getFloat(kv, "bhFrictionK", app.cfg.bhFrictionK), 0.0f, 100.0f, app.cfg.bhFrictionK);
         if (has(kv, "novaEnergyK"))   app.cfg.novaEnergyK    = clampF(getFloat(kv, "novaEnergyK", app.cfg.novaEnergyK), 0.0f, 1000.0f, app.cfg.novaEnergyK);
         if (has(kv, "starIonizeK"))    app.cfg.starIonizeK    = clampF(getFloat(kv, "starIonizeK", app.cfg.starIonizeK), 0.0f, 100.0f, app.cfg.starIonizeK);
+        // 갓 태어난 별이 먼지 고치에 묻혀 있는 시간. 0 이면 끈다(= 전처럼 즉시 켜진다).
+        // 상한 2 는 2000만 년으로, 실제 관측 범위(수십만~수백만 년)를 넉넉히 덮는다.
+        if (has(kv, "starEmbedTime"))  app.cfg.starEmbedTime  = clampF(getFloat(kv, "starEmbedTime", app.cfg.starEmbedTime), 0.0f, 2.0f, app.cfg.starEmbedTime);
         if (has(kv, "darkMatterFraction")) app.cfg.darkMatterFraction = clampF(getFloat(kv, "darkMatterFraction", app.cfg.darkMatterFraction), 0.0f, 0.9f, app.cfg.darkMatterFraction);
+        // 은하 바깥 가스 저장고(CGM)의 비율. 0 이면 저장고가 없다(= 고치기 전 판).
+        // 상한 0.8 은 코어가 자른다 — 이보다 크면 원반이 남지 않아 은하가 아니게 된다.
+        if (has(kv, "haloGasFraction")) app.cfg.haloGasFraction = clampF(getFloat(kv, "haloGasFraction", app.cfg.haloGasFraction), 0.0f, 0.8f, app.cfg.haloGasFraction);
+        // 판을 열 때 구형으로 깔 비율(0 = 원반, 1 = 완전한 구). **`preset` 이나 `reset` 을
+        // 다시 걸어야 반영된다** — 자리를 놓는 것은 `Sim::reset` 이라, 도는 판에 값만
+        // 바꾸면 아무 일도 일어나지 않는다.
+        if (has(kv, "sphereStart")) app.cfg.sphereStart = clampF(getFloat(kv, "sphereStart", app.cfg.sphereStart), 0.0f, 1.0f, app.cfg.sphereStart);
+        // 판을 열 때 중심에 블랙홀을 놓을지. **`preset` 을 다시 걸어야 반영된다** —
+        // 놓는 자리가 `Sim::reset` 이라, 도는 판에 켜기만 하면 아무 일도 일어나지 않는다.
+        if (has(kv, "blackHole")) app.cfg.blackHoleEnabled = (getInt(kv, "blackHole", app.cfg.blackHoleEnabled ? 1 : 0) != 0);
+        // 그 블랙홀의 무게(판 전체 대비). 상한 0.30 은 코어가 자른다 — 그보다 크면 원반이
+        // 통째로 빨려 들어 은하가 남지 않는다(2026-08-14 에 1.5배로 그렇게 됐다).
+        if (has(kv, "centralBHFraction")) app.cfg.centralBHFraction = clampF(getFloat(kv, "centralBHFraction", app.cfg.centralBHFraction), 0.0f, 0.30f, app.cfg.centralBHFraction);
         if (has(kv, "starWindRate"))   app.cfg.starWindRate   = clampF(getFloat(kv, "starWindRate", app.cfg.starWindRate), 0.0f, 10.0f, app.cfg.starWindRate);
         if (has(kv, "ashDiffuseK"))    app.cfg.ashDiffuseK    = clampF(getFloat(kv, "ashDiffuseK", app.cfg.ashDiffuseK), 0.0f, 10.0f, app.cfg.ashDiffuseK);
         // 무엇으로 볼지. 「빛」은 별이 실제로 내는 밝기(L = M^3.5)로 그린다 —
@@ -548,10 +622,36 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "panY")) app.panY = clampF(getFloat(kv, "panY", app.panY), -8.0f, 8.0f, app.panY);
         // 보는 방향(라디안). 창을 오른쪽 단추로 끌면 바뀌는 값과 같은 것이라,
         // 밖에서 각도를 지정해 여러 방향의 그림을 견줄 수 있다.
-        if (has(kv, "camYaw"))
-            app.camYaw = clampF(getFloat(kv, "camYaw", app.camYaw), -6.2832f, 6.2832f, app.camYaw);
-        if (has(kv, "camPitch"))
-            app.camPitch = clampF(getFloat(kv, "camPitch", app.camPitch), -1.5533f, 1.5533f, app.camPitch);
+        // **각도로 지정하면 그 방향의 회전 행렬을 만들어 넣는다.** 내부 상태는 언제나
+        // 행렬이라(짐벌락을 피하려고 — `ViewRot.h`) 각도는 여기서만 쓰는 입력 형식이다.
+        // 둘 중 하나만 와도 나머지는 지금 값이 아니라 0 으로 둔다 — 각도 표현에는
+        // 「지금 각도」가 없기 때문이다. 이어서 조금씩 돌리려면 `camOrbit` 을 쓴다.
+        if (has(kv, "camYaw") || has(kv, "camPitch")) {
+            const float y = clampF(getFloat(kv, "camYaw", 0.f), -6.2832f, 6.2832f, 0.f);
+            const float p = clampF(getFloat(kv, "camPitch", 0.f), -6.2832f, 6.2832f, 0.f);
+            viewRotFromAngles(app.camRot, y, p);
+        }
+        // 지금 방향에서 **화면 기준으로 더 돌린다**(마우스가 하는 것과 같은 일).
+        if (has(kv, "camOrbitX") || has(kv, "camOrbitY")) {
+            viewRotOrbit(app.camRot,
+                         clampF(getFloat(kv, "camOrbitX", 0.f), -6.2832f, 6.2832f, 0.f),
+                         clampF(getFloat(kv, "camOrbitY", 0.f), -6.2832f, 6.2832f, 0.f));
+        }
+        // 보던 방향을 처음으로 되돌린다(위에서 내려다보기 · 카메라 자리도 함께).
+        if (has(kv, "camReset") && getInt(kv, "camReset", 0) != 0) {
+            viewRotIdentity(app.camRot);
+            app.camPos[0] = 0.5f; app.camPos[1] = 0.5f; app.camPos[2] = -0.6f;
+        }
+        // 자유 비행 카메라(FPS 처럼 날아다니기). 켜면 원근으로 그리고 격자 렌더는 꺼진다.
+        if (has(kv, "camFly")) app.camFly = (getInt(kv, "camFly", app.camFly ? 1 : 0) != 0);
+        // 초당 이동 거리(판 단위). 판 한 변이 10만 광년이다.
+        if (has(kv, "camSpeed")) app.camSpeed = clampF(getFloat(kv, "camSpeed", app.camSpeed), 0.001f, 5.0f, app.camSpeed);
+        // 세로 시야각(라디안). 0.3(17도) ~ 2.0(115도).
+        if (has(kv, "camFovY")) app.camFovY = clampF(getFloat(kv, "camFovY", app.camFovY), 0.3f, 2.0f, app.camFovY);
+        // 카메라를 특정 자리로 옮긴다(밖에서 같은 시점을 재현할 때).
+        if (has(kv, "camPosX")) app.camPos[0] = clampF(getFloat(kv, "camPosX", app.camPos[0]), -3.0f, 4.0f, app.camPos[0]);
+        if (has(kv, "camPosY")) app.camPos[1] = clampF(getFloat(kv, "camPosY", app.camPos[1]), -3.0f, 4.0f, app.camPos[1]);
+        if (has(kv, "camPosZ")) app.camPos[2] = clampF(getFloat(kv, "camPosZ", app.camPos[2]), -3.0f, 4.0f, app.camPos[2]);
 
         // 무엇이 바뀌었든 그 자리에서 코어에 넘긴다.
         // 전에는 파티클 수·격자·경계에서만 넘겨서, 중력·압력·냉각 같은 값을 단독으로 바꾸면

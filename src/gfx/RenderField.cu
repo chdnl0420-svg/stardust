@@ -1,4 +1,6 @@
 #include "gfx/RenderField.h"
+#include "sim/StarLook.h"    // 갓 태어난 별이 먼지 고치에서 드러나는 과정(격자 렌더와 공유)
+#include "sim/ViewRot.h"     // 보는 방향 — 여기에 없어서 우클릭 회전이 안 먹었다
 
 #include <windows.h>
 #include <GL/gl.h>
@@ -318,14 +320,33 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
                              float sizePx, float sunMass, float sunLife, BHDisk bh,
                              int gridG,
-                             const float* ashProj) {
+                             const float* ashProj, float embedSim, ViewRot rot) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
     if (p.x < 0.f) return;                       // 빈 슬롯
 
-    float u = (p.x - 0.5f + panX) * zoom + 0.5f;
-    float v = (p.y - 0.5f + panY) * zoom + 0.5f;
+    // **보는 방향을 먼저 적용한다(2026-08-18).**
+    //
+    // 여태 이 커널은 `p.x`·`p.y` 만 썼다 — `p.z` 를 아예 안 봐서, 우클릭으로 판을 돌려도
+    // 점 렌더는 언제나 위에서 내려다본 그림만 냈다. 그런데 배율이 조금만 커도 화면이
+    // 통째로 점 렌더가 되므로(격자 한 칸이 여러 픽셀이 되면 `pointMix` 가 1 로 포화된다),
+    // **실제로는 우클릭이 아무 일도 하지 않았다.** 격자 렌더 쪽은 같은 회전을 이미 하고
+    // 있었고, 회전 계산이 `Sim.cu` 안에만 있어 여기서 쓸 수가 없던 것이 원인이다.
+    //
+    // 궤도 모드는 직교(멀어도 같은 크기), 자유 비행 모드는 원근이다. `projectPoint` 가
+    // 그 둘을 가른다. `depth` 는 카메라에서의 앞쪽 거리로, 아래에서 알갱이 크기에 쓴다.
+    float px, py, depth;
+    if (!projectPoint(p.x, p.y, p.z, rot, px, py, depth)) return;
+
+    float u, v;
+    if (rot.fly) {
+        // 원근은 거리로 나누는 순간 배율이 정해진다 — 확대·이동을 또 걸지 않는다.
+        u = px; v = py;
+    } else {
+        u = (px - 0.5f + panX) * zoom + 0.5f;
+        v = (py - 0.5f + panY) * zoom + 0.5f;
+    }
     float aspect = (float)W / (float)H;
     if (aspect > 1.f) u = (u - 0.5f) / aspect + 0.5f;
     else              v = (v - 0.5f) * aspect + 0.5f;
@@ -455,6 +476,19 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel,
                 // `L` 은 위에서 이미 `ratio^3.5`(주계열 광도)로 들어와 있다.
                 L  = L + (1340.f * ratio - L) * g;
                 TK = Tms + (3500.f - Tms) * g;
+
+                // **배태 단계 — 갓 태어난 별은 아직 고치 안에 있다**(근거는 `StarLook.h`).
+                //
+                // 바로 위 적색거성 전환이 「날카로운 전환을 두지 않는다」의 네 번째 사례인데,
+                // **정작 가장 큰 전환인 탄생 자체**가 남아 있었다. 가스는 아예 안 그려지고
+                // (`p.w == 0` 은 아래에서 반환) 별이 되는 순간 `L = ratio^3.5` 가 그대로
+                // 켜졌다 — IMF 가 무거운 쪽을 뽑으면 19,000 이 0 에서 한 프레임에 선다.
+                //
+                // 격자 렌더(`Sim.cu` 의 `kScatterLight`)에 **같은 두 줄이 있다** — 한쪽만
+                // 고치면 화면과 격자가 다른 색을 낸다.
+                const float veil = starVeil(vv.w, ratio, embedSim);
+                L  *= veil;
+                TK  = dustRedden(TK, veil);
             }
         } else if (p.w < 0.f) {
             L = 1.0e4f; TK = 30000.f;                              // 폭발 중
@@ -598,7 +632,12 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel,
     const float visible = (float)n / fmaxf(zoom * zoom, 1.0f);
     const int radCap = (visible > 8.0e6f) ? 0 : ((visible > 2.0e6f) ? 1 : 2);
 
-    const float grow = fminf(sqrtf(fmaxf(zoom, 1.0f)), 4.0f);
+    // 자유 비행(원근)에서는 **가까울수록 크게** 그려야 거리가 느껴진다. 궤도(직교)는
+    // 배율만 따른다. 상한은 아래 `radCap` 과 세 단계 분기가 그대로 지킨다 — 거리가
+    // 아무리 가까워도 5×5 를 넘지 않는다.
+    const float grow = rot.fly
+        ? fminf(0.35f / fmaxf(depth, 1e-3f), 6.0f)
+        : fminf(sqrtf(fmaxf(zoom, 1.0f)), 4.0f);
     const float rr   = sizePx * grow;               // 알의 지름에 해당하는 크기(픽셀)
     int rad = (rr < 2.0f) ? 0 : ((rr < 4.0f) ? 1 : 2);
     if (rad > radCap) rad = radCap;
@@ -801,6 +840,10 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     // 양 끝에서 변화가 느려지게 눌러 준다. 선형이면 섞임이 시작·끝나는 순간이 눈에 걸린다.
     pointMix = pointMix * pointMix * (3.0f - 2.0f * pointMix);
     if (view.mode == RenderMode::Points) pointMix = 1.0f;   // 직접 고른 경우는 늘 알갱이
+    // **자유 비행에서는 격자를 못 그린다.** 격자를 원근으로 그리려면 광선 추적이 필요하고,
+    // 지금 격자 경로는 판을 위에서 눌러 2D 로 만드는 방식이라 카메라 자리를 표현할 수
+    // 없다. 섞으면 두 그림이 전혀 다른 곳을 가리키므로 점 렌더만 쓴다.
+    if (app.camFly) pointMix = 1.0f;
 
     const bool wantField  = (pointMix < 0.999f);
     const bool wantPoints = (pointMix > 0.001f) && devAccum_;
@@ -1011,7 +1054,14 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     // 태양급 별의 수명. 적색거성 판정에 쓴다 — `kStarAge` 가 쓰는 값과
                     // 같아야 화면과 물리가 같은 순간을 가리킨다.
                     fmaxf(app.sim.config().starSunLifeSim, 1e-3f), bhDisk,
-                    gridG, ashProj);
+                    gridG, ashProj,
+                    // 갓 태어난 별이 먼지 고치에 묻혀 있는 시간. 격자 렌더가 쓰는 값과
+                    // 같아야 화면과 격자가 같은 순간에 같은 색을 낸다.
+                    fmaxf(app.sim.config().starEmbedTime, 0.f),
+                    // 보는 방향. 자유 비행이면 카메라 자리에서 원근으로, 아니면 화면
+                    // 한가운데를 축으로 직교로 그린다.
+                    app.camFly ? makeFlyRot(app.camRot, app.camPos, app.camFovY)
+                               : makeViewRot(app.camRot, app.panX, app.panY));
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //
