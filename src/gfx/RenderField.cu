@@ -147,25 +147,9 @@ __global__ void kBlendGrid(float* dst, const float* src, int n, float a) {
     dst[i] += (src[i] - dst[i]) * a;
 }
 
-// **오를 때와 내릴 때의 빠르기가 다른 블렌딩.**
-//
-// 성운에 쓴다. 이온화와 재결합은 **속도가 다르다** — O 형 별 근처에서 수소가 이온화되는
-// 데는 수천 년이지만, 이온이 전자를 다시 붙잡아 중성으로 돌아가는 데는 밀도에 따라
-// 수만~수십만 년이 걸린다. **켜지는 것보다 꺼지는 것이 훨씬 느리다.**
-//
-// 양방향을 같은 빠르기로 섞으면 그 비대칭이 사라지고, 별 하나가 옮겨갈 때마다 그 자리가
-// 곧바로 어두워진다 — 2026-08-18 사용자가 「주황색이 갑자기 파바박 등장해」라고 알린 것이
-// 그것이다. 계수를 0.35 에서 0.08 로 낮춰도 남았는데, 느리게 만드는 것만으로는 **양쪽이
-// 같이 느려져** 켜짐·꺼짐이 계속 번갈아 일어나기 때문이다.
-//
-// 내려가는 쪽만 훨씬 느리게 하면 한 번 이온화된 자리가 오래 남아, 별이 지나가도 그 자리는
-// 서서히 식는다. 실제 HII 영역이 그렇게 보인다.
-__global__ void kBlendGridAsym(float* dst, const float* src, int n, float aUp, float aDown) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const float d = src[i] - dst[i];
-    dst[i] += d * ((d > 0.f) ? aUp : aDown);
-}
+// (`kBlendGridAsym`(오를 때와 내릴 때 빠르기가 다른 블렌딩)을 지웠다 — 2026-08-18.
+//  성운 전용이었다. 이온화는 빠르고 재결합은 느린 것을 담으려던 것인데, 성운 자체를
+//  걷어내며 함께 없앴다. 위 `kBlendGrid`(대칭)는 밝기·온도 격자가 계속 쓴다.)
 
 // 격자를 화면 픽셀로 샘플링해 RGBA8 을 만든다.
 // zoom/pan 은 화면 중앙을 기준으로 시뮬레이션 공간 [0,1]² 을 확대·이동한다.
@@ -311,9 +295,7 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
                              float sizePx, float sunMass, float sunLife, BHDisk bh,
-                             const float* spread, const float* spreadT, int gridG,
-                             float nebulaK, float nebulaIonMin,
-                             const float* gasCol, float dustTau,
+                             int gridG,
                              const float* ashProj) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -455,92 +437,16 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel,
         } else if (p.w < 0.f) {
             L = 1.0e4f; TK = 30000.f;                              // 폭발 중
         } else {
-            // ── 반사성운 — **가스는 스스로 안 빛나지만 별빛을 받아 산란한다** ──────
+            // 가스는 스스로 빛을 내지 않는다 — 별빛 보기에서는 그리지 않는다.
             //
-            // 같은 구름이 근처에 별이 있으면 빛나고 없으면 안 보인다. 그것이 반사성운의
-            // 성질이라 **곱셈**이다(더하기가 아니다).
+            // 여기 있던 **발광성운**(가스가 「퍼진 별빛」을 읽어 주황빛으로 빛나던 것)을
+            // 2026-08-18 에 지웠다. 사용자 요청 — 「이런식으로 주위가 밝게 나오는거
+            // 제거해줘」. 밝은 덩어리마다 둘러 있던 후광이 이것이었다(A/B 실측: 계수를
+            // 0 으로 하자 후광만 사라지고 배경 별 알갱이는 그대로였다).
             //
-            // 알갱이가 이웃을 훑어 「내 둘레에 별이 얼마나 있나」를 세면 그 비용이
-            // 2026-08-14 에 드라이버를 죽인 자리다. 대신 **격자를 한 번 만들어 읽기만**
-            // 한다 — `kScatterLight` 가 뿌리고 `kBlurLine` 이 흐린 「퍼진 별빛」이 이미
-            // 있으므로, 가스 알갱이는 자기 자리의 값을 한 번 읽으면 된다. 비용이
-            // 알갱이 수에 정비례하는 읽기 두 번이고 원자 연산이 없다.
-            //
-            // 격자 좌표는 회전을 안 거친 `p.x, p.y` 를 쓴다 — 이 커널 자체가 회전을
-            // 안 하므로(위 투영 코드) 그쪽과 일관된다.
-            // **반사성운을 발광성운으로 바꿨다(2026-08-17).**
-            //
-            // 전에는 가스가 별빛을 되쏘게 했다. 그러면 **비추는 별이 파라면 가스도
-            // 파래진다** — 알갱이 100만 개가 그 옅은 색을 한 겹씩 입어 화면이 넓은
-            // 푸른 장막이 됐고, 사용자가 「입자가 푸른색인 이유는 뭐야」로 알렸다.
-            // 그래서 껐는데, 이번엔 가스 30만 개가 통째로 안 보였다.
-            //
-            // **빠져 있던 것은 발광성운이다.** 실제로 별 형성 영역이 붉게 보이는 것은
-            // 반사가 아니라 **이온화된 수소가 재결합하며 내는 Hα(656nm)** 다. 오리온
-            // 대성운의 그 붉은색이고, 흑체복사가 아니라 원자 전이라 **가스 온도와
-            // 무관하게 늘 같은 붉은색**이다. 그래서 별 색을 받지 않는다 —
-            // 푸르게 물드는 문제가 원리적으로 사라진다.
-            //
-            // 이온화하는 것은 O·B형 별의 자외선이므로 **별빛이 강한 자리가 곧 이온화된
-            // 자리**다. 여기서는 이미 있는 「퍼진 별빛」 격자를 그 지표로 쓴다 —
-            // `kIonize` 가 실제로 쓰는 격자는 속도 분산이고 렌더에 오지 않는다.
-            //
-            // **한계**: 이온화 문턱을 따로 두지 않아 별빛이 약한 자리도 옅게 빛난다.
-            // 실제 HII 영역은 경계가 뚜렷하다(스트룀그렌 반경).
-            L = 0.f; TK = 0.f;
-            if (!spread || nebulaK <= 0.f || gridG <= 0) return;
-            // **네 칸을 섞어 읽는다** — 한 칸만 읽으면 격자 무늬가 드러난다(위 헬퍼 주석).
-            const float sp = sampleGrid2D(spread, p.x, p.y, gridG);
-            if (sp <= 1e-12f) return;                    // 별빛이 없는 자리의 가스는 검다
-            L  = sp * nebulaK;
-            // **이온화 문턱 — 다만 날카롭게 자르지 않는다.**
-            //
-            // 문턱이 없으면 별빛이 조금이라도 있는 모든 칸이 옅게 빛나 판 전체가
-            // 주황으로 덮인다(2026-08-17 실측: 따뜻한 색 94.4%). 세기를 낮추는 것으로는
-            // 안 되는데, 밝기 기준이 상위 5% 백분위수라 함께 내려가 비율이 그대로다.
-            //
-            // **처음에는 `if (L < min) return` 으로 잘랐고 그것이 두 가지를 만들었다** —
-            // 사용자가 「주황색이 나타났다 사라졌다 계속 반복해」, 「경계로 갈수록 색이
-            // 연해져서 부드럽게 이어져야 되는데 너무 다 똑같은 색으로 채워져 있어」라고
-            // 알린 것이다. 값이 문턱을 넘나들면 켜짐·꺼짐이 통째로 뒤집혀 깜빡이고,
-            // 통과한 자리는 곧바로 제 밝기로 그려져 경계가 칼로 자른 듯 균일해진다.
-            // **오늘 아침 Jeans 문턱에서 격자 눈금이 드러난 것과 같은 뿌리다.**
-            //
-            // 실제 HII 영역도 경계에서 이온화 정도가 서서히 줄어 색이 연해진다 —
-            // 이온화 광자가 바깥으로 갈수록 모자라기 때문이다. 그래서 문턱의 절반부터
-            // 켜지기 시작해 한 배 반에서 온전해지도록 매끄럽게 잇는다(smoothstep).
-            // **세기와 색이 거리에 따라 함께 변한다(2026-08-18).**
-            //
-            // 사용자가 확대 화면을 보고 「가까운 것과 먼 것의 색상 차이가 없어. 멀면
-            // 주황색이 아주 연해야 하고 가까운 건 별의 색과 거의 비슷해야 하는데」라며
-            // `(범위 − r)/r³` 꼴을 제안했다. 그 방향이 맞다.
-            //
-            // 실제 성운은 두 빛이 겹친다. **별 가까이는 먼지가 별빛을 되쏘아(반사성운)
-            // 별 색을 띠고, 멀어지면 그 반사가 급히 약해져 이온화 가스의 Hα(주황)만
-            // 남는다.** 반사를 통째로 껐던 것은 멀리서도 별색이 남아 판이 푸르게 물들었기
-            // 때문인데, 거리로 갈라 주면 그 문제 없이 둘을 다 쓸 수 있다.
-            //
-            // 앞선 세 번의 실패가 가리킨 것은 **포화**였다. 성운 밝기가 별과 같은 자로
-            // 재어져 상위 5% 기준을 넘으면 최대치에 붙고, 이웃 칸도 함께 붙어 경계 없는
-            // 흰 공이 됐다. 그래서 여기서는 **밝기에 별보다 낮은 상한**을 둔다 — 태양급
-            // 별이 1.0 이므로 0.3 이면 어떤 성운도 별을 이기지 못한다.
-            //
-            // 경계는 매끄럽게 0 으로 간다(`if (…) return` 같은 컷을 두지 않는다). 컷을
-            // 두면 경계 칸이 그 선을 넘나들 때마다 통째로 켜졌다 꺼져 「갑자기 꺼진다」가
-            // 된다 — 오늘 Jeans 문턱·이온화 문턱에서 같은 실수를 두 번 했다.
-            const float over = L / fmaxf(nebulaIonMin, 1e-6f);        // 1 = 이온화 경계
-            const float prox = __saturatef((over - 1.f) * 0.5f);      // 0 = 경계, 1 = 별 곁
-            const float f    = prox * prox * (3.f - 2.f * prox);      // 경계에서 매끄럽게 0
-            if (f <= 1e-4f) return;
-            L = 0.3f * f;                                             // 별(1.0)보다 어둡다
-            // 색 — 먼 쪽은 Hα(아래 주석의 1500K), 가까운 쪽은 비추는 별의 색.
-            const float starT = spreadT ? (sampleGrid2D(spreadT, p.x, p.y, gridG) / sp) : 6500.f;
-            TK = 1500.f + (starT - 1500.f) * prox;
-            // **색은 별에서 받지 않는다.** Hα 는 재결합선이라 온도로 색을 정하는 이
-            // 경로와 맞지 않는데, 컬러맵이 붉은색을 내는 온도를 넣어 그 색을 얻는다.
-            // `tempToColorT` 가 1710K 아래에서 붉은 쪽을 내므로 먼 쪽 색으로 1500 을 쓴다.
-            // **그 값은 실제 가스 온도(HII 영역은 약 1만 K)가 아니다** — 색을 얻기 위한
-            // 값이고, 실제 색은 위에서 거리로 섞어 정한다.
+            // 08-17 에 별 후광을 지운 것과 같은 원칙이다 — **빛은 그 빛을 내는 것이 있는
+            // 자리에서만 난다.** 가스를 보고 싶으면 밀도 보기로 본다.
+            return;
         }
 
         // ── 블랙홀 강착원반 ────────────────────────────────────────────────
@@ -626,30 +532,9 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel,
         }
         if (L <= 0.f) return;                                       // 아무것도 안 빛난다
 
-        // ── 암흑성운 — **같은 가스가 앞쪽 빛은 반사하고 뒤쪽 빛은 가린다** ──────────
-        //
-        // 실제 밤하늘에서 은하수를 갈라놓는 검은 띠가 이것이다. 별이 없어서 검은 것이
-        // 아니라 **앞에 있는 먼지가 뒤쪽 별빛을 먹어서** 검다. 소광은 `I = I₀·e^(−τ)` 이고
-        // `τ` 는 시선 방향으로 쌓인 먼지 양에 비례한다.
-        //
-        // **별이 구름 「안에」 있다는 것을 셈에 넣는다.**
-        //
-        // 처음에는 `e^(−τ)` 로 균일하게 깎았다. 그것은 **모든 별이 구름 뒤에 있다**고 보는
-        // 것이라, 뭉친 자리에서 `τ` 가 수백이 되면 **화면이 완전히 검어진다** —
-        // 2026-08-17 에 사용자가 「검은 네모들」로 발견했고, 네 칸 보간으로 계단을 없애자
-        // 이번엔 부드러운 검은 구멍이 남았다. **근사 자체가 짙은 자리에서 무너진 것이다.**
-        //
-        // 실제로는 별이 구름 앞·속·뒤에 고루 있다. 광학깊이가 0~τ 로 고르다고 보고 적분하면
-        //   ⟨e^(−t)⟩ = (1 − e^(−τ)) / τ
-        // 가 나온다. τ→0 이면 1(안 가려짐), τ=1 이면 0.63, τ=3 이면 0.32,
-        // **τ 가 아무리 커도 `1/τ` 로 천천히 줄 뿐 0 이 되지 않는다** — 구름 앞쪽 별은
-        // 언제나 보이기 때문이다. z 방향 프리픽스 합 없이 앞뒤를 근사하는 정확한 식이다.
-        if (gasCol && dustTau > 0.f) {
-            // 네 칸을 섞어 읽는다 — 한 칸만 읽으면 칸 경계가 계단으로 드러난다.
-            const float tau = sampleGrid2D(gasCol, p.x, p.y, gridG) * dustTau;
-            if (tau > 1e-4f) L *= (1.f - __expf(-tau)) / tau;
-            if (L <= 0.f) return;
-        }
+        // (암흑성운 — 앞에 있는 먼지가 뒷쪽 별빛을 먹어 실루에을 만들던 것 — 을
+        //  2026-08-18 에 지웠다. 성운과 같은 격자를 쓰고 성운 블록 안에서만 켜졌던
+        //  값이라, 성운을 걷어내면 재료가 없어 살아남지 못한다.)
 
         const float tc = tempToColorT(TK);
         // **밝기를 로그로 눌러 쌓는다.** `L = M^3.5` 라 범위가 1e-3~1e7 로 극단적이라
@@ -795,9 +680,10 @@ void RenderField::shutdown() {
     if (devAccum_)   { cudaFree(devAccum_);  devAccum_  = nullptr; }
     if (devSmooth_)  { cudaFree(devSmooth_); devSmooth_ = nullptr; }
     if (devSmoothT_) { cudaFree(devSmoothT_); devSmoothT_ = nullptr; }
-    if (devSmoothNeb_)  { cudaFree(devSmoothNeb_);  devSmoothNeb_  = nullptr; }
-    if (devSmoothNebT_) { cudaFree(devSmoothNebT_); devSmoothNebT_ = nullptr; }
-    if (devSmoothGas_)  { cudaFree(devSmoothGas_);  devSmoothGas_  = nullptr; }
+    // (`devSmoothNeb_`·`devSmoothNebT_`·`devSmoothGas_` 를 지웠다 — 2026-08-18.
+    //  성운·먼지 전용 평활 격자였다. 셋 다 `if (!ptr) cudaMalloc` 로 최초 한 번만 잡고
+    //  **크기 재검사가 없어**, 실행 중 격자를 키우면 작은 버퍼에 큰 크기만큼 쓰는
+    //  자리이기도 했다 — 성운을 걷어내며 그 위험도 함께 없어졌다.)
     if (devStat_)    { cudaFree(devStat_);   devStat_   = nullptr; }
     smoothCells_ = 0; smoothPrimed_ = false; liveMean_ = 0.f;
 }
@@ -978,27 +864,18 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     const int cells = gridG * gridG;
                     // **평균이 아니라 상위 백분위수를 기준으로 잡는다(2026-08-16).**
                     //
-                    // 평균은 초신성 하나(은하 전체보다 밝다)에 통째로 끌려가고, 성운을
-                    // 더해도 그만큼 깎아 낸다 — 실측에서 `nebulaK` 를 올릴수록 흐린 픽셀이
-                    // **줄었다**(15.3% → 10.9%). 상위 5% 지점은 그런 극단값 위에 있어
-                    // 기준이 안 흔들린다. 실제 천문 사진이 HDR 로 푸는 것과 같은 문제다.
+                    // 평균은 초신성 하나(은하 전체보다 밝다)에 통째로 끌려간다. 상위 5%
+                    // 지점은 그런 극단값 위에 있어 기준이 안 흔들린다. 실제 천문 사진이
+                    // HDR 로 푸는 것과 같은 문제다.
+                    //
+                    // (빛 모드에서 「성운을 입히기 전 격자」를 따로 받아 기준으로 삼던
+                    //  분기를 지웠다 — 2026-08-18. 성운을 걷어낸 지금은 `grid` 자체가
+                    //  곧 순수 별빛이라 그대로 쓰면 된다.)
                     constexpr int kBins = 64;
                     if (!devStat_) cudaMalloc(&devStat_, sizeof(int) * kBins);
                     if (devStat_) {
-                        // **빛 모드에서는 성운을 입히기 전 격자로 기준을 잡는다.**
-                        //
-                        // 그리는 것은 퍼진 빛이 더해진 `grid` 지만, 그것으로 기준을 잡으면
-                        // 빛이 퍼진 만큼 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고,
-                        // 더한 만큼 도로 깎인다 — 2026-08-16 실측(지금은 지운 별 후광에서)
-                        // 퍼진 빛의 계수를 0 → 1.5 로 올리자 켜진 픽셀이 2.78% → 0.4% 로
-                        // **줄었다**(에너지를 보존하게 고친 뒤에도 그대로였다).
-                        const float* statGrid = grid;
-                        if (f == Sim::Field::Light) {
-                            const float* raw = app.sim.lightBeforeNebulaDevicePtr();
-                            if (raw) statGrid = raw;
-                        }
                         cudaMemset(devStat_, 0, sizeof(int) * kBins);
-                        kHistLog<<<(cells + 255) / 256, 256>>>(statGrid, cells, (int*)devStat_, kBins);
+                        kHistLog<<<(cells + 255) / 256, 256>>>(grid, cells, (int*)devStat_, kBins);
                         int h[kBins] = {};
                         if (cudaMemcpy(h, devStat_, sizeof(int) * kBins, cudaMemcpyDeviceToHost)
                             == cudaSuccess) {
@@ -1079,79 +956,14 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             // 구간에서만 뜻이 있었고 실사용 배율에서는 통째로 안 보였다(round-35).
             // 빛 모드에서 점을 그릴 때는 여기서 한 번 불러 격자를 확보한다.
             // 재 보기는 격자에 있는 값이라 알갱이가 **읽을** 격자를 확보해야 한다.
-            // 배율이 크면 `wantField` 가 거짓이라 안 만들어지므로 여기서 한 번 부른다
-            // (성운이 같은 이유로 같은 일을 한다 — round-40).
+            // 배율이 크면 `wantField` 가 거짓이라 안 만들어지므로 여기서 한 번 부른다.
             const float* ashProj = nullptr;
             if (view.colorBy == ColorBy::Ash) {
                 ashProj = app.sim.fieldDevicePtr(Sim::Field::Ash);
             }
-            const bool pointsLight = (view.colorBy == ColorBy::Light);
-            const float* nebSpread = nullptr;
-            const float* nebSpreadT = nullptr;
-            const float* gasCol = nullptr;
-            float nebK = 0.f, dustTau = 0.f;
-            if (pointsLight && app.sim.config().nebulaK > 0.f) {
-                if (!wantField) (void)app.sim.fieldDevicePtr(Sim::Field::Light);
-                nebSpread  = app.sim.lightSpreadDevicePtr();
-                nebSpreadT = app.sim.lightSpreadTempDevicePtr();
-                nebK       = app.sim.config().nebulaK;
-
-                // **이 격자들도 앞 프레임과 섞는다.** 밝기 격자만 섞고 여기를 안 섞으면,
-                // 알갱이가 칸 경계를 넘나들 때마다 그 칸의 성운 밝기와 먼지 두께가 통째로
-                // 뛰어 **네모난 자리가 번쩍인다** — 2026-08-17 에 사용자가 발견했다.
-                // 도는 동안에만 섞는 것은 밝기 쪽과 같은 규칙이다(멈추면 섞을 것이 없다).
-                if (app.running && gridG > 0) {
-                    const int cells3 = gridG * gridG;
-                    const size_t bytes3 = sizeof(float) * (size_t)cells3;
-                    if (!devSmoothNeb_)  cudaMalloc(&devSmoothNeb_,  bytes3);
-                    if (!devSmoothNebT_) cudaMalloc(&devSmoothNebT_, bytes3);
-                    if (!devSmoothGas_)  cudaMalloc(&devSmoothGas_,  bytes3);
-                    // **0.35 → 0.08 (2026-08-18).** 사용자가 「앱 시작하자마자 여기저기서
-                    // 주황색 불이 파바박 하고 켜졌다 꺼졌다 해」라고 알렸다.
-                    //
-                    // 공간 문턱은 smoothstep 으로 이었지만 **시간에 대한 변화가 남아 있었다** —
-                    // 앱을 켠 직후에는 별이 하나씩 태어나고, 별 하나가 켜지면 그 칸의 별빛이
-                    // 확 뛴다. 그러면 성운이 문턱을 넘어 켜지고, 그 별이 옮겨가거나 죽으면
-                    // 다시 꺼진다. 0.35 는 세 프레임(0.05초)이면 다 따라가므로 **블렌딩이
-                    // 사실상 없는 값**이었다.
-                    //
-                    // 0.08 이면 스무 프레임(0.33초)에 걸쳐 옮겨간다 — 사용자가 말한
-                    // 「스르륵 색이 빠지고 다시 스르륵 켜지고」가 그 시간 폭이다.
-                    // 성운은 실제로도 수만 년 규모로 변하는 것이라 화면에서 급히 뒤집힐
-                    // 이유가 없다. (그 0.08 대칭 계수는 아래 비대칭 둘로 대체됐다 —
-                    // 남아 있던 `a3` 지역변수는 읽는 곳이 없어 지웠다, 2026-08-18.)
-                    const int b3 = (cells3 + 255) / 256;
-                    // **성운은 비대칭으로 섞는다** — 이온화는 빠르고 재결합은 느리다
-                    // (`kBlendGridAsym` 주석). 첫 프레임은 섞을 것이 없어 그대로 받는다.
-                    const float aUp   = smoothPrimed_ ? 0.15f : 1.0f;
-                    const float aDown = smoothPrimed_ ? 0.015f : 1.0f;
-                    if (devSmoothNeb_ && nebSpread) {
-                        kBlendGridAsym<<<b3, 256>>>((float*)devSmoothNeb_, nebSpread, cells3,
-                                                    aUp, aDown);
-                        nebSpread = (const float*)devSmoothNeb_;
-                    }
-                    if (devSmoothNebT_ && nebSpreadT) {
-                        kBlendGridAsym<<<b3, 256>>>((float*)devSmoothNebT_, nebSpreadT, cells3,
-                                                    aUp, aDown);
-                        nebSpreadT = (const float*)devSmoothNebT_;
-                    }
-                }
-                // 암흑성운 — 같은 가스가 뒤쪽 빛을 가린다. 가스 기둥은 격자 값이라
-                // 크기가 알갱이 수에 붙으므로 **평균으로 나눠** 「평균의 몇 배인가」로
-                // 바꾼 뒤 소광 계수를 곱한다(성운이 쓰는 정규화와 같은 것).
-                gasCol = app.sim.gasColumnDevicePtr();
-                const int cells2 = gridG * gridG;
-                const int nAll = app.sim.particleCount();
-                const float invMeanGas = (nAll > 0) ? ((float)cells2 / (float)nAll) : 1.0f;
-                dustTau = app.sim.config().dustExtinctionK * invMeanGas;
-                // 먼지 격자도 같이 섞는다 — 밝기를 깎는 쪽이라 튀면 가장 눈에 띈다.
-                if (app.running && devSmoothGas_ && gasCol) {
-                    const float a4 = smoothPrimed_ ? 0.35f : 1.0f;
-                    kBlendGrid<<<(cells2 + 255) / 256, 256>>>((float*)devSmoothGas_, gasCol,
-                                                              cells2, a4);
-                    gasCol = (const float*)devSmoothGas_;
-                }
-            }
+            // (성운·먼지 준비 블록을 지웠다 — 2026-08-18. 「퍼진 별빛」과 가스 기둥
+            //  격자를 받아 앞 프레임과 섞어 넣던 자리다. 성운을 걷어내서 받을 것도
+            //  섞을 것도 없다.)
             if (n > 0) {
                 kSplatPoints<<<(n + 255) / 256, 256>>>(
                     (const float4*)app.sim.particlePosDevicePtr(),
@@ -1162,8 +974,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     // 태양급 별의 수명. 적색거성 판정에 쓴다 — `kStarAge` 가 쓰는 값과
                     // 같아야 화면과 물리가 같은 순간을 가리킨다.
                     fmaxf(app.sim.config().starSunLifeSim, 1e-3f), bhDisk,
-                    nebSpread, nebSpreadT, gridG, nebK,
-                    app.sim.config().nebulaIonMin, gasCol, dustTau, ashProj);
+                    gridG, ashProj);
             }
             // 섞이는 동안 밝기와 색이 이어지게 맞춘다.
             //

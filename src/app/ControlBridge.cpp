@@ -241,7 +241,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "rot1=%.5f\nrot2=%.5f\nrot3=%.5f\nrot4=%.5f\n"
         // 코어가 실제로 들고 있는 값. **밖에서 보낸 설정이 여기까지 왔는지**를 보는 창이다 —
         // `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다(round-06 리뷰 P1 #2).
-        "coreNebulaK=%.4f\ncoreIonizeK=%.4f\ncoreDark=%.4f\n"
+        "coreIonizeK=%.4f\ncoreDark=%.4f\n"
         // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
         //
         // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
@@ -252,9 +252,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 위 넷과 같은 `core*` 이름을 쓴다 — 이 접두어가 「코어가 실제로 들고 있는 값」을
         // 뜻하고, `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다.
         "coreCoolRate=%.4f\ncoreFormEff=%.5f\ncoreSunMass=%.2f\ncoreKick=%.4f\n"
-        "coreAshYield=%.3f\ncoreAshCool=%.3f\ncoreWind=%.4f\ncoreDustTau=%.3f\n"
+        "coreAshYield=%.3f\ncoreAshCool=%.3f\ncoreWind=%.4f\n"
         "coreAshDiff=%.3f\ncoreBhRs=%.4f\ncoreBhRatio=%.1f\ncoreExplode=%.4f\n"
-        "coreSunLife=%.2f\ncoreIonMin=%.2f\n"
+        "coreSunLife=%.2f\n"
         // 분산 텐서의 교차항 ÷ 대각항. 격자를 셋에서 여섯으로 늘릴지 정하는 값이다.
         "dispCross=%.5f\n"
         // 새 별이 재 봉우리의 둘레에서 났는지(껍질) 봉우리 자체에서 났는지(중심).
@@ -307,17 +307,16 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 판 전체의 칸당 재 평균. 격자는 패딩 없이 G³ 다.
         (double)sim.totalAsh() / (double)((double)sim.gridSize() * sim.gridSize() * sim.gridSize()),
         rot[0], rot[1], rot[2], rot[3],
-        sim.config().nebulaK,
         sim.config().starIonizeK, sim.config().darkMatterFraction,
         // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
         // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
         sim.config().coolingRate, sim.config().starFormEfficiency,
         sim.config().starSunMass, sim.config().starKickSpeed,
         sim.config().starAshYield, sim.config().ashCoolK,
-        sim.config().starWindRate, sim.config().dustExtinctionK,
+        sim.config().starWindRate,
         sim.config().ashDiffuseK, sim.config().blackHoleRs,
         sim.config().starBHRatio, sim.config().starExplodeSim,
-        sim.config().starSunLifeSim, sim.config().nebulaIonMin,
+        sim.config().starSunLifeSim,
         sim.dispCrossRatio(), sim.bornShellRatio());
     return buf;
 }
@@ -461,17 +460,13 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starIonizeK"))    app.cfg.starIonizeK    = clampF(getFloat(kv, "starIonizeK", app.cfg.starIonizeK), 0.0f, 100.0f, app.cfg.starIonizeK);
         if (has(kv, "darkMatterFraction")) app.cfg.darkMatterFraction = clampF(getFloat(kv, "darkMatterFraction", app.cfg.darkMatterFraction), 0.0f, 0.9f, app.cfg.darkMatterFraction);
         if (has(kv, "starWindRate"))   app.cfg.starWindRate   = clampF(getFloat(kv, "starWindRate", app.cfg.starWindRate), 0.0f, 10.0f, app.cfg.starWindRate);
-        if (has(kv, "dustExtinctionK")) app.cfg.dustExtinctionK = clampF(getFloat(kv, "dustExtinctionK", app.cfg.dustExtinctionK), 0.0f, 20.0f, app.cfg.dustExtinctionK);
         if (has(kv, "ashDiffuseK"))    app.cfg.ashDiffuseK    = clampF(getFloat(kv, "ashDiffuseK", app.cfg.ashDiffuseK), 0.0f, 10.0f, app.cfg.ashDiffuseK);
         // 무엇으로 볼지. 「빛」은 별이 실제로 내는 밝기(L = M^3.5)로 그린다 —
         // 밀도 그림과 대비가 통째로 다르다.
         if (has(kv, "starAshYield"))   app.cfg.starAshYield   = clampF(getFloat(kv, "starAshYield", app.cfg.starAshYield), 0.0f, 100.0f, app.cfg.starAshYield);
         if (has(kv, "ashCoolK"))       app.cfg.ashCoolK       = clampF(getFloat(kv, "ashCoolK", app.cfg.ashCoolK), 0.0f, 10.0f, app.cfg.ashCoolK);
-        if (has(kv, "nebulaK"))        app.cfg.nebulaK        = clampF(getFloat(kv, "nebulaK", app.cfg.nebulaK), 0.0f, 5.0f, app.cfg.nebulaK);
-        // 이온화 문턱. **밖에서 쓸어 볼 수 있어야 한다** — 격자에 쌓인 별빛의 스케일을
-        // 커널 밖에서는 알 수 없어, 값을 추측해 넣었더니 문턱이 전혀 안 걸렸다
-        // (2026-08-17: 0.3 에서 따뜻한 색 94.6%). 상한을 크게 열어 두고 실측으로 찾는다.
-        if (has(kv, "nebulaIonMin"))   app.cfg.nebulaIonMin   = clampF(getFloat(kv, "nebulaIonMin", app.cfg.nebulaIonMin), 0.0f, 100000.0f, app.cfg.nebulaIonMin);
+        // (`nebulaK`·`nebulaIonMin`·`dustExtinctionK` 를 받던 줄을 지웠다 — 2026-08-18.
+        //  성운·먼지를 코어에서 걷어냈다.)
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;
         if (has(kv, "coolingRate"))    app.cfg.coolingRate        = clampF(getFloat(kv, "coolingRate", app.cfg.coolingRate), 0.0f, 1.0f, app.cfg.coolingRate);
         if (has(kv, "starFormation"))  app.cfg.starFormationEnabled = getInt(kv, "starFormation", 0) != 0;
