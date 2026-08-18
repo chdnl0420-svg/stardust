@@ -133,15 +133,6 @@ __global__ void kHistLog(const float* g, int n, int* hist, int bins) {
     atomicAdd(&hist[b], 1);
 }
 
-__global__ void kSumNonZero(const float* g, int n, float* sum, int* cnt) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const float v = g[i];
-    if (v <= 0.f) return;
-    atomicAdd(sum, v);
-    atomicAdd(cnt, 1);
-}
-
 // 앞 프레임의 격자에 이번 것을 조금씩 섞는다(a=1 이면 그대로 갈아탄다).
 //
 // 격자는 128칸인데 화면은 1600픽셀이라 한 칸이 12픽셀로 늘어난다. 거기에 뭉친 자리는
@@ -316,7 +307,7 @@ struct BHDisk {
 };
 
 // 화면은 위에서 내려다보므로 여기서는 x, y 만 쓴다 — z 는 깊이라 투영에서 사라진다.
-__global__ void kSplatPoints(const float4* pos, const float4* vel, const float* temp,
+__global__ void kSplatPoints(const float4* pos, const float4* vel,
                              int n, float3* accum, int W, int H,
                              int colorBy, int cmapKind, float zoom, float panX, float panY,
                              float sizePx, float sunMass, float sunLife, BHDisk bh,
@@ -336,21 +327,25 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
     else              v = (v - 0.5f) * aspect + 0.5f;
     if (u < 0.f || u >= 1.f || v < 0.f || v >= 1.f) return;
 
-    // **실수 자리를 남겨 둔다 — 반올림해 버리면 별이 픽셀을 건너뛰며 깜빡인다.**
-    // 아래 한 점 경로에서 이 값으로 네 픽셀에 나눠 찍는다(2026-08-17).
+    // 픽셀 자리는 내림으로 정한다 — 아래 한 점 경로는 한 픽셀에만 더한다.
+    // (「실수 자리로 네 픽셀에 나눠 찍는다」던 옛 주석은 코드와 달라 지웠다 — 2026-08-18.)
     const float fxp = u * W;
     const float fyp = (1.f - v) * H;             // GL 텍스처는 아래에서 위로 쌓인다
     int x = (int)fxp;
     int y = (int)fyp;
     if (x < 0 || x >= W || y < 0 || y >= H) return;
 
-    // 색 기준: 0 밀도 / 1 온도 / 2 속력 / **3 별빛**.
+    // 색 기준: 0 밀도 / 1 온도 / 2 속력 / **3 별빛** / 4 재.
     // 어느 쪽이든 색은 사용자가 고른 컬러맵(cmapKind: 0 천체 · 1 흑백 · 2 열화상)에서 뽑는다.
     // 전에는 컬러맵을 아예 안 받아서, 보드에서 흑백으로 바꿔도 점 렌더는 그대로였다
     // (round-06 리뷰 P2 #26).
+    //
+    // **1 온도는 점 렌더에서는 값이 없다** — 2026-08-18 까지 이 분기가 읽던 `temp` 배열은
+    // 온도가 아니라 전자기력의 ±1 전하였다(온도 배열이 속도 분산 격자로 바뀐 뒤 그 자리를
+    // 전하가 빌려 썼다). 전하 부호를 「온도」로 칠하던 것을 지웠고, 이제 점 렌더의 온도
+    // 모드는 기본 색(t=0.5) 하나다. 온도(속도 분산)는 격자 모드(`Field::Dispersion`)에만 있다.
     float t = 0.5f;
-    if (colorBy == 1)      t = fminf(temp[i] * 0.5f, 1.f);
-    else if (colorBy == 2) {
+    if (colorBy == 2) {
         // 속력은 3차원 전부를 센다. xy 만 보면 위아래로 빠르게 진동하는 알갱이가
         // 멈춰 있는 것처럼 보인다 — 원반이 3D 라 그 성분이 실제로 있다.
         const float4 v = vel[i];
@@ -868,7 +863,6 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     texW_ = viewW; texH_ = viewH;
 
     const ViewSettings& view = app.view;
-    ++drawTick_;                       // 펄서가 쓸 시계(위 멤버 선언 참조)
     const int npix = viewW * viewH;
     const int cmapKind = (view.cmap == ColorMap::Blackbody) ? 3
                        : (view.cmap == ColorMap::Thermal)   ? 2
@@ -907,8 +901,10 @@ void RenderField::draw(App& app, int viewW, int viewH) {
 
         if (wantField) {
             // 밀도 필드 — 색 기준에 맞는 격자를 받아 화면으로 샘플링한다.
+            // 격자에는 속력 장이 없다 — 「속력」은 점 렌더에서만 진짜 속력이고, 격자 모드는
+            // 분산 격자로 그린다(전에는 `Field::Speed` 라는 이름으로 같은 분산을 받고 있었다).
             const Sim::Field f = (view.colorBy == ColorBy::Dispersion) ? Sim::Field::Dispersion
-                               : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Speed
+                               : (view.colorBy == ColorBy::Speed)       ? Sim::Field::Dispersion
                                : (view.colorBy == ColorBy::Light)       ? Sim::Field::Light
                                : (view.colorBy == ColorBy::Ash)         ? Sim::Field::Ash
                                                                         : Sim::Field::Density;
@@ -989,16 +985,16 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     constexpr int kBins = 64;
                     if (!devStat_) cudaMalloc(&devStat_, sizeof(int) * kBins);
                     if (devStat_) {
-                        // **빛 모드에서는 후광을 입히기 전 격자로 기준을 잡는다.**
+                        // **빛 모드에서는 성운을 입히기 전 격자로 기준을 잡는다.**
                         //
-                        // 그리는 것은 후광이 붙은 `grid` 지만, 그것으로 기준을 잡으면
+                        // 그리는 것은 퍼진 빛이 더해진 `grid` 지만, 그것으로 기준을 잡으면
                         // 빛이 퍼진 만큼 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고,
-                        // 후광으로 더한 만큼 도로 깎인다 — 2026-08-16 실측에서
-                        // `starGlowK` 를 0 → 1.5 로 올리자 켜진 픽셀이 2.78% → 0.4% 로
+                        // 더한 만큼 도로 깎인다 — 2026-08-16 실측(지금은 지운 별 후광에서)
+                        // 퍼진 빛의 계수를 0 → 1.5 로 올리자 켜진 픽셀이 2.78% → 0.4% 로
                         // **줄었다**(에너지를 보존하게 고친 뒤에도 그대로였다).
                         const float* statGrid = grid;
                         if (f == Sim::Field::Light) {
-                            const float* raw = app.sim.lightBeforeGlowDevicePtr();
+                            const float* raw = app.sim.lightBeforeNebulaDevicePtr();
                             if (raw) statGrid = raw;
                         }
                         cudaMemset(devStat_, 0, sizeof(int) * kBins);
@@ -1122,8 +1118,8 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                     // 0.08 이면 스무 프레임(0.33초)에 걸쳐 옮겨간다 — 사용자가 말한
                     // 「스르륵 색이 빠지고 다시 스르륵 켜지고」가 그 시간 폭이다.
                     // 성운은 실제로도 수만 년 규모로 변하는 것이라 화면에서 급히 뒤집힐
-                    // 이유가 없다.
-                    const float a3 = smoothPrimed_ ? 0.08f : 1.0f;
+                    // 이유가 없다. (그 0.08 대칭 계수는 아래 비대칭 둘로 대체됐다 —
+                    // 남아 있던 `a3` 지역변수는 읽는 곳이 없어 지웠다, 2026-08-18.)
                     const int b3 = (cells3 + 255) / 256;
                     // **성운은 비대칭으로 섞는다** — 이온화는 빠르고 재결합은 느리다
                     // (`kBlendGridAsym` 주석). 첫 프레임은 섞을 것이 없어 그대로 받는다.
@@ -1159,8 +1155,7 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             if (n > 0) {
                 kSplatPoints<<<(n + 255) / 256, 256>>>(
                     (const float4*)app.sim.particlePosDevicePtr(),
-                    (const float4*)app.sim.particleVelDevicePtr(),
-                    app.sim.particleTempDevicePtr(), n,
+                    (const float4*)app.sim.particleVelDevicePtr(), n,
                     (float3*)devAccum_, viewW, viewH, (int)view.colorBy, cmapKind,
                     app.zoom, app.panX, app.panY, app.ui.pointSizePx,
                     fmaxf(app.sim.config().starSunMass, 1.0f),
@@ -1271,9 +1266,8 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             // 시뮬 좌표 [0,1] → 화면 [-1,1]. kShade 와 같은 변환이라야 선이 칸 위에 얹힌다.
             const float s = (float)i / (float)G;
             float a = (s - 0.5f + app.panX) * app.zoom + 0.5f;
-            float bx = a, by = a;
+            float bx = a;
             if (aspect > 1.f) bx = (a - 0.5f) / aspect + 0.5f;
-            else              by = (a - 0.5f) * aspect + 0.5f;
             const float gx = bx * 2.f - 1.f;
             // 세로줄은 x 가 pan 을 타고, 가로줄은 y 가 탄다 — 둘을 따로 계산해야 맞는다.
             float ay = ((float)i / (float)G - 0.5f + app.panY) * app.zoom + 0.5f;
@@ -1282,7 +1276,6 @@ void RenderField::draw(App& app, int viewW, int viewH) {
             const float gy = 1.f - ay * 2.f;
             if (gx >= -1.f && gx <= 1.f) { glVertex2f(gx, -1.f); glVertex2f(gx, 1.f); }
             if (gy >= -1.f && gy <= 1.f) { glVertex2f(-1.f, gy); glVertex2f(1.f, gy); }
-            (void)by;
         }
         glEnd();
         glDisable(GL_BLEND);

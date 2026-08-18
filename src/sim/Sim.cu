@@ -163,7 +163,7 @@ __device__ __forceinline__ float3 bulgePoint(float R, unsigned seed) {
 // 알갱이를 처음 놓는다.
 //
 // 비용: N 스레드 × O(1). 한 프레임이 아니라 판을 새로 깔 때 한 번만 돈다.
-__global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
+__global__ void kPlace(float4* pos, float4* vel, int n, int preset,
                        float bulgeFrac, float bulgeR, float thickness, unsigned seed,
                        float darkFrac) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -191,7 +191,6 @@ __global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
         const float3 h = bulgePoint(0.42f, s ^ 0x2545F491u);
         pos[i] = make_float4(0.5f + h.x, 0.5f + h.y, 0.5f + h.z, 0.f);
         vel[i] = make_float4(0.f, 0.f, 0.f, -100.f);   // -100 = 암흑물질
-        if (temp) temp[i] = 0.f;
         return;
     }
 
@@ -244,13 +243,13 @@ __global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
     } else {                                     // 빈 판
         pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
         vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
-        if (temp) temp[i] = 0.f;
         return;
     }
 
     pos[i] = make_float4(x, y, z, 0.f);
     vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
-    if (temp) temp[i] = 0.02f;
+    // `temp`(지금은 전자기력의 전하 배열)는 여기서 건드리지 않는다 — reset() 이 이 커널
+    // 직후 `kInitCharge` 로 전체를 ±1 로 깐다. 온도 배열이던 시절의 0.02 쓰기는 지웠다.
 }
 
 // 격자 중력을 한 번 푼 뒤, 그 자리에서 원 궤도가 되는 속도를 넣는다.
@@ -259,8 +258,8 @@ __global__ void kPlace(float4* pos, float4* vel, float* temp, int n, int preset,
 // 회전은 xy 평면에서 일어난다(원반의 축이 z 다).
 //
 // 비용: N 스레드 × O(1). 판을 깔 때 한 번.
-__global__ void kSetOrbit(const float4* accG_unused, float4* vel, const float4* pos,
-                          const float* accMag, int n, float dispersion,
+__global__ void kSetOrbit(float4* vel, const float4* pos,
+                          const float* accMag, int n,
                           float bulgeR, float2 base, float thickness) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -277,8 +276,9 @@ __global__ void kSetOrbit(const float4* accG_unused, float4* vel, const float4* 
     const float v = sqrtf(fmaxf(accMag[i], 0.f) * r);
 
     // 팽대부에 가까울수록 회전보다 흩어짐이 지배한다 — 실제 은하의 중심부가 그렇다.
+    // 원반 쪽 흩어짐은 0 이다 — 압력(속도 분산 텐서)이 그 일을 한다(`orbitDispersion` 을 지운 이유).
     const float bulgeMix = (bulgeR > 0.f) ? __expf(-(r * r) / (bulgeR * bulgeR)) : 0.f;
-    const float disp = dispersion + 0.85f * bulgeMix;
+    const float disp = 0.85f * bulgeMix;
     const float spin = 1.0f - 0.55f * bulgeMix;
 
     const unsigned s = (unsigned)i * 22695477u + 7u;
@@ -2210,9 +2210,10 @@ __global__ void kBlurLine(const float* src, float* dst, int G, int radius, int h
 // (round-20·21 실측: 흐린 픽셀 15.2% → 10.6%).
 //
 // 고친 것 둘. **①`gas` 를 평균으로 나눠 「평균의 몇 배인가」로 바꾼다** — 그러면 별빛과
-// 같은 자릿수에서 섞인다. **②후광과 같은 에너지 보존을 쓴다**(`/(1+k)`) — 빛은 퍼질 뿐
-// 늘지 않으므로 총량이 그대로여야 정규화 기준이 안 올라간다. 후광(`kAddGlow`)에서 같은
-// 함정을 만나 먼저 푼 수법이고, 여기가 그 원본이 되는 자리였다.
+// 같은 자릿수에서 섞인다. **②에너지 보존을 쓴다**(`/(1+k)`) — 빛은 퍼질 뿐
+// 늘지 않으므로 총량이 그대로여야 정규화 기준이 안 올라간다. 지금은 지운 별 후광에서
+// 같은 함정을 먼저 만나 푼 수법이다(2026-08-16 실측: 그냥 더하자 켜진 픽셀이
+// 2.63% → 0.96% 로 **줄었다**).
 __global__ void kAddNebula(const float* starLight, const float* spread, const float* gas,
                            float* out, int n, float k, float invMeanGas) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2221,39 +2222,9 @@ __global__ void kAddNebula(const float* starLight, const float* spread, const fl
     out[i] = (starLight[i] + g * spread[i] * k) * (1.f / (1.f + k));
 }
 
-// 별에 후광을 입힌다 — **밝은 별일수록 넓게 보이게 하는 자리다.**
-//
-//   최종 = 별빛(그대로) + 퍼진별빛 × 계수
-//
-// **왜 필요한가.** `kScatterLight` 는 모든 별을 CIC 4칸에만 뿌린다. 밝기만 다르고 크기는
-// 전부 같아서, 화면에서 어느 별이 더 무거운지 눈으로 구분이 안 된다는 지적을 받았다.
-// 실제 밤하늘은 밝은 별이 더 크게 보인다 — 대기 산란과 렌즈 회절 때문이고, 눈으로도
-// 그렇다. 「빛의 범위」가 밝기의 신호다.
-//
-// **왜 별마다 넓게 칠하지 않나 — 그것이 이 프로젝트를 죽인 경로라서.**
-// 「밝을수록 큰 원을 그린다」는 자연스러운 발상인데, 2026-08-14 에 알갱이 하나가 625 픽셀을
-// 칠해 한 프레임에 9억 회 원자연산이 되었고 시스템이 재부팅됐다(BugCheck 0x139).
-// 반경이 밝기를 따라가면 그 곱의 최댓값에 상한이 없다.
-//
-// **격자를 한 번 흐리는 것은 다르다.** 비용이 화면 격자 칸 수에만 비례하고 알갱이 수와
-// 무관하다 — 128² × 13 × 2 = 43만 회로 고정이다. 그러면서도 효과는 원하는 그대로다:
-// 밝은 별은 값이 크니 흐린 뒤에도 주변이 밝게 남아 **밝기에 비례해 후광이 넓어 보인다.**
-// **총 밝기를 유지한다 — 더하기가 아니라 섞기다.**
-//
-// 그냥 더하면(`src + k·blur`) 화면 전체의 값이 올라가고, 밝기 정규화가 상위 5% 지점을
-// 기준으로 잡으므로 **그 기준도 같이 올라가 더한 만큼 도로 깎인다.** 2026-08-16 실측:
-// `starGlowK` 를 0 → 1.5 로 올리자 켜진 픽셀이 2.63% → 0.96% 로 **줄었다.**
-// round-20·21 에서 성운(`kAddNebula`)이 안 보이던 것과 같은 함정이다.
-//
-// `(src + k·blur)/(1+k)` 로 나누면 총량이 그대로다. 실제 광학도 그렇다 — 빛은 퍼질 뿐
-// 늘지 않는다. 밝은 별의 빛이 자기 자리에서 둘레로 나뉘어, **정규화 기준을 안 올리면서**
-// 주변이 밝아진다.
-__global__ void kAddGlow(const float* starLight, const float* spread,
-                         float* out, int n, float k) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    out[i] = (starLight[i] + spread[i] * k) * (1.f / (1.f + k));
-}
+// (`kAddGlow`(별 후광)를 지웠다 — 2026-08-18. 사용자 요청으로 08-17 에 계수를 0 으로
+//  껐는데 커널과 제어 키가 남아 밖에서 다시 켤 수 있었다. 별빛은 별이 있는 자리에서만
+//  난다. 흐린 격자는 성운(`kAddNebula`)이 그대로 쓴다.)
 
 __global__ void kDivideInto(const float* num, const float* den, float* out, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2369,7 +2340,12 @@ __global__ void kHideRange(float4* pos, float4* vel, int from, int to) {
 // ---------------------------------------------------------------------------
 
 // 형태 하나를 빈 슬롯 구간에 채운다. 화면이 xy 를 보므로 두께는 얇게 준다.
-__global__ void kFillShape(float4* pos, float4* vel, float* temp, int from, int count,
+//
+// 전하 배열(`temp`)은 건드리지 않는다. reset() 의 `kInitCharge` 가 빈 슬롯까지 전체를
+// ±1 로 깔아 두므로 여기 들어오는 알갱이도 그 부호를 그대로 물려받는다. 온도 배열이던
+// 시절의 0.02/0.6 쓰기는 지웠다 — 그것이 남아 있어 전자기력을 켠 채 형태를 놓으면 그
+// 알갱이만 전부 같은 부호가 되고 있었다.
+__global__ void kFillShape(float4* pos, float4* vel, int from, int count,
                            float cx, float cy, int kind, float R, float thickness,
                            unsigned seed) {
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2379,15 +2355,13 @@ __global__ void kFillShape(float4* pos, float4* vel, float* temp, int from, int 
     const float u1 = rnd01(s), u2 = rnd01(s * 3u + 1u), u3 = rnd01(s * 7u + 5u);
 
     float x, y, z = 0.5f + rndNormal(s ^ 0x2545F491u) * thickness;
-    float temp0 = 0.02f;
 
     if (kind == 0) {                       // 은하 — 도는 원반
         const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
         x = cx + p.x; y = cy + p.y; z = 0.5f + p.z;
-    } else if (kind == 1) {                // 태양 — 가운데로 갈수록 빽빽하고 뜨겁다
+    } else if (kind == 1) {                // 태양 — 가운데로 갈수록 빽빽하다
         const float3 b = bulgePoint(R, s);
         x = cx + b.x; y = cy + b.y; z = 0.5f + b.z;
-        temp0 = 0.6f;
     } else if (kind == 2) {                // 고리 — 가운데가 빈 도넛
         const float th = u1 * 6.2831853f;
         const float r = R * (0.72f + 0.22f * u2);
@@ -2422,7 +2396,6 @@ __global__ void kFillShape(float4* pos, float4* vel, float* temp, int from, int 
 
     pos[i] = make_float4(x, y, z, 0.f);
     vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
-    if (temp) temp[i] = temp0;
 }
 
 // 방금 넣은 구간에만 궤도 속도를 준다.
@@ -2503,14 +2476,15 @@ struct Sim::Impl {
     float  *pot = nullptr;           // 퍼텐셜(패딩 포함) S³
     float  *proj = nullptr;          // 화면에 넘길 2D 투영 G²
     float  *projA = nullptr, *projB = nullptr;   // 속도 분산을 구할 때 쓰는 두 격자 G²
-    // **후광을 입히기 전의 별빛** G². 화면에 그리는 것은 후광이 붙은 `proj` 지만,
-    // 밝기 정규화의 기준은 이쪽에서 잡아야 한다 — 후광이 붙은 격자로 기준을 잡으면
-    // 빛이 퍼진 만큼 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고, 그러면 더한 만큼
-    // 도로 깎여 **후광을 켤수록 화면이 어두워진다**(2026-08-16 실측: 켜진 픽셀 2.78% → 0.4%).
+    // **성운을 입히기 전의 별빛** G². 화면에 그리는 것은 퍼진 빛이 더해진 `proj` 지만,
+    // 밝기 정규화의 기준은 이쪽에서 잡아야 한다 — 퍼진 빛이 더해진 격자로 기준을 잡으면
+    // 그만큼 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고, 그러면 더한 만큼
+    // 도로 깎여 **켤수록 화면이 어두워진다**(2026-08-16 실측, 지금은 지운 별 후광에서:
+    // 켜진 픽셀 2.78% → 0.4%).
     float  *projLight = nullptr;
     // **밝기로 가중한 온도의 합** G². 색을 밝기와 다른 축에서 정하는 자리다 —
-    // 이것을 밝기 합으로 나누면 그 픽셀의 대표 온도가 나온다. `projTB` 는 후광을 입힐 때
-    // 온도도 함께 퍼뜨리는 데 쓰는 임시 격자다(밝기만 퍼뜨리면 후광 자리의 색이 없다).
+    // 이것을 밝기 합으로 나누면 그 픽셀의 대표 온도가 나온다. `projTB` 는 성운을 입힐 때
+    // 온도도 함께 퍼뜨리는 데 쓰는 임시 격자다(밝기만 퍼뜨리면 퍼진 자리의 색이 없다).
     float  *projT = nullptr, *projTB = nullptr;
     // 「폭발 자리에서 새 별이 태어나는가」를 보는 창. [0] 태어난 수, [1] 그 자리 재의 합.
     // **누적이라 비우지 않는다** — 판이 열린 뒤 지금까지의 평균을 본다.
@@ -2942,7 +2916,7 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&proj, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&projA, sizeof(float) * (size_t)G * G));
     CK(cudaMalloc(&projB, sizeof(float) * (size_t)G * G));
-    // 후광 전 별빛(정규화 기준용). 화면 격자라 128² × 4B = 65 KB 밖에 안 든다.
+    // 성운 전 별빛(정규화 기준용). 화면 격자라 128² × 4B = 65 KB 밖에 안 든다.
     CK(cudaMalloc(&projLight, sizeof(float) * (size_t)G * G));
     CK(cudaMemset(projLight, 0, sizeof(float) * (size_t)G * G));
     // 온도 격자 둘. 같은 화면 격자라 합쳐도 131 KB 다.
@@ -3054,7 +3028,7 @@ void Sim::Impl::placeInitial() {
                      : (cfg.preset == Preset::TidalPair)  ? 1
                      : (cfg.preset == Preset::CosmicWeb)  ? 2
                      : (cfg.preset == Preset::BlackHole)  ? 3 : 4;
-    kPlace<<<(allocN + 255) / 256, 256>>>(pos, vel, temp, allocN, preset,
+    kPlace<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, preset,
                                           cfg.bulgeFraction, cfg.bulgeRadius,
                                           cfg.diskThickness, 12345u,
                                           cfg.darkMatterFraction);
@@ -3071,9 +3045,8 @@ void Sim::Impl::giveOrbits() {
                                              periodic() ? 1 : 0, packBH());
     // 은하 충돌은 둘을 서로에게 밀어 준다. 나머지는 제자리에서 돈다.
     const float2 base = make_float2(0.f, 0.f);
-    kSetOrbit<<<(allocN + 255) / 256, 256>>>(accG, vel, pos, accMag, allocN,
-                                             cfg.orbitDispersion, cfg.bulgeRadius, base,
-                                             cfg.diskThickness);
+    kSetOrbit<<<(allocN + 255) / 256, 256>>>(vel, pos, accMag, allocN,
+                                             cfg.bulgeRadius, base, cfg.diskThickness);
     CK(cudaGetLastError());
 }
 
@@ -3676,7 +3649,7 @@ void Sim::step() {
     // 시간이 안 흐르는 문제는 dt 를 억지로 키워 푸는 것이 아니라, **빠른 알갱이를 없애서**
     // 푼다 — 지평선 안으로 들어온 것은 삼켜 지운다(아래 bhEatRs). 그러면 vmax 가 내려가고
     // dt 가 저절로 회복된다.
-    d.tm.dtUsed = dt; d.tm.maxSpeed = vmax; d.tm.substeps = 1;
+    d.tm.dtUsed = dt; d.tm.maxSpeed = vmax;
 
     // 식히는 것은 힘을 더하기 전에 한다 — 이번 스텝의 dt 로 이웃과의 무작위 운동을 걷어낸다.
     // 속도를 줄이는 쪽이라 방금 CFL 이 정한 dt 를 위태롭게 하지 않는다.
@@ -4399,27 +4372,24 @@ double Sim::measureKineticEnergy() {
     return e;
 }
 
-// 격자 중력의 정확도를 O(N²) 직접 계산과 견준다.
-// 3D 전환에서는 이 진단을 쓰지 않는다 — 필요해지면 그때 되살린다.
-double Sim::measureForceErrorVsDirect(int, int, float) { return 0.0; }
-
 const float* Sim::densityDevicePtr() const { return impl_->rho; }
 
-// 후광을 입히기 전의 별빛 격자. **밝기 정규화의 기준은 이것으로 잡는다.**
+// 성운을 입히기 전의 별빛 격자. **밝기 정규화의 기준은 이것으로 잡는다.**
 //
-// 화면에 그리는 것은 후광이 붙은 `fieldDevicePtr(Field::Light)` 지만, 그 격자로 기준을
-// 잡으면 안 된다 — 빛이 퍼지면 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고, 후광으로
-// 더한 만큼 도로 깎인다. 2026-08-16 실측에서 `starGlowK` 를 0 → 1.5 로 올리자 켜진 픽셀이
-// 2.78% → 0.4% 로 **줄었다**(에너지를 보존하게 고친 뒤에도 그대로였다).
+// 화면에 그리는 것은 퍼진 빛이 더해진 `fieldDevicePtr(Field::Light)` 지만, 그 격자로
+// 기준을 잡으면 안 된다 — 빛이 퍼지면 중간 밝기 픽셀이 늘어 상위 5% 지점이 올라가고,
+// 더한 만큼 도로 깎인다. 2026-08-16 실측(지금은 지운 별 후광에서): 퍼진 빛의 계수를
+// 0 → 1.5 로 올리자 켜진 픽셀이 2.78% → 0.4% 로 **줄었다**(에너지를 보존하게 고친
+// 뒤에도 그대로였다).
 //
 // `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다 — 그 안에서 채워진다.
-const float* Sim::lightBeforeGlowDevicePtr() const { return impl_->projLight; }
+const float* Sim::lightBeforeNebulaDevicePtr() const { return impl_->projLight; }
 
 // 밝기로 가중한 온도의 합 격자. **밝기 격자로 나누면 그 픽셀의 대표 온도(K)가 된다.**
 // `fieldDevicePtr(Field::Light)` 를 부른 뒤에만 뜻이 있다.
 const float* Sim::lightTempDevicePtr() const { return impl_->projT; }
 
-// **퍼진 별빛** 격자(G²) — 별빛을 가로·세로로 흐린 것. 후광과 성운이 나눠 쓰는 재료다.
+// **퍼진 별빛** 격자(G²) — 별빛을 가로·세로로 흐린 것. 성운이 쓰는 재료다.
 // 점 렌더가 반사성운을 그리려면 이것이 필요하다: 가스 알갱이가 **자기 자리의 별빛을
 // 읽어** 밝기로 쓴다. 알갱이마다 이웃을 훑는 대신 격자를 한 번 만들어 읽기만 하는 것이라
 // 비용이 알갱이 수와 무관하다 — 2026-08-14 에 시스템을 죽인 경로를 피한다.
@@ -4541,32 +4511,30 @@ const float* Sim::fieldDevicePtr(Field field) {
             d.pos, d.vel, d.allocN, G, d.proj, d.projT, rot,
             fmaxf(d.cfg.starSunMass, 1.0f), nova);
 
-        // ── 후광과 성운 — 둘 다 「퍼진 별빛」을 재료로 쓴다 ────────────────
+        // ── 성운 — 「퍼진 별빛」을 재료로 쓴다 ─────────────────────────────
         //
         // 화면 격자 셋을 돌려 쓴다(`proj`·`projA`·`projB`) — 새로 잡지 않는다.
         //   1) projA ← 별빛을 가로로 흐림
         //   2) projB ← 그것을 세로로 흐림 = **퍼진 별빛**
-        //   3) proj  ← 별빛 + 퍼진빛 × glowK              (후광: 밝은 별이 넓어 보인다)
-        //   4) projA ← 가스 밀도(재사용, 위 값은 이미 projB 로 넘어갔다)
-        //   5) proj  ← 그 결과 + 가스 × 퍼진빛 × nebulaK  (성운: 가스가 별빛을 받는다)
+        //   3) projA ← 가스 밀도(재사용, 위 값은 이미 projB 로 넘어갔다)
+        //   4) proj  ← 별빛 + 가스 × 퍼진빛 × nebulaK  (성운: 가스가 별빛을 받는다)
         //
-        // **흐리기는 한 번만 하고 둘이 나눠 쓴다** — 후광과 성운이 필요로 하는 것이
-        // 같은 값(퍼진 별빛)이라 두 번 흐릴 이유가 없다.
-        const bool wantGlow   = (d.cfg.starGlowK > 0.f);
+        // (별 후광 — 3) 자리에서 `proj ← 별빛 + 퍼진빛 × glowK` 로 밝은 별을 넓게
+        //  보이게 하던 것 — 은 2026-08-18 에 지웠다. 사용자 요청으로 껐던 것이다.)
         const bool wantNebula = (d.cfg.nebulaK  > 0.f);
-        // **후광을 입히기 전 별빛을 남겨 둔다** — 밝기 정규화의 기준은 이쪽에서 잡아야
-        // 한다. 후광이 붙은 격자로 기준을 잡으면 퍼진 만큼 중간 밝기가 늘어 상위 5%
-        // 지점이 올라가고, 더한 만큼 도로 깎여 후광을 켤수록 화면이 어두워진다.
+        // **성운을 입히기 전 별빛을 남겨 둔다** — 밝기 정규화의 기준은 이쪽에서 잡아야
+        // 한다. 퍼진 빛이 더해진 격자로 기준을 잡으면 그만큼 중간 밝기가 늘어 상위 5%
+        // 지점이 올라가고, 더한 만큼 도로 깎여 켤수록 화면이 어두워진다.
         if (d.projLight) {
             CK(cudaMemcpy(d.projLight, d.proj, sizeof(float) * cells, cudaMemcpyDeviceToDevice));
         }
-        if ((wantGlow || wantNebula) && d.projA && d.projB) {
+        if (wantNebula && d.projA && d.projB) {
             const dim3 b2(16, 16), g2((G + 15) / 16, (G + 15) / 16);
             // **반지름을 12 로 늘렸다가 되돌렸다(2026-08-17).** 격자 눈금을 덮으려던
-            // 것인데, 사용자가 「어제가 더 우주처럼 느껴진다」고 알렸다 — 후광이 넓게
+            // 것인데, 사용자가 「어제가 더 우주처럼 느껴진다」고 알렸다 — 넓게
             // 퍼져 화면이 뿌예졌고, 정작 눈금은 그대로 보였다.
             //
-            // 원인이 후광이 아니었다. 눈금은 **별이 칸 단위로 태어나서** 생긴다 —
+            // 원인이 흐리기가 아니었다. 눈금은 **별이 칸 단위로 태어나서** 생긴다 —
             // `kStarForm` 이 그 칸의 밀도와 분산으로 Jeans 조건을 보므로, 한 칸이
             // 문턱을 넘는 순간 그 칸의 알갱이 전체가 후보가 된다. 칸마다 넘는 시점이
             // 달라 「사각형 하나씩 불이 켜지는」 것으로 보인다. 흐리기를 키우는 것은
@@ -4576,20 +4544,14 @@ const float* Sim::fieldDevicePtr(Field field) {
             kBlurLine<<<g2, b2>>>(d.proj,  d.projA, G, radius, 1);
             kBlurLine<<<g2, b2>>>(d.projA, d.projB, G, radius, 0);
             // **온도 합도 밝기와 똑같이 퍼뜨린다.** 색은 `온도합 ÷ 밝기` 로 나오는데
-            // 분자만 안 퍼뜨리면 후광 자리에서 분모만 커져 색이 붉은 쪽으로 무너진다 —
-            // 밝은 파란 별의 후광이 붉어지는 것은 실제 현상이 아니다.
+            // 분자만 안 퍼뜨리면 퍼진 자리에서 분모만 커져 색이 붉은 쪽으로 무너진다 —
+            // 밝은 파란 별 둘레가 붉어지는 것은 실제 현상이 아니다.
             // `projA` 는 위에서 `projB` 로 이미 넘어가 자유롭다(재사용).
             if (d.projT && d.projTB) {
                 kBlurLine<<<g2, b2>>>(d.projT, d.projA,  G, radius, 1);
                 kBlurLine<<<g2, b2>>>(d.projA, d.projTB, G, radius, 0);
             }
-            if (wantGlow) {
-                kAddGlow<<<blocks, 256>>>(d.proj, d.projB, d.proj, cells, d.cfg.starGlowK);
-                if (d.projT && d.projTB) {
-                    kAddGlow<<<blocks, 256>>>(d.projT, d.projTB, d.projT, cells, d.cfg.starGlowK);
-                }
-            }
-            if (wantNebula) {
+            {
                 // 가스 밀도는 기존 밀도 격자를 그대로 투영해 쓴다. 별도 「가스만」 격자를
                 // 만들지 않는 이유는 별이 이미 밝아 더해져도 눈에 안 띄기 때문이다.
                 kClearF<<<blocks, 256>>>(d.projA, cells);
@@ -4613,7 +4575,7 @@ const float* Sim::fieldDevicePtr(Field field) {
         return d.proj;
     }
 
-    // 속도 분산(=은하의 온도)과 속력은 알갱이에서 바로 뿌린다.
+    // 속도 분산(=은하의 온도)은 알갱이에서 바로 뿌린다.
     // 격자에는 속도가 없으므로 3D 격자를 거치지 않고 화면 격자에 곧장 쌓는다.
     kClearF<<<blocks, 256>>>(d.projA, cells);
     kClearF<<<blocks, 256>>>(d.projB, cells);
@@ -4626,7 +4588,6 @@ const float* Sim::fieldDevicePtr(Field field) {
 
 const float* Sim::particlePosDevicePtr() const { return (const float*)impl_->pos; }
 const float* Sim::particleVelDevicePtr() const { return (const float*)impl_->vel; }
-const float* Sim::particleTempDevicePtr() const { return impl_->temp; }
 
 // ---------------------------------------------------------------------------
 // 마우스 도구
@@ -4705,7 +4666,7 @@ int Sim::addShape(float cx, float cy, ShapeKind kind, float radius, int count, b
     }
     d.aliveShown = -1;                     // 알갱이를 새로 넣었으니 세어 둔 값은 버린다
 
-    kFillShape<<<(n + 255) / 256, 256>>>(d.pos, d.vel, d.temp, from, n, cx, cy,
+    kFillShape<<<(n + 255) / 256, 256>>>(d.pos, d.vel, from, n, cx, cy,
                                          (int)kind, radius, d.cfg.diskThickness,
                                          (unsigned)(d.stepCount * 7919 + 17));
 

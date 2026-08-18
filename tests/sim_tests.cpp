@@ -68,9 +68,7 @@ static void testGravityResponds() {
         // 보는 것은 중력이 뭉치게 하는가 하나뿐이다. 가운데 별 무리는 중력과 무관하게
         // 처음부터 빽빽해서 초기 밀도를 지배해 버리므로 여기서는 깔지 않는다.
         cfg.bulgeFraction = 0.0f;
-        // 밀도파도 끈다 — 이 힘이 알갱이를 팔로 모으므로 중력이 0 이어도 밀도가 오른다.
-        cfg.spiralWaveEnabled = false;
-        cfg.haloEnabled = false;
+        // (나선 밀도파·헤일로 근사를 끄던 두 줄은 지웠다 — 코어에서 둘 다 없어졌다, 2026-08-17.)
         sim.init(cfg);
         // 3D 는 같은 스텝 수에서 훨씬 덜 뭉친다. 200 스텝에서는 비율이 1.03 에 그쳤다.
         for (int i = 0; i < 900; ++i) sim.step();
@@ -84,17 +82,13 @@ static void testGravityResponds() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. 힘 오차 — 3D 전환에서 이 진단을 껐다.
+// 3. (힘 오차 검사를 지웠다 — 2026-08-18)
 //
 //    격자 중력을 직접 O(N²) 계산과 견주는 검사였는데, 3D 로 옮기면서 코어의
-//    measureForceErrorVsDirect 가 0 을 돌려주도록 비워 두었다(자기 버퍼를 따로 잡아 도는
-//    무거운 진단이라 3D 로 다시 쓰는 일을 미뤘다). 값이 없는 것을 통과로 세면 검사가
-//    있는 척만 하게 되므로, 되살릴 때까지 건너뛴다는 것을 눈에 보이게 남긴다.
+//    measureForceErrorVsDirect 가 늘 0 을 돌려주는 스텁이 됐고 여기서는 SKIP 만 찍었다.
+//    「오차 0」을 돌려주는 측정은 없는 것보다 나쁘므로 스텁과 함께 지웠다. 3D 로 다시
+//    쓸 때 코어 측정과 이 검사를 같이 만든다. 번호 3 은 결번으로 둔다.
 // ---------------------------------------------------------------------------
-static void testForceAccuracy() {
-    printf("\n[3] 격자 중력의 힘 오차 — 3D 로 다시 쓰기 전까지 건너뜀\n");
-    printf("  [SKIP] measureForceErrorVsDirect 가 아직 3D 를 재지 않는다\n");
-}
 
 // ---------------------------------------------------------------------------
 // 4. 설정 변경이 즉시 반영된다 — 파티클 수·격자 해상도를 바꿔도 정상 동작해야 한다.
@@ -207,8 +201,8 @@ static void testCflClamp() {
     double dc = std::sqrt((cx1 - cx0) * (cx1 - cx0) + (cy1 - cy0) * (cy1 - cy0));
     char buf[220];
     snprintf(buf, sizeof(buf),
-             "질량변화=%.2e  중심이동=%.4f  서브스텝=%d  dt=%.2e  최대속력=%.2f",
-             dm, dc, t.substeps, t.dtUsed, t.maxSpeed);
+             "질량변화=%.2e  중심이동=%.4f  dt=%.2e  최대속력=%.2f",
+             dm, dc, t.dtUsed, t.maxSpeed);
     // 중심이 0.05 이상 밀리면 한쪽으로 쏠린 것이다(회전 원반은 중심이 제자리에 있어야 한다).
     check(dm < 1e-2 && dc < 0.05, "강한 중력에서 질량·질량중심이 유지된다", buf);
 }
@@ -390,12 +384,14 @@ static void testStarBookkeeping() {
     cfg.gridSize = 256;
     cfg.preset = Preset::SpiralDisk;
     cfg.pressureEnabled = true;
-    cfg.temperatureEnabled = true;
     cfg.coolingEnabled = true;
     cfg.coolingRate = 0.9f;
-    cfg.starFormationEnabled = true;
-    cfg.starDensityThreshold = 20.0f;
-    cfg.starTempThreshold = 0.5f;
+    // 별 형성은 3D 코어에도 살아 있다(Jeans 판정, 2026-08-16 이후). 이 검사가 실제로 지키는
+    // 것은 **지운 만큼 살아있는 수가 줄어드는가** 하나뿐이라 여기서는 끈다 — 켜 두면 지운
+    // 반경 밖의 별이 남아 아래 「별 0」 판정이 별 형성 여부에 따라 흔들린다.
+    // (`temperatureEnabled`·`starDensityThreshold`·`starTempThreshold` 를 넣던 세 줄은
+    //  코어에서 그 필드가 사라져 지웠다 — 2026-08-18.)
+    cfg.starFormationEnabled = false;
     cfg.sortInterval = 5;             // 자주 정렬해 재배치 경로를 확실히 태운다
     sim.init(cfg);
     for (int i = 0; i < 120; ++i) sim.step();
@@ -403,7 +399,7 @@ static void testStarBookkeeping() {
     const int starsBefore = sim.starCount();
     const int aliveBefore = sim.activeCount();
 
-    // 판 대부분을 지운다. 살아남은 것보다 별이 많아지면 표식이 함께 정리되지 않은 것이다.
+    // 판 대부분을 지운다.
     const int erased = sim.eraseAt(0.5f, 0.5f, 0.45f);
     sim.step();
     const int starsAfter = sim.starCount();
@@ -411,11 +407,10 @@ static void testStarBookkeeping() {
 
     char buf[220];
     snprintf(buf, sizeof(buf),
-             "지운 것=%d · 지우기 전 살아있음=%d · 지운 뒤=%d (별 형성은 3D 에서 제거됨)",
+             "지운 것=%d · 지우기 전 살아있음=%d · 지운 뒤=%d (별 형성은 이 검사에서 끔)",
              erased, aliveBefore, aliveAfter);
-    // 별 형성은 3D 로 옮기면서 뺐다(한 번도 켜지지 않던 기능이라 함께 정리했다).
-    // 그래서 별 수는 늘 0 이고, 이 항목이 실제로 지키는 것은 **지운 만큼 살아있는 수가
-    // 줄어드는가** 하나만 남는다. 검사 이름과 판정을 거기에 맞춘다.
+    // 별 표식이 정렬·지우개를 넘어 어긋나는지(지운 반경 안의 별이 별 수에서도 빠지는지)는
+    // 별 형성을 켠 별도 검사가 필요하다 — 아직 없다.
     check(erased > 0 && aliveAfter == aliveBefore - erased && starsAfter == 0,
           "지운 만큼 살아있는 수가 정확히 줄어든다", buf);
     (void)starsBefore;
@@ -736,7 +731,6 @@ int main() {
 
     testMassConservation();
     testGravityResponds();
-    testForceAccuracy();
     testReconfigure();
     testPresets();
     testTimings();

@@ -31,12 +31,13 @@ void mark(const char* fmt, ...);
 void endOk();
 
 // 직전 세션이 비정상 종료(재부팅·강제종료)됐는가. begin() 뒤에 유효하다.
+// (아직 부르는 곳이 없다 — 화면에 알리는 자리를 만들 때 쓴다.)
 bool lastSessionCrashed();
 
-// 이번 세션 로그 파일의 전체 경로. 설정 화면이 사용자에게 보여 준다.
-const char* logPath();
+// (`logPath()` 를 지웠다 — 2026-08-18. 「설정 화면이 보여 준다」고 적혀 있었으나 부르는 곳이
+//  없었다. 경로 자체는 begin() 이 로그 머리말과 표시 파일에 적는다.)
 
-// 로그가 쌓인 폴더. 「사고 기록 열기」가 탐색기로 연다.
+// 로그가 쌓인 폴더. 크래시 덤프를 이 옆에 둔다(main.cpp).
 const char* logDir();
 
 } // namespace fx

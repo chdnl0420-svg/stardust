@@ -174,10 +174,12 @@ std::string ControlBridge::statusBody(const App& app) const {
         "ok=%d\nsimFailed=%d\n"
         "fps=%.2f\nframeMs=%.3f\n"
         "particleCount=%d\ngridSize=%d\n"
-        "boundary=%s\nlaw=%s\npreset=%s\n"
+        "boundary=%s\npreset=%s\n"
         "gravity=%.4f\nsofteningCells=%.3f\ntimeScale=%.3f\nsortInterval=%d\n"
-        "pressure=%d\npressureK=%.4f\ngamma=%.3f\nstarJeansK=%.1f\n"
-        "temperature=%d\ncooling=%d\nstarFormation=%d\nexpansion=%d\n"
+        "pressure=%d\npressureK=%.4f\nstarJeansK=%.1f\n"
+        // (`law`·`gamma`·`temperature`·`expansion` 을 지웠다 — 2026-08-18. 코어가 안 읽는
+        //  값이라 되읽어 봐야 「먹힌 것처럼 보이는」 창만 됐다.)
+        "cooling=%d\nstarFormation=%d\n"
         // **블랙홀 전환은 창이 없어 확인 불가였다(2026-08-18에 더함).** 물리 토글 일곱 중
         // 이것 하나만 status 에 안 나와, 밖에서 켜고 껐는지 되읽을 방법이 없었다.
         // 판이 비는지 아닌지를 가르는 스위치라 특히 확인할 값이 있다(작업 #20).
@@ -197,10 +199,11 @@ std::string ControlBridge::statusBody(const App& app) const {
         "version=%s\nupdateChecked=%d\nupdateAvailable=%d\nlatestVersion=%s\nupdateError=%s\n"
         "zoom=%.4f\npanX=%.4f\npanY=%.4f\n"
         "recording=%d\nrecordedFrames=%d\n"
-        "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\ngasMs=%.4f\n"
+        // 구간 이름의 뜻은 `SimTimings` 주석 참조(scatter=중력, poisson=냉각·별, gather=적분).
+        "stepMs=%.4f\nscatterMs=%.4f\npoissonMs=%.4f\ngatherMs=%.4f\n"
         // 아직 소비되지 않은 예약 스텝. 밖에서 "요청한 스텝이 다 돌았는지"를 알 유일한 신호다 —
         // 시간으로 어림하면 프레임이 느린 환경에서 덜 돈 채로 성공 응답이 나간다.
-        "substeps=%d\ndtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\npendingSteps=%d\n"
+        "dtUsed=%.6f\nmaxSpeed=%.4f\nstepsPerFrame=%d\npendingSteps=%d\n"
         "totalMass=%.1f\nmaxDensity=%.2f\noccupiedCells=%d\n"
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
         // 블랙홀 — 삼키고 자라는지 밖에서 확인할 유일한 창이다. 화면의 점 하나로는
@@ -238,7 +241,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "rot1=%.5f\nrot2=%.5f\nrot3=%.5f\nrot4=%.5f\n"
         // 코어가 실제로 들고 있는 값. **밖에서 보낸 설정이 여기까지 왔는지**를 보는 창이다 —
         // `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다(round-06 리뷰 P1 #2).
-        "coreNebulaK=%.4f\ncoreGlowK=%.4f\ncoreIonizeK=%.4f\ncoreDark=%.4f\n"
+        "coreNebulaK=%.4f\ncoreIonizeK=%.4f\ncoreDark=%.4f\n"
         // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
         //
         // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
@@ -260,12 +263,11 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.fps, app.frameMs,
         app.sim.particleCount(), app.sim.gridSize(),
         app.cfg.boundary == Boundary::Isolated ? "isolated" : "periodic",
-        app.cfg.law == GravityLaw::InverseSquare ? "inverse_square" : "inverse_r",
         presetSlug(app.cfg.preset),
         app.cfg.gravity, app.cfg.softeningCells, app.cfg.timeScale, app.cfg.sortInterval,
-        app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.gamma, app.cfg.starJeansK,
-        app.cfg.temperatureEnabled ? 1 : 0, app.cfg.coolingEnabled ? 1 : 0,
-        app.cfg.starFormationEnabled ? 1 : 0, app.cfg.expansionEnabled ? 1 : 0,
+        app.cfg.pressureEnabled ? 1 : 0, app.cfg.pressureK, app.cfg.starJeansK,
+        app.cfg.coolingEnabled ? 1 : 0,
+        app.cfg.starFormationEnabled ? 1 : 0,
         app.cfg.starCollapseToBH ? 1 : 0,
         app.running ? 1 : 0, app.sim.simTime(), app.sim.simTime() * kYearsPerSimUnit,
         app.sim.activeCount(), app.sim.starCount(),
@@ -288,8 +290,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         up.latest.c_str(), up.error.c_str(),
         app.zoom, app.panX, app.panY,
         app.recording ? 1 : 0, app.recordedFrames,
-        t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.gasMs,
-        t.substeps, t.dtUsed, t.maxSpeed, app.stepsLastFrame, pendingSteps_,
+        t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs,
+        t.dtUsed, t.maxSpeed, app.stepsLastFrame, pendingSteps_,
         totalMass, maxDensity, occupiedCells,
         centroidX, centroidY, meanTemp,
         bh.active ? 1 : 0, bh.x, bh.y, bh.rs, bh.mass, bh.born ? 1 : 0, sim.blackHoleCount(),
@@ -305,7 +307,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 판 전체의 칸당 재 평균. 격자는 패딩 없이 G³ 다.
         (double)sim.totalAsh() / (double)((double)sim.gridSize() * sim.gridSize() * sim.gridSize()),
         rot[0], rot[1], rot[2], rot[3],
-        sim.config().nebulaK, sim.config().starGlowK,
+        sim.config().nebulaK,
         sim.config().starIonizeK, sim.config().darkMatterFraction,
         // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
         // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
@@ -424,9 +426,9 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "boundary"))
             app.cfg.boundary = (kv["boundary"] == "periodic") ? Boundary::Periodic
                                                               : Boundary::Isolated;
-        if (has(kv, "law"))
-            app.cfg.law = (kv["law"] == "inverse_r") ? GravityLaw::InverseR
-                                                     : GravityLaw::InverseSquare;
+        // (`law`·`gamma`·`temperature`·`expansion`·`hubble`·`starGlowK`·`dispersion` 을 받던
+        //  줄을 지웠다 — 2026-08-18. 코어가 안 읽거나(앞 다섯) 지운 값(뒤 둘)이라, 받아 봐야
+        //  「먹힌 것처럼 보이는데 아무 일도 안 일어나는」 상태만 만든다.)
         // 아래 범위는 설정 보드 슬라이더와 같다 — 두 입구가 같은 값만 받아야 한 쪽으로만
         // 이상한 값이 들어가는 구멍이 안 생긴다.
         if (has(kv, "gravity"))        app.cfg.gravity        = clampF(getFloat(kv, "gravity", app.cfg.gravity), 0.0f, 2.0f, app.cfg.gravity);
@@ -470,19 +472,12 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         // 커널 밖에서는 알 수 없어, 값을 추측해 넣었더니 문턱이 전혀 안 걸렸다
         // (2026-08-17: 0.3 에서 따뜻한 색 94.6%). 상한을 크게 열어 두고 실측으로 찾는다.
         if (has(kv, "nebulaIonMin"))   app.cfg.nebulaIonMin   = clampF(getFloat(kv, "nebulaIonMin", app.cfg.nebulaIonMin), 0.0f, 100000.0f, app.cfg.nebulaIonMin);
-        // 별 후광 — 밝은 별이 얼마나 넓게 보이나. 0 이면 옛 그림(전부 같은 크기)이라
-        // 켠 것과 끈 것을 견줄 수 있어야 한다.
-        if (has(kv, "starGlowK"))      app.cfg.starGlowK      = clampF(getFloat(kv, "starGlowK", app.cfg.starGlowK), 0.0f, 5.0f, app.cfg.starGlowK);
-        if (has(kv, "gamma"))          app.cfg.gamma          = clampF(getFloat(kv, "gamma", app.cfg.gamma), 1.0f, 2.5f, app.cfg.gamma);
-        if (has(kv, "temperature"))    app.cfg.temperatureEnabled = getInt(kv, "temperature", 1) != 0;
         if (has(kv, "cooling"))        app.cfg.coolingEnabled     = getInt(kv, "cooling", 0) != 0;
         if (has(kv, "coolingRate"))    app.cfg.coolingRate        = clampF(getFloat(kv, "coolingRate", app.cfg.coolingRate), 0.0f, 1.0f, app.cfg.coolingRate);
         if (has(kv, "starFormation"))  app.cfg.starFormationEnabled = getInt(kv, "starFormation", 0) != 0;
         // (`starDensity`·`starTemp` 를 받던 두 줄을 지웠다 — 코어가 안 읽는 값이라
         //  받아 봐야 「먹힌 것처럼 보이는데 아무 일도 안 일어나는」 상태만 만든다.
         //  별 형성 문턱은 Jeans 조건 하나뿐이고 그 상수는 `starJeansK` 다.)
-        if (has(kv, "expansion"))      app.cfg.expansionEnabled   = getInt(kv, "expansion", 0) != 0;
-        if (has(kv, "hubble"))         app.cfg.hubble             = clampF(getFloat(kv, "hubble", app.cfg.hubble), 0.0f, 1.0f, app.cfg.hubble);
         if (has(kv, "brightness"))     app.view.brightness    = clampF(getFloat(kv, "brightness", app.view.brightness), 0.05f, 8.0f, app.view.brightness);
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
@@ -500,9 +495,6 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "contact"))        app.cfg.contactEnabled = getInt(kv, "contact", 0) != 0;
         if (has(kv, "drawer"))         app.drawerOpen         = getInt(kv, "drawer", 0) != 0;
         if (has(kv, "horizon"))        app.showHorizon        = getInt(kv, "horizon", 0) != 0;
-        if (has(kv, "dispersion"))
-            app.cfg.orbitDispersion = clampF(getFloat(kv, "dispersion", app.cfg.orbitDispersion),
-                                             0.0f, 1.0f, app.cfg.orbitDispersion);
         if (has(kv, "contactStiffness"))
             app.cfg.contactStiffness = clampF(getFloat(kv, "contactStiffness", app.cfg.contactStiffness),
                                               1.0e3f, 1.0e8f, app.cfg.contactStiffness);

@@ -347,11 +347,12 @@ void App::tick() {
             // 이 값은 격자 칸 수만큼만 도는 커널이라 알갱이가 몇이든 비용이 같다.
             // 5초에 한 번이면 부담이 없고, 튀는 순간에는 그 줄이 디스크까지 간다.
             const int peak = sim.peakCellCount();
-            put("%s: 스텝 %.1f ms (뿌리기 %.1f 푸아송 %.1f 거두기 %.1f 정렬 %.1f), "
+            // 구간 이름의 뜻: 중력=scatterMs, 냉각·별=poissonMs, 적분=gatherMs (`SimTimings` 참조).
+            put("%s: 스텝 %.1f ms (중력 %.1f 냉각·별 %.1f 적분 %.1f), "
                 "프레임 %.1f ms, 알갱이 %d/%d, dt %.6g, 최고속도 %.3g, "
                 "한칸최대 %d, 별 %d, "
                 "블랙홀 %s 질량 %.0f 지평선 %.5f, 여유 VRAM %.0f MB",
-                how, t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs, t.sortMs,
+                how, t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs,
                 frameMs, sim.activeCount(), cfg.particleCount,
                 t.dtUsed, t.maxSpeed,
                 peak, sim.starCount(),
@@ -552,8 +553,6 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
         cfg.gravity = 0.15f;
         cfg.boundary = Boundary::Isolated;
         cfg.pressureEnabled = false;
-        cfg.expansionEnabled = false;
-        cfg.temperatureEnabled = true;   // 안쪽으로 갈수록 빨라지는 것을 온도로도 볼 수 있게
         return;
     }
     // 알갱이끼리 부딪히게 할지는 장면이 정하지 않는다 — 어느 장면에서든 체크박스로 켠다.
@@ -598,8 +597,8 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     // 즉 「끈 쪽이 선명하다」는 것은 미구현 플래그를 끈 것이고, 실제로 압력 노릇을 하던 것은
     // `orbitDispersion` 이라는 손으로 정한 숫자였다.
     //
-    // 이제 속도 분산 텐서가 실제로 돌고 `orbitDispersion` 은 0 이다. **둘은 한 몸이라
-    // 같이 바뀌어야 한다** — 압력을 끈 채 난수만 빼면 원반을 붙잡는 것이 아무것도 없다.
+    // 이제 속도 분산 텐서가 실제로 돌고 `orbitDispersion` 은 지웠다(2026-08-18). **둘은 한
+    // 몸이라 같이 바뀌어야 한다** — 압력을 끈 채 난수만 빼면 원반을 붙잡는 것이 아무것도 없다.
     cfg.pressureEnabled = true;
 
     // 별 형성 — **켠다(2026-08-16).**
@@ -641,8 +640,4 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     // 방법이 없다. 우주 구조 형성 장면도 같이 켠다 — 거기서도 별이 생기고, 실측에서
     // 강착원반이 필라멘트 사이에 보였다(round-46).
     cfg.starCollapseToBH = true;
-
-    // 팽창 — 주기 경계에서만 물리적 의미가 있고, 켠 상태와 끈 상태를 비교하는 것이 목적이라
-    //        프리셋 전환 시에는 항상 꺼 두고 사용자가 직접 켜게 한다.
-    cfg.expansionEnabled = false;
 }

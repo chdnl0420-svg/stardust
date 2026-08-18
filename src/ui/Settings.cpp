@@ -412,34 +412,10 @@ void TabBounds(App& app) {
 }
 
 void TabLook(App& app) {
-    // 색은 밀도 하나로 굳혔다.
-    //
-    // 온도는 상태방정식과 충격 가열이 있어야 뜻이 있는데 그 계산을 하지 않았고, 속도는
-    // 점으로 그릴 때만 값이 있었다. 둘 다 「고를 수는 있지만 무엇을 보는지 알 수 없는」
-    // 항목이었다 — 고를 것이 하나뿐이면 고르는 자리도 필요 없다.
-    static const ImU32 astro[5] = {
-        IM_COL32(0, 0, 0, 255), IM_COL32(23, 22, 73, 255), IM_COL32(88, 56, 150, 255),
-        IM_COL32(219, 136, 74, 255), IM_COL32(255, 255, 240, 255)
-    };
-    GroupLabel("색");
-    {
-        // 지금 쓰는 색 배열을 띠로만 보여 준다. 고르는 것이 아니라 알려 주는 자리다.
-        const float w = ImGui::GetContentRegionAvail().x;
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const ImVec2 a(p.x, p.y + 6.0f), b(a.x + 150.0f, p.y + 26.0f);
-        const float step = (b.x - a.x) * 0.25f;
-        for (int i = 0; i < 4; ++i)
-            dl->AddRectFilledMultiColor(ImVec2(a.x + step * i, a.y), ImVec2(a.x + step * (i + 1), b.y),
-                                        astro[i], astro[i + 1], astro[i + 1], astro[i]);
-        dl->AddRect(a, b, IM_COL32(255, 255, 255, 41), 3.0f);
-        const char* lab = "성기면 짙은 남색, 빽빽하면 흰빛";
-        const ImVec2 tsz = ImGui::CalcTextSize(lab);
-        dl->AddText(ImVec2(b.x + 16.0f, (a.y + b.y) * 0.5f - tsz.y * 0.5f), kInkGhost, lab);
-        ImGui::Dummy(ImVec2(w, 34.0f));
-    }
-
-    Line();
+    // 색을 고르는 자리는 없다. 색은 별이 실제로 내는 빛(흑체색·밝기 = M^3.5)이 정하고,
+    // 그것은 설정이 아니라 물리다. (2026-08-18 까지 여기 「성기면 짙은 남색, 빽빽하면 흰빛」
+    // 밀도 컬러맵 띠가 있었는데, 기본 보기가 별빛으로 바뀐 08-17 뒤로는 화면과 다른 색을
+    // 알려 주는 자리였다 — 지웠다.)
     SliderLine("psize", "알갱이 크기", &app.ui.pointSizePx, 0.5f, 6.0f, "%.1f px");
     UnderNote("확대할수록 이 크기에서 더 커지고 또렷해진다.");
 
@@ -534,20 +510,23 @@ void TabInput(App& app) {
 
     Line();
     GroupLabel("단축키");
+    // 실제로 처리하는 키만 적는다(main.cpp 의 키 처리와 1:1). 2026-08-18 까지 여기 적혀
+    // 있던 `Q W E R T`·`[ ]`·`P`·`Ctrl R` 은 구현이 없었다 — 표만 있고 눌러도 아무 일도
+    // 안 일어나는 칸이라 지웠다.
     const float colW = ImGui::GetContentRegionAvail().x * 0.5f - 6.0f;
     struct KeyRow { const char* k; const char* w; };
-    static const KeyRow rows[6][2] = {
-        {{"Space", "멈춤 / 재개"},     {"Tab", "장면 서랍"}},
-        {{"1-5",   "장면 바로 고르기"}, {"Q W E R T", "도구 다섯"}},
-        {{"[ ]",   "빠르기 내리기 / 올리기"}, {"P", "한 장 저장"}},
-        {{"Ctrl R","녹화 시작 / 멈춤"}, {"H", "막대까지 숨기기"}},
-        {{"Esc",   "설정 닫기"},        {"S", "설정 열기"}},
-        {{"", ""}, {"", ""}},
+    static const KeyRow rows[4][2] = {
+        {{"Space", "멈춤 / 재개"},       {"Tab", "장면 서랍"}},
+        {{"1-5",   "장면 바로 고르기"},   {"H",   "막대까지 숨기기"}},
+        {{"S",     "설정 열기 / 닫기"},   {"M",   "재기 창"}},
+        {{"Esc",   "열린 것 닫기"},       {"",    ""}},
     };
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 4; ++i) {
         KeyCell(rows[i][0].k, rows[i][0].w, colW);
-        ImGui::SameLine();
-        KeyCell(rows[i][1].k, rows[i][1].w, colW);
+        if (rows[i][1].k[0]) {
+            ImGui::SameLine();
+            KeyCell(rows[i][1].k, rows[i][1].w, colW);
+        }
     }
 }
 

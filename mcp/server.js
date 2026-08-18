@@ -220,12 +220,15 @@ const tools = {
   },
 
   async nbody_set(args) {
-    const allowed = ['particleCount', 'gridSize', 'boundary', 'law', 'gravity',
+    // 앱(ControlBridge.cpp 의 `set`)이 실제로 받는 키만 통과시킨다.
+    // 2026-08-18 에 지운 것: law·gamma·temperature·starDensity·starTemp·expansion·hubble —
+    // 코어가 안 읽거나 코어에서 지운 값이라 앱도 더 이상 받지 않는다.
+    const allowed = ['particleCount', 'gridSize', 'boundary', 'gravity',
                      'softeningCells', 'timeScale', 'sortInterval', 'pressure',
-                     'pressureK', 'gamma', 'temperature', 'brightness',
+                     'pressureK', 'brightness',
                      'displayGamma', 'hud', 'colormap', 'zoom', 'panX', 'panY',
-                     'cooling', 'coolingRate', 'starFormation', 'starDensity', 'starTemp',
-                     'expansion', 'hubble', 'renderMode', 'colorBy'];
+                     'cooling', 'coolingRate', 'starFormation',
+                     'renderMode', 'colorBy'];
     const kv = { cmd: 'set' };
     for (const k of allowed) if (args[k] !== undefined) kv[k] = args[k];
     if (Object.keys(kv).length === 1) throw new Error('바꿀 값이 하나도 없습니다');
@@ -303,37 +306,34 @@ const TOOL_SCHEMA = [
   { name: 'nbody_launch', description: '시뮬레이터를 실행하고 준비될 때까지 기다린다. 이미 떠 있으면 그대로 쓴다.',
     inputSchema: { type: 'object', properties: {
       particleCount: { type: 'integer', description: '파티클 수' },
-      gridSize: { type: 'integer', enum: [1024, 2048, 4096] },
-      preset: { type: 'string', enum: ['spiral', 'tidal', 'shock', 'web', 'empty'] },
+      // 3D 격자 한 변. 앱은 이 넷만 받고 나머지는 조용히 무시한다(ControlBridge.cpp).
+      gridSize: { type: 'integer', enum: [32, 64, 128, 256] },
+      preset: { type: 'string', enum: ['spiral', 'tidal', 'web', 'blackhole', 'empty'] },
     } } },
   { name: 'nbody_status', description: 'FPS·프레임 시간·파티클 수·격자·최대밀도·점유셀·총질량 등 현재 상태를 읽는다.',
     inputSchema: { type: 'object', properties: {} } },
   { name: 'nbody_set', description: '설정 값을 바꾸고 바뀐 상태를 돌려준다.',
     inputSchema: { type: 'object', properties: {
-      particleCount: { type: 'integer' }, gridSize: { type: 'integer', enum: [1024, 2048, 4096] },
+      particleCount: { type: 'integer' }, gridSize: { type: 'integer', enum: [32, 64, 128, 256] },
       boundary: { type: 'string', enum: ['isolated', 'periodic'] },
-      law: { type: 'string', enum: ['inverse_square', 'inverse_r'] },
       gravity: { type: 'number' }, softeningCells: { type: 'number' },
       timeScale: { type: 'number' }, sortInterval: { type: 'integer' },
       pressure: { type: 'integer', enum: [0, 1] }, pressureK: { type: 'number' },
-      gamma: { type: 'number' }, temperature: { type: 'integer', enum: [0, 1] },
       brightness: { type: 'number' }, displayGamma: { type: 'number' },
       hud: { type: 'integer', enum: [0, 1] },
-      colormap: { type: 'string', enum: ['astro', 'gray', 'thermal'] },
+      colormap: { type: 'string', enum: ['astro', 'gray', 'thermal', 'blackbody'] },
       zoom: { type: 'number' }, panX: { type: 'number' }, panY: { type: 'number' },
       cooling: { type: 'integer', enum: [0, 1] }, coolingRate: { type: 'number' },
       starFormation: { type: 'integer', enum: [0, 1] },
-      starDensity: { type: 'number' }, starTemp: { type: 'number' },
-      expansion: { type: 'integer', enum: [0, 1] }, hubble: { type: 'number' },
       renderMode: { type: 'string', enum: ['field', 'points'] },
-      colorBy: { type: 'string', enum: ['density', 'temperature', 'speed'] },
+      colorBy: { type: 'string', enum: ['density', 'dispersion', 'speed', 'light', 'ash'] },
     } } },
   { name: 'nbody_record', description: '앱의 녹화(PNG 시퀀스)를 켜고 끈다. captures/ 폴더에 쌓인다.',
     inputSchema: { type: 'object', properties: {
       on: { type: 'boolean' }, every: { type: 'integer', minimum: 1 } } } },
   { name: 'nbody_preset', description: '초기조건 프리셋을 바꾸고 리셋한다. 경계 조건도 시나리오에 맞게 함께 바뀐다.',
     inputSchema: { type: 'object', required: ['preset'], properties: {
-      preset: { type: 'string', enum: ['spiral', 'tidal', 'shock', 'web', 'empty'] },
+      preset: { type: 'string', enum: ['spiral', 'tidal', 'web', 'blackhole', 'empty'] },
     } } },
   { name: 'nbody_run', description: '시뮬레이션을 재생하거나 일시정지한다.',
     inputSchema: { type: 'object', required: ['running'], properties: {
@@ -351,7 +351,8 @@ const TOOL_SCHEMA = [
       x: { type: 'number', description: '시뮬 좌표 0~1' },
       y: { type: 'number', description: '시뮬 좌표 0~1' },
       radius: { type: 'number' }, strength: { type: 'number' },
-      shape: { type: 'string', enum: ['disk', 'blob', 'ring'], description: 'tool=shape 일 때' },
+      shape: { type: 'string', enum: ['galaxy', 'sun', 'ring', 'cloud', 'blackhole', 'saturn'],
+               description: 'tool=shape 일 때. 앱의 놓기 서랍과 같은 여섯 가지(ControlBridge.cpp)' },
       count: { type: 'integer', description: 'tool=shape 일 때 넣을 파티클 수' },
       autoOrbit: { type: 'boolean' },
     } } },

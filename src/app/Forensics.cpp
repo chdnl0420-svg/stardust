@@ -108,10 +108,8 @@ void begin(const char* version) {
             fclose(m);
         }
     }
-
-    // 오래된 로그는 스무 개만 남긴다. 사고가 잦을수록 파일이 빨리 쌓이는데,
-    // 정작 필요한 것은 최근 것이라 무한정 둘 이유가 없다.
-    // (지우는 것은 이름 순서로만 판단한다 — 파일명이 시각이라 사전순이 곧 시간순이다.)
+    // (「오래된 로그는 스무 개만 남긴다」는 주석이 있었으나 구현이 없었다 — 로그는
+    //  실행마다 하나씩 그대로 쌓인다. 주석만 지웠다, 2026-08-18.)
 }
 
 void line(const char* fmt, ...) {
@@ -138,7 +136,6 @@ void endOk() {
 }
 
 bool lastSessionCrashed() { return g_lastCrashed; }
-const char* logPath() { return g_path; }
 const char* logDir()  { return g_dir; }
 
 } // namespace fx

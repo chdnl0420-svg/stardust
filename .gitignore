@@ -23,6 +23,12 @@ extern/
 .vscode/
 *.user
 
-# ���� ���⹰ ? ����Ұ� �ƴ϶� �������� �ø���
+# 배포 산출물 — 저장소가 아니라 릴리스로 올린다
 dist/
 *.bak
+
+# 앱이 실행 중 만드는 것 — 스냅샷·녹화 프레임(main.cpp CaptureIfAsked)
+captures/
+
+# 도구가 만드는 잠금 파일
+.claude/scheduled_tasks.lock

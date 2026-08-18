@@ -53,9 +53,7 @@ private:
     void*    devStat_ = nullptr;            // float 합 + int 개수
     float    liveMean_ = 0.0f;
     int      statTick_ = 0;                 // 몇 프레임에 한 번만 잰다(아래 참조)
-    // 그린 프레임 수. **펄서가 깜빡이려면 시간이 필요한데 쓸 수 있는 시계가 없다** —
-    // `App::frameCounter` 는 녹화 중에만 돌고, 시뮬 시간은 배속에 따라 늘었다 줄었다 한다.
-    // 펄서는 「보이는 시간으로 늘려 보여 주는」 것이라 벽시계 쪽이 맞다.
-    unsigned drawTick_ = 0;
+    // (`drawTick_` 를 지웠다 — 2026-08-18. 펄서 깜빡임이 쓰던 시계였는데 펄서를 08-17 에
+    //  뺀 뒤 증가만 하고 읽는 곳이 없었다.)
     void ensureSize(int w, int h);
 };

@@ -313,8 +313,6 @@ void DrawScenePreview(ImDrawList* dl, const ImVec2& c, float w, float h, int sce
     }
 }
 
-void DrawScenePreview(ImDrawList* dl, const ImVec2& c, float w, float h, int scene);
-
 void SwitchScene(App& app, Preset p) {
     ApplyPresetDefaults(app.cfg, p);
     ApplyAutoGrid(app.cfg);
