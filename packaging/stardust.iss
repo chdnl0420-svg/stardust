@@ -9,7 +9,11 @@
 ; 사용자 폴더에 깐다.
 
 #define AppName    "Stardust"
-#define AppVersion "0.6.1"
+; **`src/app/Version.h` 의 STARDUST_VERSION 과 반드시 같아야 한다.**
+; 어긋나면 설치 프로그램이 말하는 버전과 앱이 자기라고 말하는 버전이 달라지고,
+; 자동 업데이트가 그 둘 중 어느 것을 기준으로 삼는지 알 수 없게 된다.
+; (0.6.1 로 0.6.2 짜리 앱을 담고 있었다 — 2026-08-18 에 맞췄다.)
+#define AppVersion "0.6.3"
 #define AppExe     "Stardust.exe"
 #define AppPublisher "JustKim"
 
