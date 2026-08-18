@@ -693,13 +693,33 @@ __global__ void kOrbitAroundBH(float4* pos, float4* vel, int n,
 }
 
 // 각 블랙홀이 놓인 자리의 격자 가속도 — 둘레 물질이 블랙홀을 끄는 힘이다.
+// **`w` 에는 그 자리의 밀도를 담는다** — 동역학적 마찰이 쓴다(아래 advanceBlackHoles).
 // 블랙홀 수만큼만 도는 아주 작은 커널이라 블록 하나로 충분하다.
-__global__ void kSampleAccAtBH(const float4* accG, int G, int periodic,
+__global__ void kSampleAccAtBH(const float4* accG, const float* rho, int G, int S, int periodic,
                                BHPack bh, float4* out) {
     const int i = threadIdx.x;
     if (i >= bh.n) return;
     const float4 bp = bh.p[i];
-    out[i] = sampleAcc(accG, make_float4(bp.x, bp.y, bp.z, 0.f), G, periodic);
+    float4 a = sampleAcc(accG, make_float4(bp.x, bp.y, bp.z, 0.f), G, periodic);
+
+    // 그 자리의 밀도를 CIC 8칸으로 읽는다. 가속도와 같은 보간이라 둘이 같은 자리를 가리킨다.
+    // 밀도 격자는 고립 경계에서 2배로 패딩돼 있으므로 `S`(stride)로 인덱싱한다.
+    float d = 0.f;
+    if (rho) {
+        const float gx = bp.x * G - 0.5f, gy = bp.y * G - 0.5f, gz = bp.z * G - 0.5f;
+        const int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
+        const float fx = gx - ix, fy = gy - iy, fz = gz - iz;
+        for (int k = 0; k < 8; ++k) {
+            const int ox = k & 1, oy = (k >> 1) & 1, oz = (k >> 2) & 1;
+            const float w = (ox ? fx : 1.f - fx) * (oy ? fy : 1.f - fy) * (oz ? fz : 1.f - fz);
+            int cx = ix + ox, cy = iy + oy, cz = iz + oz;
+            if (periodic) { cx &= (G - 1); cy &= (G - 1); cz &= (G - 1); }
+            else { cx = min(max(cx, 0), G - 1); cy = min(max(cy, 0), G - 1); cz = min(max(cz, 0), G - 1); }
+            d += rho[((size_t)cz * S + cy) * S + cx] * w;
+        }
+    }
+    a.w = d;
+    out[i] = a;
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,6 +1408,54 @@ __global__ void kIonize(const float4* pos, const float4* vel, int n, int G, int 
     const float cnt = cellCnt ? cellCnt[c] : 0.f;
     if (cnt < 1.f) return;
     const float add = sigma2 * cnt * fminf(ratio / 8.0f, 20.0f);   // 곱의 최댓값을 여기서 자른다
+    atomicAdd(&dispX[c], add);
+    atomicAdd(&dispY[c], add);
+    atomicAdd(&dispZ[c], add);
+}
+
+// 초신성이 **주변 물질을 실제로 밀어낸다.**
+//
+// **여태 폭발은 자기 자신만 튕겼다**(`kStarAge` 의 킥). 이웃에게는 아무 힘도 가지 않아,
+// 사용자가 「주변에 폭발이 일어나서 다른 별들이 밀려나는 게 보여야되는데 그런게 없어」
+// 라고 알린 그대로였다.
+//
+// **연출로 밀지 않는다.** 「반경 R 안의 알갱이를 바깥으로 민다」 같은 규칙을 적으면 그것은
+// 손으로 그린 폭발이다. 대신 **폭발 에너지를 그 자리의 열로 넣는다** — 실제 초신성이 하는
+// 일이 그것이고(10⁵¹ erg 가 주변 성간물질을 데운다), 그 다음은 이미 있는 압력이 한다.
+//
+// 뜨거워진 칸은 둘레보다 압력이 높아지고, `kPressure` 가 그 기울기 `−∇(ρσ²)/ρ` 로 물질을
+// 바깥으로 민다. **세도프-테일러 팽창이 저절로 나온다** — 팽창 반경 `R ∝ (E t²/ρ)^(1/5)`
+// 도, 짙은 쪽으로 덜 퍼지고 성긴 쪽으로 더 퍼지는 비대칭도 규칙을 안 적어도 생긴다.
+// `kIonize` 가 같은 통로로 별 형성을 막는 것과 똑같은 수법이다.
+//
+// **주입은 앞쪽에 몰아 준다.** 실제 폭발은 순간이고 그 뒤는 팽창이다. 진행도에 따라
+// 급히 줄여, 터진 직후 한 번 세게 밀고 나면 잔해가 관성으로 퍼지게 둔다.
+//
+// **비용**: N 스레드 × O(1), 그나마 폭발 중인 것만 3 atomicAdd. 반경 루프가 없어 한
+// 스레드가 하는 일에 상한이 있다(CLAUDE.md 2번).
+__global__ void kSupernovaHeat(const float4* pos, int n, int G, int periodic,
+                               float* dispX, float* dispY, float* dispZ, const float* cellCnt,
+                               float explodeSim, float sigma2) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f || p.w >= 0.f) return;          // 폭발 중인 것만
+
+    // 진행도 0(막 터짐) ~ 1(끝). 앞 구간에 에너지를 몰아 준다.
+    const float prog = __saturatef(1.f - (-p.w) / fmaxf(explodeSim, 1e-6f));
+    const float w    = (1.f - prog) * (1.f - prog);   // 터진 직후가 가장 세다
+    if (w <= 1e-4f) return;
+
+    const int cx = min(max((int)(p.x * G), 0), G - 1);
+    const int cy = min(max((int)(p.y * G), 0), G - 1);
+    const int cz = min(max((int)(p.z * G), 0), G - 1);
+    const int c  = gidx3(cx, cy, cz, G, G, periodic);
+
+    // `kPressure` 는 `dispX / dispCnt` 로 **평균**을 읽으므로, 평균에 얼마를 더하려면
+    // 그 칸의 개수를 곱해 넣어야 한다(`kIonize` 와 같은 규칙).
+    const float cnt = cellCnt ? cellCnt[c] : 0.f;
+    if (cnt < 1.f) return;
+    const float add = sigma2 * cnt * w;
     atomicAdd(&dispX[c], add);
     atomicAdd(&dispY[c], add);
     atomicAdd(&dispZ[c], add);
@@ -2107,7 +2175,7 @@ __device__ __forceinline__ float starTempK(float pw, float vw, float sunMass) {
 
 __global__ void kScatterLight(const float4* pos, const float4* vel, int n, int G,
                               float* out, float* outT, ViewRot rot,
-                              float sunMass, float novaBoost) {
+                              float sunMass, float novaBoost, float explodeSim) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -2118,8 +2186,25 @@ __global__ void kScatterLight(const float4* pos, const float4* vel, int n, int G
         // 별. L = (M/M_sun)^3.5
         lum = __powf(fmaxf(p.w / sunMass, 1e-3f), 3.5f);
     } else if (p.w < 0.f) {
-        // 폭발 중. 실제 초신성은 은하 전체보다 밝고 몇 주 동안 그렇다.
-        lum = novaBoost;
+        // ── 초신성 광도 곡선 ────────────────────────────────────────────────
+        //
+        // **여태 상수 하나였다.** 그래서 터지는 순간부터 꺼질 때까지 밝기가 똑같았고,
+        // 사용자가 「순간적으로 훨씬 밝아져야되는데 그런게 없어」라고 알린 것이 이것이다.
+        // 터졌다는 것을 알 수 있는 신호가 화면에 없었다.
+        //
+        // 실제 II형 초신성의 광도 곡선은 **며칠 만에 최대까지 치솟고, 그 뒤 몇 달에 걸쳐
+        // 지수적으로 잦아든다.** 오르는 것이 내리는 것보다 훨씬 빠른 비대칭이 특징이고,
+        // 내려가는 쪽이 지수인 것은 그 빛의 출처가 방사성 붕괴(⁵⁶Ni → ⁵⁶Co → ⁵⁶Fe)이기
+        // 때문이다. ⁵⁶Co 의 반감기가 77일이라 그 시간 눈금으로 어두워진다.
+        //
+        // `p.w` 는 남은 폭발 시간(음수)이라 진행도를 그대로 낼 수 있다.
+        const float prog = __saturatef(1.f - (-p.w) / fmaxf(explodeSim, 1e-6f));  // 0=터짐 1=끝
+        // 상승 — 앞 8% 구간에서 최대까지. 실제 비율(며칠 : 몇 달)에 맞춘 값이다.
+        const float kRise = 0.08f;
+        // 감쇠 — ⁵⁶Co 지수. 폭발 길이 동안 e^-4 (약 1.8%)까지 내려간다.
+        const float rise  = fminf(prog / kRise, 1.f);
+        const float decay = __expf(-4.f * fmaxf(prog - kRise, 0.f) / (1.f - kRise));
+        lum = novaBoost * rise * decay;
     } else {
         return;                                  // 가스는 스스로 안 빛난다
     }
@@ -2720,6 +2805,54 @@ void Sim::Impl::advanceBlackHoles(float dt) {
             const float m  = -cfg.gravity * bhs[j].mass * inv / (r2 * r);
             ax += m * dx; ay += m * dy; az += m * dz;
         }
+
+        // ── 동역학적 마찰 (찬드라세카르) ────────────────────────────────────
+        //
+        // **무거운 것일수록 느려야 하는데 반대였다** — 2026-08-18 사용자가 「제일 무거운
+        // 블랙홀이 제일 빠르게 움직이고있어」로 알렸다.
+        //
+        // 위 격자 가속도는 **단위질량당**이라 질량과 무관하다(등가원리). 그것은 맞다.
+        // 빠진 것은 **감속**이다. 여태 감속 기제가 「직접 삼킨 물질의 운동량 흡수」 하나뿐
+        // 이었는데, 그것은 지평선 안에 들어온 것만 세므로 실제 마찰의 아주 작은 몫이다.
+        //
+        // 실제로는 **삼키지 않고 스쳐 가는 물질**이 블랙홀 중력에 끌려 뒤쪽에 밀집대를
+        // 만들고, 그 밀집대가 블랙홀을 뒤로 잡아당긴다. 찬드라세카르가 푼 그 힘은
+        //
+        //     a_df = −4π ln(Λ) G² M ρ / v³ · v⃗
+        //
+        // 이고 **블랙홀 질량 M 에 비례한다.** 그래서 무거울수록 빨리 느려져 은하 중심에
+        // 가라앉고, 실제 초대질량 블랙홀이 중심에 거의 붙박여 있는 이유가 이것이다.
+        // 가벼운 것은 마찰이 약해 오래 떠돈다 — 사용자가 본 순서가 뒤집힌다.
+        //
+        // **연출이 아니다.** 새 힘을 지어내는 것이 아니라 빠져 있던 항을 넣는 것이고,
+        // 값도 그 자리의 실제 밀도(`kSampleAccAtBH` 가 격자에서 읽어 온 것)와 실제 질량·
+        // 속도로 낸다. 물질이 없는 곳(ρ=0)에서는 저절로 0 이다.
+        //
+        // 속도가 0 에 가까울 때 `1/v³` 이 발산하므로 무름 속도를 더한다. 실제 공식의
+        // `erf(X) − 2X e^(−X²)/√π` 항이 하는 일 — 주변 속도 분산보다 느린 것은 마찰이
+        // 급격히 줄어든다 — 을 같은 모양으로 대신한다.
+        if (cfg.bhFrictionK > 0.f && ga[i].w > 0.f && bhs[i].mass > 0.f) {
+            const float vx = bhs[i].vx, vy = bhs[i].vy, vz = bhs[i].vz;
+            const float v2 = vx * vx + vy * vy + vz * vz;
+            // 무름 속도 = 이 판의 회전 속도 눈금(실측 0.25)의 1/5. 이보다 느려지면
+            // 마찰이 빠르게 사라져 중심에서 떨리지 않고 멎는다.
+            const float vSoft = 0.05f;
+            const float vs = v2 + vSoft * vSoft;
+            // 실제 질량은 「삼킨 개수 ÷ 총 개수」다(총질량 1 눈금). 밀도 격자 값도
+            // 알갱이 수 단위라 같은 눈금으로 맞춘다.
+            const float M   = bhs[i].mass * inv;
+            const float rho = ga[i].w * inv;
+            // 4π·ln(Λ) 를 묶은 계수. ln(Λ)≈10 이 은하 눈금의 표준값이라 4π·10 ≈ 126 이다.
+            const float kDF = 126.0f * cfg.bhFrictionK;
+            float mag = kDF * cfg.gravity * cfg.gravity * M * rho / (vs * sqrtf(vs));
+            // **한 스텝에 속도를 뒤집지 않는다.** 마찰은 감속이지 반사가 아니다 —
+            // `mag·dt > 1` 이 되면 속도 부호가 뒤바뀌어 블랙홀이 튕겨 나간다.
+            // 밀도가 아주 높은 칸(은하 중심)에서 실제로 그 값이 나온다.
+            const float maxMag = 0.5f / fmaxf(dt, 1e-9f);
+            if (mag > maxMag) mag = maxMag;
+            ax -= mag * vx; ay -= mag * vy; az -= mag * vz;
+        }
+
         bhs[i].vx += ax * dt;
         bhs[i].vy += ay * dt;
         bhs[i].vz += az * dt;
@@ -3162,6 +3295,15 @@ void Sim::Impl::doCooling(float dt) {
                                                dispX, dispY, dispZ, dispCnt,
                                                fmaxf(cfg.starSunMass, 1.0f),
                                                cfg.starIonizeK * 1.85e-4f);
+        CK(cudaGetLastError());
+    }
+
+    // 초신성이 그 자리를 데운다 — 그 열을 압력이 받아 주변을 밀어낸다(위 커널 주석).
+    // 이온화와 같은 통로라 나란히 둔다. 압력이 꺼져 있으면 밀 수단이 없으므로 함께 건다.
+    if (wantPressure && cfg.starFormationEnabled && cfg.novaEnergyK > 0.f) {
+        kSupernovaHeat<<<(allocN + 255) / 256, 256>>>(
+            pos, allocN, G, periodic() ? 1 : 0, dispX, dispY, dispZ, dispCnt,
+            fmaxf(cfg.starExplodeSim, 1e-4f), cfg.novaEnergyK * 1.85e-4f);
         CK(cudaGetLastError());
     }
 
@@ -3654,8 +3796,8 @@ void Sim::step() {
     if (d.bhCount > 0) {
         // 블랙홀이 놓인 자리의 격자 가속도를 뽑아 둔다 — 둘레 물질이 블랙홀을 끄는 힘이다.
         // 블랙홀 수만큼만 도는 커널이라 값이 거의 안 든다.
-        kSampleAccAtBH<<<1, kMaxBlackHoles>>>(d.accG, d.allocG, d.periodic() ? 1 : 0,
-                                              bhPack, d.bhAcc);
+        kSampleAccAtBH<<<1, kMaxBlackHoles>>>(d.accG, d.rho, d.allocG, d.stride(),
+                                              d.periodic() ? 1 : 0, bhPack, d.bhAcc);
         CK(cudaGetLastError());
 
         // 삼킨 만큼 무거워지고 지평선이 자란다.
@@ -4423,7 +4565,8 @@ const float* Sim::fieldDevicePtr(Field field) {
         const float nova = 1.0e4f;
         kScatterLight<<<(d.allocN + 255) / 256, 256>>>(
             d.pos, d.vel, d.allocN, G, d.proj, d.projT, rot,
-            fmaxf(d.cfg.starSunMass, 1.0f), nova);
+            fmaxf(d.cfg.starSunMass, 1.0f), nova,
+            fmaxf(d.cfg.starExplodeSim, 1e-4f));
 
         // (성운 블록을 지웠다 — 2026-08-18. 별빛을 흐려 「퍼진 별빛」을 만들고 그것을
         //  가스에 곱해 별 둘레를 넓게 밝히던 자리다. 사용자 요청 — 「이런식으로 주위가

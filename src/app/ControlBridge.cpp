@@ -316,7 +316,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         sim.config().starWindRate,
         sim.config().ashDiffuseK, sim.config().blackHoleRs,
         sim.config().starBHRatio, sim.config().starExplodeSim,
-        sim.config().starSunLifeSim,
+        sim.config().starSunLifeSim, sim.config().novaEnergyK, sim.config().bhFrictionK,
         sim.dispCrossRatio(), sim.bornShellRatio());
     return buf;
 }
@@ -457,6 +457,8 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, 0.5f, app.cfg.starKickSpeed);
         if (has(kv, "starBHRatio"))    app.cfg.starBHRatio    = clampF(getFloat(kv, "starBHRatio", app.cfg.starBHRatio), 1.0f, 1.0e5f, app.cfg.starBHRatio);
         if (has(kv, "starCollapseToBH")) app.cfg.starCollapseToBH = getInt(kv, "starCollapseToBH", 0) != 0;
+        if (has(kv, "bhFrictionK"))   app.cfg.bhFrictionK    = clampF(getFloat(kv, "bhFrictionK", app.cfg.bhFrictionK), 0.0f, 100.0f, app.cfg.bhFrictionK);
+        if (has(kv, "novaEnergyK"))   app.cfg.novaEnergyK    = clampF(getFloat(kv, "novaEnergyK", app.cfg.novaEnergyK), 0.0f, 1000.0f, app.cfg.novaEnergyK);
         if (has(kv, "starIonizeK"))    app.cfg.starIonizeK    = clampF(getFloat(kv, "starIonizeK", app.cfg.starIonizeK), 0.0f, 100.0f, app.cfg.starIonizeK);
         if (has(kv, "darkMatterFraction")) app.cfg.darkMatterFraction = clampF(getFloat(kv, "darkMatterFraction", app.cfg.darkMatterFraction), 0.0f, 0.9f, app.cfg.darkMatterFraction);
         if (has(kv, "starWindRate"))   app.cfg.starWindRate   = clampF(getFloat(kv, "starWindRate", app.cfg.starWindRate), 0.0f, 10.0f, app.cfg.starWindRate);
