@@ -309,6 +309,9 @@ __device__ __forceinline__ float sampleGrid2D(const float* g, float u, float v, 
 // 128 바이트고, 별도 버퍼를 잡아 매 프레임 채우는 것보다 싸다.
 struct BHDisk {
     float4 p[8];      // xyz = 자리, w = 지평선 반지름
+    // **자란 정도(0~1)** — 갓 생긴 블랙홀은 삼킨 물질이 없어 원반이 없다. 커널에서는
+    // 질량을 알 길이 없으므로 호스트가 여기 채워 넘긴다.
+    float  grown[8] = {};
     int    n = 0;
 };
 
@@ -435,13 +438,24 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
                 // 이 단계는 수명의 마지막 10% 다(관측도 그 정도다). 저질량 별은 수명이
                 // 워낙 길어 여기 못 오고, 그래서 붉은 왜성은 여전히 안 보인다 —
                 // 실제 하늘도 그렇다.
+                // **부푸는 데는 시간이 걸린다 — 한 프레임에 1340배가 되면 안 된다.**
+                //
+                // 처음에는 수명 90% 를 넘는 순간 `L` 을 `ratio^3.5`(태양급 1.0)에서
+                // `1340·ratio` 로 **한 번에** 바꿨다. 그러면 별 하나가 그 선을 넘을 때마다
+                // 화면에 흰 덩어리가 **갑자기 나타난다** — 사용자가 「흰 덩어리가 갑자기
+                // 생겨나는데」로 알렸다. 오늘 Jeans 문턱·이온화 문턱·성운 경계에서 같은
+                // 실수를 세 번 했고, 이것이 네 번째다. **날카로운 전환을 두지 않는다.**
+                //
+                // 실제로 주계열을 마친 별이 부푸는 데는 수백만 년이 걸린다. 수명의
+                // 80~100% 구간에 걸쳐 밝기와 색이 함께 옮겨 가게 한다.
                 const float life = sunLife * __powf(ratio, -2.5f);
-                if (life > 0.f && vv.w > life * 0.9f) {
-                    TK = 3500.f;
-                    L  = 1340.f * ratio;
-                } else {
-                    TK = 5800.f * __fsqrt_rn(ratio);
-                }
+                const float Tms  = 5800.f * __fsqrt_rn(ratio);      // 주계열 표면 온도
+                const float agef = (life > 0.f) ? (vv.w / life) : 0.f;
+                const float u    = __saturatef((agef - 0.8f) * 5.f); // 0.8 → 0, 1.0 → 1
+                const float g    = u * u * (3.f - 2.f * u);          // 매끄럽게
+                // `L` 은 위에서 이미 `ratio^3.5`(주계열 광도)로 들어와 있다.
+                L  = L + (1340.f * ratio - L) * g;
+                TK = Tms + (3500.f - Tms) * g;
             }
         } else if (p.w < 0.f) {
             L = 1.0e4f; TK = 30000.f;                              // 폭발 중
@@ -595,7 +609,21 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel, const float* 
                 // 2만 7천분의 1 이라 실제로 안 보인다. 강착원반은 블랙홀 **아주 가까이**
                 // 에서만 밝고, 은하 눈금에서 그것은 몇 픽셀이다. 줌인하면 보인다
                 // (round-28 실측: 배율 1.78 에서 청록 0.62%).
-                const float Ld = 100.0f  * __powf(x, -3.0f);
+                // **갓 생긴 블랙홀에는 원반이 없다 — 삼킨 물질이 있어야 원반이 된다.**
+                //
+                // 96프레임을 한 장에 모아 시간 순서로 읽으니, 덩어리가 **한 프레임(1/30초)
+                // 만에 없던 자리에 완성**되고 시간이 갈수록 개수가 늘었다(`bhCount` 8 과
+                // 일치). 사용자가 「흰 덩어리가 갑자기 생겨나는데」로 알린 것이 이것이다.
+                // 별이 무너지는 순간 그 자리에 **이미 물질이 다 모인 원반**이 켜졌다.
+                //
+                // 실제로는 블랙홀이 생긴 뒤 둘레 물질이 각운동량을 잃으며 천천히 모여
+                // 원반을 이룬다. 갓 태어난 것은 삼킨 것이 없어 **보일 원반 자체가 없다.**
+                //
+                // 자란 정도는 호스트가 삼킨 개수로 채운다(아래 `bhDisk.grown`).
+                // 삼킨 수가 12만쯤 되면 원반이 온전해진다.
+                const float grown = bh.grown[k];
+                if (grown <= 1e-4f) continue;            // 아직 원반이 없다
+                const float Ld = 100.0f  * grown * __powf(x, -3.0f);
                 // 밝기로 가중해 온도를 섞는다 — 별 위에 원반이 얹히면 밝은 쪽이 색을 정한다.
                 TK = (L + Ld > 0.f) ? (TK * L + Td * Ld) / (L + Ld) : 0.f;
                 L += Ld;
@@ -1043,6 +1071,9 @@ void RenderField::draw(App& app, int viewW, int viewH) {
                 for (int k = 0; k < bhN && bhDisk.n < 8; ++k) {
                     const BlackHoleState s = app.sim.blackHoleAt(k);
                     if (!s.active) continue;
+                    // 삼킨 개수가 곧 질량이다. 12만을 온전한 원반으로 잡는다 —
+                    // 갓 생긴 것(삼킨 수 0)은 원반이 0 이라 화면에 안 나온다.
+                    bhDisk.grown[bhDisk.n] = fminf(fmaxf(s.mass / 120000.0f, 0.0f), 1.0f);
                     bhDisk.p[bhDisk.n++] = make_float4(s.x, s.y, s.z, s.rs);
                 }
             }
