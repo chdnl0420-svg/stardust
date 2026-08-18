@@ -154,7 +154,7 @@ void DrawHud(const App& app) {
         ImGui::TextUnformatted("중력이 버티는 힘을 이겨 블랙홀이 되었습니다");
         ImGui::PopStyleColor();
         const BlackHoleState b2 = app.sim.blackHole();
-        ImGui::TextDisabled("삼킨 알갱이 %.0f · 지평선 반지름 %.4f", b2.mass, b2.rs);
+        ImGui::TextDisabled("삼킨 알갱이 %.0f · 지평선 반지름 %.3e", b2.mass, b2.rs);
     }
 
     if (!app.running) {

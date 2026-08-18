@@ -208,7 +208,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "centroidX=%.5f\ncentroidY=%.5f\nmeanTemp=%.6f\n"
         // 블랙홀 — 삼키고 자라는지 밖에서 확인할 유일한 창이다. 화면의 점 하나로는
         // 지평선이 커졌는지 알 수 없다.
-        "bhActive=%d\nbhX=%.5f\nbhY=%.5f\nbhRs=%.6f\nbhMass=%.1f\nbhBorn=%d\nbhCount=%d\n"
+        "bhActive=%d\nbhX=%.5f\nbhY=%.5f\nbhRs=%.4e\nbhMass=%.1f\nbhBorn=%d\nbhCount=%d\n"
         // 워치독이 이번 설정에서 몇 ms 를 위험선으로 잡았는지. 이 값이 2000(드라이버 타임아웃)
         // 근처로 올라가면 방어가 사실상 없는 상태라, 밖에서 확인할 수 있어야 한다.
         // 재 사슬이 도는지 밖에서 볼 창. meanStarMass 가 시간에 따라 내려가면 도는 것이다.
@@ -253,7 +253,10 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 뜻하고, `app.cfg` 만 읽으면 코어에 안 갔어도 성공한 것처럼 보인다.
         "coreCoolRate=%.4f\ncoreFormEff=%.5f\ncoreSunMass=%.2f\ncoreKick=%.4f\n"
         "coreAshYield=%.3f\ncoreAshCool=%.3f\ncoreWind=%.4f\n"
-        "coreAshDiff=%.3f\ncoreBhRs=%.4f\ncoreBhRatio=%.1f\ncoreExplode=%.4f\n"
+        // (`coreBhRs` 를 지웠다 — 2026-08-18. `blackHoleRs` 설정을 없애면서 **인자만 지우고
+        //  이 포맷을 안 지워** 뒤 여섯 필드가 한 칸씩 밀려 있었다. 바로 위 주석이 경고한
+        //  그대로다. 지평선은 `bhRs` 로 따로 나간다.)
+        "coreAshDiff=%.3f\ncoreBhRatio=%.1f\ncoreExplode=%.4f\n"
         "coreSunLife=%.2f\n"
         // 분산 텐서의 교차항 ÷ 대각항. 격자를 셋에서 여섯으로 늘릴지 정하는 값이다.
         "dispCross=%.5f\n"
@@ -454,7 +457,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starSunMass"))    app.cfg.starSunMass    = clampF(getFloat(kv, "starSunMass", app.cfg.starSunMass), 1.0f, 1.0e6f, app.cfg.starSunMass);
         if (has(kv, "starSunLifeSim")) app.cfg.starSunLifeSim = clampF(getFloat(kv, "starSunLifeSim", app.cfg.starSunLifeSim), 0.001f, 1.0e6f, app.cfg.starSunLifeSim);
         if (has(kv, "starExplodeSim")) app.cfg.starExplodeSim = clampF(getFloat(kv, "starExplodeSim", app.cfg.starExplodeSim), 0.0001f, 10.0f, app.cfg.starExplodeSim);
-        if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, 0.5f, app.cfg.starKickSpeed);
+        if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, kLightSpeed * 0.2f, app.cfg.starKickSpeed);
         if (has(kv, "starBHRatio"))    app.cfg.starBHRatio    = clampF(getFloat(kv, "starBHRatio", app.cfg.starBHRatio), 1.0f, 1.0e5f, app.cfg.starBHRatio);
         if (has(kv, "starCollapseToBH")) app.cfg.starCollapseToBH = getInt(kv, "starCollapseToBH", 0) != 0;
         if (has(kv, "bhFrictionK"))   app.cfg.bhFrictionK    = clampF(getFloat(kv, "bhFrictionK", app.cfg.bhFrictionK), 0.0f, 100.0f, app.cfg.bhFrictionK);

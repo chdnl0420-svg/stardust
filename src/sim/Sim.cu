@@ -473,8 +473,10 @@ __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
         const float4 bp = bh.p[b];
         const float dx = p.x - bp.x, dy = p.y - bp.y, dz = p.z - bp.z;
         const float r2 = dx * dx + dy * dy + dz * dz;
-        const float r = sqrtf(fmaxf(r2, 1e-12f));
-        const float m = -bh.q[b].x / (r2 * r);
+        // 적분기와 **같은 소프트닝**을 쓴다. 다르면 처음 넣는 궤도 속도가 실제로 받는 힘과
+        // 어긋나 알갱이가 놓이자마자 안팎으로 흘러간다.
+        const float rs2 = r2 + bh.q[b].w;
+        const float m = -bh.q[b].x / (rs2 * sqrtf(rs2));
         a.x += m * dx; a.y += m * dy; a.z += m * dz;
     }
 
@@ -558,7 +560,22 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
         const float lz = dx * v.y - dy * v.x;
         const float L2 = lx * lx + ly * ly + lz * lz;
         const float corr = 1.0f + 3.0f * L2 / fmaxf(c2 * r2, 1e-12f);
-        const float m = -bh.q[b].x * corr / (r2 * r);
+        // **소프트닝 — 격자 중력과 같은 근거다(2026-08-18에 넣었다).**
+        //
+        // 여태 이 자리에 소프트닝이 없었는데, 삼킴 반경이 격자 한 칸이라 알갱이가 그
+        // 안쪽으로 못 들어가 **그것이 소프트닝 노릇을 대신하고 있었다.** 지평선을 실제
+        // 크기(`2GM/c²`, 격자 한 칸의 수천분의 1)로 되돌리자 그 가림막이 사라져 알갱이가
+        // 무한히 접근할 수 있게 됐고, `a = GM/r²` 이 발산해 **한 스텝에 광속을 넘겼다** —
+        // 사용자가 「엄청 빠르게 은하 밖으로 튕겨져 나가는 입자들이 있어」로 알린 것이다
+        // (실측: 블랙홀 전환만 끄면 최고 속도 100 → 1.16).
+        //
+        // 격자 한 칸보다 작은 거리는 이 시뮬이 원리적으로 구분하지 못한다. 그 아래에서
+        // 힘이 발산하지 않게 무르는 것은 격자법의 정당한 근사이고, 실제로 `softeningCells`
+        // 가 격자 중력에 이미 같은 일을 한다. 지평선(삼킴 판정)은 그대로 실제 값이다 —
+        // **무르는 것은 힘이지 지평선이 아니다.**
+        const float eps2 = bh.q[b].w;                 // 소프트닝 길이의 제곱
+        const float rs2  = r2 + eps2;
+        const float m = -bh.q[b].x * corr / (rs2 * sqrtf(rs2));
         a.x += m * dx; a.y += m * dy; a.z += m * dz;
     }
 
@@ -568,7 +585,7 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
     //
     // 물리적으로 당연한 말이지만, 실용적인 이유가 더 크다. 블랙홀을 놓는 순간 이미 궤도
     // 속도로 돌던 알갱이들은 그 중력에 맞지 않는 속도가 되어 안으로 떨어지며 폭주한다.
-    // 2026-08-14 실측: 광속의 21배(360)까지 올라갔고, 그러자 CFL 이 「한 스텝에 한 칸을
+    // 2026-08-14 실측: 광속의 21배까지 올라갔고(그때 광속은 17.3 이었다), 그러자 CFL 이 「한 스텝에 한 칸을
     // 넘으면 안 된다」며 dt 를 94분의 1로 깎아 **시간이 흐르지 않았다** — 6초 동안 시뮬레이션
     // 시간이 0.013 밖에 안 갔다. 화면은 멈춘 것처럼 보인다.
     //
@@ -841,7 +858,7 @@ __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int
             // ω = √k 이고, 감쇠가 그보다 한참 작으면 명시적 적분에서 **에너지가 매 스텝
             // (1 + (ω·dt)²) 배로 늘어난다.** 강한핵력 k = 9600 이면 ω = 98, dt = 0.0016 이라
             // 한 바퀴에 1.0246 배 — 1초(60스텝)에 4.3배, 5초면 1500배다. 실측에서 몇 초 만에
-            // 이 우주의 광속(17.3)에 닿은 것이 정확히 이 값이었고, 세기를 2.5분의 1로 낮춰도
+            // 이 우주의 광속(100)에 닿은 것이 정확히 이 값이었고, 세기를 2.5분의 1로 낮춰도
             // 여섯 경우 모두 닿은 것도 이것으로 설명된다 — 세기를 낮추면 늘어나는 속도만
             // 조금 느려질 뿐 방향은 그대로다.
             //
@@ -878,7 +895,7 @@ __global__ void kContact(const float4* pos, const float4* vel, int n, int G, int
 
     // **새 힘이 만든 가속도에 상한을 건다.**
     //
-    // 세기를 2.5분의 1로 낮춰도 여섯 경우 모두 알갱이가 이 우주의 광속(17.3)에 닿았다
+    // 세기를 2.5분의 1로 낮춰도 여섯 경우 모두 알갱이가 이 우주의 광속(100)에 닿았다
     // (2026-08-14 실측). 세기 문제가 아니다 — 두 알갱이가 충분히 가까워지면 어떤 세기로도
     // 힘이 커지고, 그 자리를 한 번 지난 알갱이는 계속 빨라진다. 상한이 있으면 그 경로가
     // 원천적으로 막힌다.
@@ -2693,7 +2710,12 @@ BHPack Sim::Impl::packBH() const {
         // 에딩턴 한계는 복사압이 물질을 **바깥으로** 밀어 유입을 늦추는 것이라, 바깥을
         // 향한 세계선이 없는 지평선 안에서는 성립할 수 없다. 실제로 제한이 걸리는 곳은
         // 원반이고, 그 자리에서는 이미 마찰(점성)이 각운동량을 뽑는 속도가 유입을 정한다.
-        pk.q[i] = make_float4(cfg.gravity * bhs[i].mass * inv, rs, 0.f, 0.f);
+        // 넷째 칸은 **중력 소프트닝 길이의 제곱**이다. 격자 중력과 같은 눈금을 쓴다 —
+        // `softeningCells` 칸만큼. 격자보다 작은 구조는 어차피 표현하지 못하므로 그 아래에서
+        // 힘이 발산하지 않게 무른다(자세한 근거는 `kIntegrate` 의 소프트닝 주석).
+        const float cell = 1.0f / (float)(allocG > 0 ? allocG : 1);
+        const float eps  = fmaxf(cfg.softeningCells, 0.5f) * cell;
+        pk.q[i] = make_float4(cfg.gravity * bhs[i].mass * inv, rs, 0.f, eps * eps);
     }
     pk.n = (bhCount < kMaxBlackHoles) ? bhCount : kMaxBlackHoles;
     return pk;
@@ -2765,9 +2787,16 @@ void Sim::Impl::advanceBlackHoles(float dt) {
             const float dx = bhs[i].x - bhs[j].x;
             const float dy = bhs[i].y - bhs[j].y;
             const float dz = bhs[i].z - bhs[j].z;
-            // 지평선 크기를 무름 길이로 쓴다. 없으면 가까워지는 순간 힘이 발산해 서로를
-            // 튕겨 내고, 합쳐지기는커녕 판 밖으로 날아간다.
-            const float soft = fmaxf(bhs[i].rs + bhs[j].rs, 1e-4f);
+            // 무름 길이. 없으면 가까워지는 순간 힘이 발산해 서로를 튕겨 내고, 합쳐지기는
+            // 커녕 판 밖으로 날아간다.
+            //
+            // **격자 한 칸을 바닥으로 쓴다(2026-08-18).** 전에는 `max(rs 합, 1e-4)` 였는데,
+            // 지평선이 실제 크기가 되면서 rs 합이 1.2e-6 이라 임의 상수 1e-4 가 늘 이겼다.
+            // 그 값에서 최대 가속도가 4.6e5 라 **두 블랙홀이 만나면 광속의 7배로 튕겨
+            // 나갔다**(블랙홀은 광속 절단을 안 받는다). 격자 한 칸보다 가까운 것은 이 판이
+            // 원리적으로 구분하지 못하므로, 알갱이 쪽 소프트닝과 같은 눈금을 쓰는 것이 맞다.
+            const float cell = 1.0f / (float)(allocG > 0 ? allocG : 1);
+            const float soft = fmaxf(bhs[i].rs + bhs[j].rs, cell);
             const float r2 = dx * dx + dy * dy + dz * dz + soft * soft;
             const float r  = sqrtf(r2);
             const float m  = -cfg.gravity * bhs[j].mass * inv / (r2 * r);
@@ -2854,7 +2883,17 @@ void Sim::Impl::advanceBlackHoles(float dt) {
             const float dy = bhs[i].y - bhs[j].y;
             const float dz = bhs[i].z - bhs[j].z;
             const float d  = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (d > bhs[i].rs + bhs[j].rs) continue;
+            // **격자 한 칸 안에 들면 합친다(2026-08-18).**
+            //
+            // 실제 병합은 두 지평선이 닿을 때 일어난다. 그런데 지금 지평선 합은 1.2e-6 이고
+            // 한 스텝 이동은 2.15e-4 라 **180배를 건너뛴다** — 판정선을 지평선에 두면 두
+            // 블랙홀이 서로를 그냥 통과해 영원히 안 합쳐진다. 실제 우주에서 그 간격을 좁히는
+            // 것은 중력파 방출인데 이 판에는 그 항이 없다.
+            //
+            // 격자 한 칸보다 가까운 두 점질량은 이 판의 중력이 이미 하나로 취급한다(위
+            // 무름 길이와 같은 근거). 그 자리에서 합치는 것이 계산과 앞뒤가 맞는다.
+            const float cellM = 1.0f / (float)(allocG > 0 ? allocG : 1);
+            if (d > fmaxf(bhs[i].rs + bhs[j].rs, cellM)) continue;
 
             const float mi = bhs[i].mass, mj = bhs[j].mass;
             const float mt = fmaxf(mi + mj, 1e-6f);

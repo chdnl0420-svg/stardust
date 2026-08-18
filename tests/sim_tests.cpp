@@ -643,7 +643,8 @@ static void testBlackHoleGeodesic() {
         cfg.gravity = 0.15f;
         cfg.pressureEnabled = false;
         cfg.blackHoleEnabled = curvature;
-        cfg.blackHoleRs = 0.01f;
+        // (`blackHoleRs` 를 넣던 줄을 지웠다 — 2026-08-18. 지평선이 삼킨 질량에서만
+        //  나오게 되면서 그 설정이 없어졌다.)
         sim.init(cfg);
         massBefore = sim.measureTotalGridMass();
         for (int i = 0; i < 3000; ++i) sim.step();
@@ -664,11 +665,16 @@ static void testBlackHoleGeodesic() {
              flatBefore, flatAfter, flatLost * 100.0);
     // 보는 것은 「곡률을 켰을 때만 삼킨다」는 갈림이다.
     //
-    // 얼마나 삼키는지는 위쪽 판정선을 두지 않는다. 지평선이 질량에 비례해 커지므로
-    // (rs = 2GM/c²) 한번 삼키기 시작하면 스스로 자라고, 오래 돌리면 원반을 다 먹는 것이
-    // 이 식의 정상적인 귀결이다 — 그것까지 결함으로 세면 물리를 테스트가 막는 꼴이 된다.
-    // 곡률을 끄면 중심에 아무것도 없으므로 한 알도 사라지면 안 된다.
-    check(curvedLost > 0.003 && flatLost < 0.001,
+    // **판정선을 0.003 에서 0 초과로 내렸다(2026-08-18).** 광속을 눈금에서 유도하고
+    // (c = 100) 지평선을 실제 크기로 되돌리자 `rs = 2GM/c² = 6.0e-7` 이 되었다 —
+    // 격자 한 칸의 13,000분의 1 이라 삼키는 부피비가 4.5e-13 이다. 20만 개 중 0.3%(600개)를
+    // 삼키라는 옛 판정선은 **물리적으로 도달 불가능**해졌다.
+    //
+    // 그것이 결함이 아니라 물리다 — 각운동량이 있는 물질은 지평선에 안 떨어진다. 실제
+    // 강착은 원반의 점성이 각운동량을 뽑아내며 일어나는데 이 판에는 아직 그 점성이 없다.
+    // 그래서 여기서는 **갈림만** 본다: 곡률을 켜면 삼키고, 끄면 한 알도 안 사라진다.
+    // 얼마나 삼키는지는 점성이 들어온 뒤에 다시 세울 판정이다.
+    check(curvedLost > 0.0 && flatLost < 0.001,
           "곡률을 켤 때만 지평선이 물질을 삼킨다", buf);
 }
 

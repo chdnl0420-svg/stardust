@@ -170,7 +170,7 @@ void App::guardPerformance() {
             // 그것이 이 줄의 존재 이유다.
             fx::mark("!! 위험: 스텝 %.0f ms > 문턱 %.0f ms (타임아웃 2000 ms) — 멈춤. "
                      "알갱이 %d/%d, 격자 %d, dt %.6g, 최고속도 %.3g, "
-                     "블랙홀 %s 질량 %.0f 지평선 %.5f",
+                     "블랙홀 %s 질량 %.0f 지평선 %.3e",
                      t.totalMs, dangerStepMs, sim.activeCount(), cfg.particleCount, cfg.gridSize,
                      t.dtUsed, t.maxSpeed,
                      bh.active ? "있음" : "없음", bh.mass, bh.rs);
@@ -182,7 +182,7 @@ void App::guardPerformance() {
     //
     // **위의 감시는 스텝 시간만 본다. 그것으로는 이번 사고를 못 잡았다.**
     //
-    // 2026-08-14 23:48, 알갱이가 이 우주의 광속(17.3)에 3분 넘게 붙어 있는 채로 스텝은
+    // 2026-08-14 23:48, 알갱이가 이 우주의 광속(100)에 3분 넘게 붙어 있는 채로 스텝은
     // 10 ms 였다 — 위 감시에는 아무 일도 없는 판으로 보였고, 그러다 커널 자료구조가 깨져
     // 시스템이 재부팅됐다(BugCheck 0x139, 같은 서명이 세 번째다).
     //
@@ -351,7 +351,7 @@ void App::tick() {
             put("%s: 스텝 %.1f ms (중력 %.1f 냉각·별 %.1f 적분 %.1f), "
                 "프레임 %.1f ms, 알갱이 %d/%d, dt %.6g, 최고속도 %.3g, "
                 "한칸최대 %d, 별 %d, "
-                "블랙홀 %s 질량 %.0f 지평선 %.5f, 여유 VRAM %.0f MB",
+                "블랙홀 %s 질량 %.0f 지평선 %.3e, 여유 VRAM %.0f MB",
                 how, t.totalMs, t.scatterMs, t.poissonMs, t.gatherMs,
                 frameMs, sim.activeCount(), cfg.particleCount,
                 t.dtUsed, t.maxSpeed,
