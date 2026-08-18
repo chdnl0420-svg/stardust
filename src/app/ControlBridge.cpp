@@ -314,7 +314,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         sim.config().starSunMass, sim.config().starKickSpeed,
         sim.config().starAshYield, sim.config().ashCoolK,
         sim.config().starWindRate,
-        sim.config().ashDiffuseK, sim.config().blackHoleRs,
+        sim.config().ashDiffuseK,
         sim.config().starBHRatio, sim.config().starExplodeSim,
         sim.config().starSunLifeSim, sim.config().novaEnergyK, sim.config().bhFrictionK,
         sim.dispCrossRatio(), sim.bornShellRatio());

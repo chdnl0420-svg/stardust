@@ -511,7 +511,11 @@ __global__ void kSplatPoints(const float4* pos, const float4* vel,
                 const float rx = p.x - b.x, ry = p.y - b.y, rz = p.z - b.z;
                 const float r2 = rx * rx + ry * ry + rz * rz;
                 const float rs = fmaxf(b.w, 1e-6f);
-                if (r2 <= rs * rs) continue;               // 지평선 안 — 이미 삼켜졌다
+                // **지평선 안은 그리지 않는다.** 그 안에서 나온 빛은 밖으로 나올 수
+                // 없다 — 그것이 「검은」 구멍인 이유다. 코어가 지평선 안 알갱이를 그
+                // 스텝에 삼키므로 여기 걸리는 것은 삼켜지기 직전 한 프레임뿐이지만,
+                // 화면에 잠깐이라도 비치면 안 되는 자리라 막는다.
+                if (r2 <= rs * rs) return;
                 // 블랙홀 기준 상대 속도. 함께 흘러가는 몫을 빼야 「도는가」가 제대로 나온다.
                 const float vx = pv.x - bv.x, vy = pv.y - bv.y, vz = pv.z - bv.z;
                 // 각운동량 L⃗ = r⃗ × v⃗ (단위질량당).

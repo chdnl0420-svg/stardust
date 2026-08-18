@@ -192,7 +192,7 @@ void App::guardPerformance() {
     // 두고 보다가 기록만 남기고, 30초를 넘기면 멈춘다.
     {
         const SimTimings t = sim.timings();
-        const float c = sqrtf(cfg.lightSpeedSq > 0.0f ? cfg.lightSpeedSq : 1.0f);
+        const float c = kLightSpeed;
         if (running && t.maxSpeed > c * 0.98f) ++speedPinnedFrames;
         else                                    speedPinnedFrames = 0;
 

@@ -522,63 +522,35 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
         const float dx = p.x - bp.x, dy = p.y - bp.y, dz = p.z - bp.z;
         const float r2 = dx * dx + dy * dy + dz * dz;
         const float r = sqrtf(fmaxf(r2, 1e-12f));
-        if (r <= bp.w) {                       // 지평선 안으로 들어왔다
-            // **에딩턴 한계 — 이 스텝에 삼킬 수 있는 몫이 남았을 때만 삼킨다**
-            // (그 몫을 정하는 근거는 `packBH` 의 셋째 칸 주석).
-            // **각운동량 장벽을 넣었다가 되돌렸다(2026-08-18) — 6배 나빠졌다.**
+        if (r <= bp.w) {                       // 사건의 지평선 안 — 예외 없이 삼킨다
+            // **지평선을 넘은 것은 돌아 나오지 못한다.** 질량과 운동량을 블랙홀에 넘기고
+            // 알갱이는 사라진다. 그것이 지평선의 정의다.
             //
-            // 판이 비는 문제(초당 1,850개, 100만이 9분)를 「실제 은하가 안 비는 이유는
-            // 각운동량이다」로 보고, 접선 속도가 원궤도를 유지할 만하면 안 삼키게 했다.
-            // 결과는 **초당 11,050개** — 30초에 70만이 37만이 됐다.
+            // 여기 있던 **에딩턴 대기열을 걷어냈다(2026-08-18).** 몫이 차면 안 삼키고
+            // 「둘레를 돌며 기다린다」고 했는데, 세 가지가 어긋나 있었다:
+            //   · 에딩턴 한계는 복사압이 물질을 **바깥으로** 미는 것이라 바깥을 향한
+            //     세계선이 없는 지평선 안에서는 성립할 수 없다. 걸 자리가 아니었다.
+            //   · 막힌 알갱이가 **지평선 안에 남아 화면에 그려졌다** — 실제로는 그 안에서
+            //     나온 빛이 밖에 닿지 못한다.
+            //   · 그 알갱이가 튀니까 `v *= 0.90`(스텝당 10%, dt 무관)으로 눌렀고, 그래도
+            //     튀니까 중력을 껐다(`continue`). **구심력이 0 이면 원운동이 원리적으로
+            //     불가능하다** — 사용자가 본 「경계 입자가 안 돈다」가 그 결과였다.
             //
-            // 이유는 **안 삼킨 알갱이가 아래에서 마찰 0.90 을 매 스텝 받는 것**이다.
-            // 궤도를 돌아야 할 알갱이가 프레임마다 속도의 10% 를 잃어 접선 속도가 곧
-            // 문턱 아래로 떨어지고, 그때 삼켜진다. **장벽을 세운 게 아니라 감속 장치를
-            // 하나 더 붙인 셈이었다.**
+            // 대기열이 필요했던 이유는 삼킴 반경이 진짜 지평선의 97~650배여서였다.
+            // 반경을 실제 값으로 되돌린 지금은 삼키는 부피가 90만분의 1 이라 판이 비지
+            // 않는다. 유입을 늦추는 것은 이제 **원반의 마찰**이 한다(지평선 밖에서).
             //
-            // 각운동량을 제대로 넣으려면 마찰과 함께 설계해야 한다 — 마찰이 각운동량을
-            // 뽑아내는 물리인 것은 맞지만, 그 세기가 궤도 시간에 견줘 너무 크면 궤도가
-            // 아예 성립하지 않는다. 그 균형을 잡는 것이 남은 일이다.
-            const int slot = atomicAdd(&eaten[b], 1);
-            if ((float)slot < bh.q[b].z) {
-                // **삼킨 물질의 운동량을 블랙홀에 넘긴다(2026-08-18).**
-                //
-                // 전에는 질량만 늘고 **운동량은 사라졌다.** 그것이 둘을 깨뜨렸다 —
-                // 판 전체의 운동량 보존이 삼킬 때마다 어긋나고, 블랙홀에 **감속 기제가
-                // 없어져** 중력으로만 계속 가속됐다. 사용자가 「블랙홀이 왜 이렇게 빠르게
-                // 날아다녀」, 「우주도 너무 빠르게 움직여」라고 알린 것의 뿌리다
-                // (실측: 정상 회전 속도 0.25 인데 `maxSpeed` 1.7~2.9 로 7~12배).
-                //
-                // 실제 블랙홀은 삼킨 물질과 운동량을 주고받으며 둘레 속도에 맞춰지고,
-                // 그래서 은하 중심에 **가라앉아 거의 안 움직인다**(동역학적 마찰).
-                // 여기서 속도 합을 쌓아 두면 호스트가 스텝 끝에서
-                // `v_new = (M·v_bh + Σm·v_p) / (M + Σm)` 로 반영한다 — 알갱이 하나의
-                // 질량이 1 이므로 개수(`eaten`)가 곧 Σm 이다.
-                const float4 vin = vel[i];
-                atomicAdd(&eatenP[b * 3 + 0], vin.x);
-                atomicAdd(&eatenP[b * 3 + 1], vin.y);
-                atomicAdd(&eatenP[b * 3 + 2], vin.z);
-                pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
-                vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
-                return;
-            }
-            // 몫이 찼다 — 안 삼키고 **둘레를 돌며 기다린다. 그 대기열이 강착원반이다.**
-            //
-            // **여기서 중력을 더 주면 안 된다(2026-08-17에 고침).** 처음에는 지평선 표면
-            // 값을 줬는데, 그러면 지평선 안에 갇힌 알갱이가 중심을 지나 반대편으로 **가속**
-            // 되며 진자처럼 튀어 **광속의 39%까지 갔고**(`maxSpeed` 6.73) 그 빠른 알갱이가
-            // 판 벽에 박혔다(`atWall` 9.97%). 하나씩 꺼서 재니 블랙홀 전환만 끄면
-            // `maxSpeed` 1.59 → **0.186**, `atWall` 18,046 → **3,453** 이었다.
-            //
-            // 실제 강착원반은 **에너지를 잃는다** — 안쪽과 바깥쪽이 다른 속도로 돌며 생기는
-            // 마찰이 각운동량을 뽑아내고, 그래서 물질이 안으로 나선을 그리며 떨어진다.
-            // 그 마찰이 원반을 데우는 열의 출처이고(그것이 빛나는 이유다), 여기서 속도를
-            // 줄이는 것이 곧 그 물리다. 가속이 아니라 감속이 맞다.
-            // 0.98 로는 약했다 — 지평선 안에 쌓인 알갱이가 여전히 튀어 `maxSpeed` 4.39,
-            // 판 벽에 2.5% 가 박혔다. 0.90 이면 한 스텝에 10% 씩 잃어 몇 스텝 안에 가라앉는다.
-            // 실제 원반의 마찰도 강하다 — 물질이 몇 바퀴 만에 안으로 나선을 그린다.
-            v.x *= 0.90f; v.y *= 0.90f; v.z *= 0.90f;
-            continue;
+            // 운동량은 그대로 넘긴다 — `v_new = (M·v_bh + Σm·v_p)/(M+Σm)` 를 호스트가
+            // 스텝 끝에서 적용한다. 완전비탄성 병합이라 **운동량은 보존하고 운동에너지는
+            // 잃는데, 그 잃은 몫이 실제로 원반이 내는 빛이다.**
+            atomicAdd(&eaten[b], 1);
+            const float4 vin = vel[i];
+            atomicAdd(&eatenP[b * 3 + 0], vin.x);
+            atomicAdd(&eatenP[b * 3 + 1], vin.y);
+            atomicAdd(&eatenP[b * 3 + 2], vin.z);
+            pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
+            vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+            return;
         }
         // 각운동량 L = |r × v|
         const float lx = dy * v.z - dz * v.y;
@@ -2600,12 +2572,8 @@ struct Sim::Impl {
     // 오래 하나였다. 하나뿐이면 새로 놓을 때마다 앞의 것이 사라져, 둘이 서로를 끌어당기는
     // 것도 합쳐지는 것도 볼 수 없었다 — 이 장면에서 가장 볼 만한 일이 그것인데도.
     BlackHoleState bhs[kMaxBlackHoles];
-    // 블랙홀이 생길 때의 질량과 지평선. 삼켜서 자랄 때 이 둘을 기준으로 삼는다 —
-    // 기준 없이 매번 처음 크기(cfg.blackHoleRs)에서 다시 시작하면, 크게 놓은 블랙홀도
-    // 한 스텝 만에 작은 것과 같은 크기로 덮어써진다(2026-08-14 실측: 1만과 100만이
-    // 0.006005 와 0.006128 로 거의 같았다).
-    float bhMassAtBirth[kMaxBlackHoles] = {0};
-    float bhRsAtBirth[kMaxBlackHoles] = {0};
+    // (자라는 기준값 `bhMassAtBirth`·`bhRsAtBirth` 를 지웠다 — 2026-08-18. 지평선이
+    //  이제 질량 하나에서 `2GM/c²` 로 나오므로 기준점이 필요 없다.)
     int   bhCount = 0;
     // 이번 스텝에 삼킨 수 — 블랙홀마다 하나씩.
     int *eaten = nullptr;
@@ -2656,7 +2624,7 @@ struct Sim::Impl {
     }
     float horizonOf(float eatenCount) const {
         const float M = eatenCount / (float)(allocN > 0 ? allocN : 1);
-        return 2.0f * cfg.gravity * M / fmaxf(cfg.lightSpeedSq, 1e-6f);
+        return 2.0f * cfg.gravity * M / kLightSpeedSq;
     }
 
     // 커널에 넘길 블랙홀 묶음을 만든다. 삼킴 반경의 바닥(격자 한 칸)도 여기서 건다.
@@ -2696,29 +2664,36 @@ inline dim3 grd3(int G) { return dim3((G + 7) / 8, (G + 7) / 8, (G + 7) / 8); }
 // 한 블랙홀이 삼킨 것이 다른 블랙홀의 질량으로 들어간다. 지울 때는 뒤를 당긴다.
 BHPack Sim::Impl::packBH() const {
     BHPack pk;
-    // 삼키는 반경은 그리는 반경의 절반. 다만 **격자 한 칸보다 작아서는 안 된다** —
-    // 그보다 작으면 지평선 바로 밖 한 칸이 삼켜지지 않는 자리가 되어 알갱이가 끝없이
-    // 쌓이고, 그 칸에 질량을 더하는 원자 연산이 같은 주소에 겹쳐 커널이 드라이버
-    // 타임아웃(2초)을 넘긴다. 2026-08-14 에 그것으로 시스템이 여섯 번 재부팅됐다.
-    const float cell = 1.0f / (float)(allocG > 0 ? allocG : 1);
+    // **삼키는 반경 = 실제 사건의 지평선.** 부풀리지 않는다(2026-08-18).
+    //
+    // 여태 `max(rs*0.5, 격자 한 칸)` 이었고, 그 `rs` 조차 화면용으로 부풀린 값이라
+    // 삼킴 반경이 진짜 지평선의 **97~650배**였다. 그것이 사슬의 뿌리였다:
+    //
+    //   반경 과대 → 궤도가 성립할 공간(ISCO 바깥)이 통째로 삼킴 구 안 → 다 삼켜 판이 빔
+    //   → 못 삼키게 **에딩턴 대기열**을 붙임 → 막힌 알갱이가 지평선 안에 남아 튐
+    //   → 가라앉히려고 **v *= 0.90** → 그래도 튀니 **중력을 끔(continue)**
+    //   → 그래서 「경계에 입자가 붙어 멈춰 있고, 지평선 안이 화면에 보인다」
+    //
+    // 반경을 97분의 1 로 되돌리면 삼키는 부피가 90만분의 1 이라 과도한 삼킴 자체가
+    // 없어진다 — 위 셋(대기열·감쇠·중력 끄기)이 함께 필요 없어진다.
+    //
+    // **격자 한 칸 바닥을 뺐다.** 그 바닥은 「지평선 바로 밖 한 칸이 삼켜지지 않아
+    // 알갱이가 끝없이 쌓이는」 것을 막으려던 것인데, 쌓이던 진짜 이유는 그 알갱이들이
+    // 중력을 못 받아(`continue`) 궤도를 못 돌았기 때문이다. 이제 지평선 밖에서는 언제나
+    // 측지선 중력을 받으므로 각운동량이 있는 것은 돌고, 없는 것은 지나쳐 간다.
+    // **다만 이것이 2026-08-14 에 시스템을 여섯 번 죽인 자리이므로 한 칸 점유 수
+    // (`peakCellCount`)를 반드시 함께 본다.**
     const float inv  = 1.0f / (float)(allocN > 0 ? allocN : 1);
     for (int i = 0; i < bhCount && i < kMaxBlackHoles; ++i) {
-        pk.p[i] = make_float4(bhs[i].x, bhs[i].y, bhs[i].z,
-                              fmaxf(bhs[i].rs * 0.5f, cell));
-        // 셋째 칸은 **이 스텝에 삼킬 수 있는 최대 개수**다(에딩턴 강착 한계).
+        // 지평선은 질량에서 나온다 — `horizonOf` 가 곧 `2GM/c²` 다.
+        const float rs = horizonOf(bhs[i].mass);
+        pk.p[i] = make_float4(bhs[i].x, bhs[i].y, bhs[i].z, rs);
+        // 셋째 칸은 예전에 에딩턴 몫이었다. **지평선 안은 예외 없이 삼키므로 안 쓴다.**
         //
-        // 실제 블랙홀은 아무리 물질이 많아도 무한정 못 삼킨다 — 떨어지는 물질이 마찰로
-        // 데워져 내는 복사압이 그 이상의 유입을 밀어낸다. 그 한계가 질량에 비례하고
-        // (`Ṁ ∝ M`), 못 들어간 물질은 둘레를 돌며 대기한다. **그 대기열이 강착원반이다.**
-        //
-        // **이것이 없으면 판이 통째로 사라진다** — 2026-08-17 실측: 블랙홀 여덟이 시뮬
-        // 시간 2 만에 알갱이 83만 개를 삼켜 화면이 검어졌다. 뭉친 칸 하나에 91만 개가
-        // 몰려 있는데(round-14) 그 자리에 블랙홀이 생기면 한 스텝에 다 빨려 든다.
-        //
-        // 계수 0.0004 는 `dt ≈ 0.0016` 에서 에딩턴 시간 4.0 시뮬 단위(4천만 년)에
-        // 해당한다 — 실제 4천5백만 년에 가깝다. **최소 1 이라 작은 블랙홀도 자란다.**
-        const float maxEat = fmaxf(1.0f, bhs[i].mass * 0.0004f);
-        pk.q[i] = make_float4(cfg.gravity * bhs[i].mass * inv, bhs[i].rs, maxEat, 0.f);
+        // 에딩턴 한계는 복사압이 물질을 **바깥으로** 밀어 유입을 늦추는 것이라, 바깥을
+        // 향한 세계선이 없는 지평선 안에서는 성립할 수 없다. 실제로 제한이 걸리는 곳은
+        // 원반이고, 그 자리에서는 이미 마찰(점성)이 각운동량을 뽑는 속도가 유입을 정한다.
+        pk.q[i] = make_float4(cfg.gravity * bhs[i].mass * inv, rs, 0.f, 0.f);
     }
     pk.n = (bhCount < kMaxBlackHoles) ? bhCount : kMaxBlackHoles;
     return pk;
@@ -2726,25 +2701,18 @@ BHPack Sim::Impl::packBH() const {
 
 void Sim::Impl::setRsFrom(int i) {
     if (i < 0 || i >= kMaxBlackHoles) return;
-    // 삼킬수록 지평선이 자란다 — 다만 **세제곱근으로** 자란다.
-    // 실제 지평선은 질량에 정비례하지만(rs = 2GM/c²), 이 우주에서는 그 값이 화면의 점보다
-    // 작아 아무것도 안 보인다. 그래서 처음 크기를 보이게 부풀려 놓았는데, 거기에 선형
-    // 성장을 곱하면 부풀림까지 함께 자라 삼킬수록 커지고 커질수록 삼키는 되먹임이 생긴다.
-    if (bhMassAtBirth[i] > 1e-6f && bhRsAtBirth[i] > 1e-9f) {
-        const float grow = cbrtf(fmaxf(bhs[i].mass / bhMassAtBirth[i], 1.0f));
-        bhs[i].rs = bhRsAtBirth[i] * grow;
-        if (bhs[i].rs > 0.25f) bhs[i].rs = 0.25f;   // 화면의 4분의 1을 넘지 않는다
-    }
+    // **지평선은 질량에 정비례한다 — `rs = 2GM/c²`.** 그것이 슈바르츠실트 해의 정의다.
+    //
+    // 여태 「처음 크기를 보이게 부풀린 값 × 질량의 세제곱근」이었다(부풀림까지 선형으로
+    // 자라는 되먹임을 막으려고 세제곱근을 썼다). M^(1/3) 은 어떤 시공간 해에도 없고,
+    // 「화면의 4분의 1」 상한은 아예 물리량이 아니었다.
+    //
+    // 화면에서 안 보이는 것은 **그릴 때 최소 크기를 줘서** 푼다 — `Sim.h` 의
+    // `Sim.h` 의 `kLightSpeed` 주석이 그 근거다.
+    bhs[i].rs = horizonOf(bhs[i].mass);
 }
 
 int Sim::Impl::addBlackHole(float x, float y, float z, float mass, bool born) {
-    // 기준 질량(판 전체의 2%) — 이 무게일 때 지평선이 cfg.blackHoleRs 가 된다.
-    //
-    // 마우스로 놓는 질량을 50분의 1 로 낮췄으니 이 기준도 같이 낮춰야 지평선이 예전 값으로
-    // 돌아온다고 보고 0.0004 로 내려 봤는데, **더 나빠졌다.** 지평선이 0.0078(격자 한 칸
-    // 바닥)에서 0.0117 로 커지자 삼키는 범위도 함께 넓어져, 놓은 직후 삼킨 양이 32만에서
-    // 38만으로 늘었다(2026-08-14 실측). 밀집한 중심에 놓으면 지평선이 작을수록 덜 삼킨다.
-    const float ref = 0.02f * (float)allocN;
     // 상한은 두지 않는다. 크게 놓으면 크게 되는 것이 맞고, 무게는 부르는 쪽에서 정한다
     // (마우스로 놓는 것은 addShape 이 개수의 50분의 1 로 낮춰 넘긴다).
     if (mass < 1.0f) mass = 1.0f;
@@ -2764,10 +2732,10 @@ int Sim::Impl::addBlackHole(float x, float y, float z, float mass, bool born) {
     bhs[i].born = born;
     bhs[i].x = x; bhs[i].y = y; bhs[i].z = z;
     bhs[i].mass = mass;
-    bhs[i].rs = cfg.blackHoleRs * cbrtf(fmaxf(mass / fmaxf(ref, 1.0f), 0.02f));
-    if (bhs[i].rs > 0.25f) bhs[i].rs = 0.25f;
-    bhMassAtBirth[i] = mass;
-    bhRsAtBirth[i]   = bhs[i].rs;
+    // **지평선은 질량에서만 나온다** — `setRsFrom` 이 `2GM/c²` 하나로 낸다.
+    // 「처음 크기 × 세제곱근 성장」과 그 기준값(`bhMassAtBirth`·`bhRsAtBirth`)은
+    // 부풀리기용이라 함께 지웠다(2026-08-18).
+    setRsFrom(i);
     // 이 자리에 남아 있던 삼킨 수를 지운다 — 안 지우면 새 블랙홀의 질량에 얹힌다.
     if (eaten) CK(cudaMemset(eaten + i, 0, sizeof(int)));
     return i;
@@ -2897,15 +2865,11 @@ void Sim::Impl::advanceBlackHoles(float dt) {
             bhs[i].vy = (bhs[i].vy * mi + bhs[j].vy * mj) / mt;
             bhs[i].vz = (bhs[i].vz * mi + bhs[j].vz * mj) / mt;
             bhs[i].mass = mt;
-            bhMassAtBirth[i] = fmaxf(bhMassAtBirth[i] + bhMassAtBirth[j], 1e-6f);
-            bhRsAtBirth[i]   = fmaxf(bhRsAtBirth[i], bhRsAtBirth[j]);
             setRsFrom(i);
 
             // j 를 빼고 뒤를 당긴다 — 가운데를 비워 두면 번호가 어긋난다(맨 위 불변식).
             for (int k = j; k + 1 < bhCount; ++k) {
                 bhs[k]           = bhs[k + 1];
-                bhMassAtBirth[k] = bhMassAtBirth[k + 1];
-                bhRsAtBirth[k]   = bhRsAtBirth[k + 1];
             }
             --bhCount;
             bhs[bhCount] = BlackHoleState{};
@@ -3356,8 +3320,7 @@ void Sim::Impl::checkCollapse() {
     const int i = addBlackHole((cx + 0.5f) / G, (cy + 0.5f) / G, (cz + 0.5f) / G, dens, true);
     // 저절로 생긴 것은 지평선을 실제 식에서 낸다. 사용자가 놓은 것과 달리 「이만큼 모였다」가
     // 이미 정해져 있어, 보이게 부풀릴 근거가 그 최소 크기뿐이다.
-    bhs[i].rs = fmaxf(horizonOf(bhs[i].mass), cfg.blackHoleRs);
-    bhRsAtBirth[i] = bhs[i].rs;
+    setRsFrom(i);
 }
 
 // ---------------------------------------------------------------------------
@@ -3604,8 +3567,6 @@ void Sim::reset() {
     d.bhCount = 0;
     for (int i = 0; i < kMaxBlackHoles; ++i) {
         d.bhs[i] = BlackHoleState{};
-        d.bhMassAtBirth[i] = 0.f;
-        d.bhRsAtBirth[i] = 0.f;
     }
 
     // 블랙홀 장면은 알갱이를 놓기 **전에** 세운다. 나중에 세우면 초기 궤도 속도가
@@ -3623,8 +3584,7 @@ void Sim::reset() {
         // 원반은 살아남아, 회전하며 빨려 드는 모습이 보인다.
         const int i = d.addBlackHole(0.5f, 0.5f, 0.5f, 0.02f * (float)d.allocN, false);
         // 그 질량의 지평선은 화면에서 점보다 작다. 삼킴 판정과 그리기에 쓸 최소 크기를 준다.
-        d.bhs[i].rs = d.cfg.blackHoleRs;
-        d.bhRsAtBirth[i] = d.bhs[i].rs;
+        d.setRsFrom(i);
     }
     CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
     CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
@@ -3787,7 +3747,7 @@ void Sim::step() {
 
     kIntegrate<<<(d.allocN + 255) / 256, 256>>>(
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
-        bhPack, d.cfg.lightSpeedSq, d.eaten, d.eatenP,
+        bhPack, kLightSpeedSq, d.eaten, d.eatenP,
         // 세 힘 중 하나라도 켜져 있으면 그 가속도를 함께 넘긴다.
         (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
             ? d.accContact : nullptr);
@@ -3803,18 +3763,13 @@ void Sim::step() {
         // 삼킨 만큼 무거워지고 지평선이 자란다.
         int e[kMaxBlackHoles] = {0};
         CK(cudaMemcpy(e, d.eaten, sizeof(int) * d.bhCount, cudaMemcpyDeviceToHost));
-        // 삼킨 물질의 속도 합. 커널이 **실제로 삼킨 것만** 쌓으므로 아래에서 자른 개수와
-        // 짝이 맞는다(둘 다 에딩턴 몫이 상한이다).
+        // 삼킨 물질의 속도 합. 이제 지평선 안은 예외 없이 삼키므로 **센 수가 곧 삼킨 수**다
+        // (에딩턴 몫으로 되돌려보내는 갈래가 없어져 여기서 다시 자를 것도 없다).
         float ep[3 * kMaxBlackHoles] = {0.f};
         CK(cudaMemcpy(ep, d.eatenP, sizeof(float) * 3 * d.bhCount, cudaMemcpyDeviceToHost));
         bool any = false;
         for (int i = 0; i < d.bhCount; ++i) {
             if (e[i] <= 0) continue;
-            // **커널이 센 수는 실제로 삼킨 수보다 클 수 있다.** 에딩턴 몫이 찬 뒤에도
-            // 지평선 안에 있는 알갱이들이 `atomicAdd` 로 번호를 받고 되돌아가기 때문이다.
-            // 여기서 같은 상한으로 잘라야 질량이 부풀지 않는다(상한 식은 `packBH` 와 같다).
-            const int cap = (int)fmaxf(1.0f, d.bhs[i].mass * 0.0004f);
-            if (e[i] > cap) e[i] = cap;
             // **운동량을 받는다 — 질량만 늘리면 보존이 깨지고 감속 기제가 없어진다.**
             //
             // `v_new = (M·v_bh + Σm·v_p) / (M + Σm)` 이고 알갱이 하나의 질량이 1 이라
@@ -4180,8 +4135,6 @@ void Sim::clearBlackHoles() {
     d.bhCount = 0;
     for (int i = 0; i < kMaxBlackHoles; ++i) {
         d.bhs[i] = BlackHoleState{};
-        d.bhMassAtBirth[i] = 0.f;
-        d.bhRsAtBirth[i] = 0.f;
     }
     if (d.eaten) CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
     if (d.bhAcc) CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
@@ -4404,13 +4357,12 @@ bool Sim::loadState(const std::string& path) {
     d.aliveShown = -1;                     // 불러온 판이니 세어 둔 값은 버린다
     d.simTime = h.simTime;
 
-    // 담아 두었던 블랙홀을 되돌린다. 자라는 기준(bhMassAtBirth·bhRsAtBirth)은 파일에
-    // 없으므로 지금 값을 기준으로 삼는다 — 되살린 순간부터 다시 자라기 시작한다.
+    // 담아 두었던 블랙홀을 되돌린다. 지평선은 질량에서 다시 내므로 파일에 있는 값을
+    // 그대로 믿지 않는다 — 옛 파일은 부풀린 지평선을 담고 있다.
     d.bhCount = loadedBhCount;
     for (int i = 0; i < kMaxBlackHoles; ++i) {
         d.bhs[i] = (i < loadedBhCount) ? loadedBh[i] : BlackHoleState{};
-        d.bhMassAtBirth[i] = d.bhs[i].mass;
-        d.bhRsAtBirth[i]   = d.bhs[i].rs;
+        if (i < loadedBhCount) d.setRsFrom(i);
     }
     CK(cudaMemset(d.eaten, 0, sizeof(int) * kMaxBlackHoles));
     CK(cudaMemset(d.bhAcc, 0, sizeof(float4) * kMaxBlackHoles));
@@ -4716,8 +4668,6 @@ int Sim::eraseAt(float cx, float cy, float radius) {
         // 뒤를 당긴다 — 가운데를 비워 두면 번호가 어긋난다(블랙홀 배열의 불변식).
         for (int k = i; k + 1 < d.bhCount; ++k) {
             d.bhs[k]           = d.bhs[k + 1];
-            d.bhMassAtBirth[k] = d.bhMassAtBirth[k + 1];
-            d.bhRsAtBirth[k]   = d.bhRsAtBirth[k + 1];
         }
         --d.bhCount;
         d.bhs[d.bhCount] = BlackHoleState{};
