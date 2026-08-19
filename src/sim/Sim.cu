@@ -264,7 +264,8 @@ __device__ __forceinline__ bool isHaloGas(unsigned s, float frac) {
 // 비용: N 스레드 × O(1). 한 프레임이 아니라 판을 새로 깔 때 한 번만 돈다.
 __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
                        float bulgeFrac, float bulgeR, float thickness, unsigned seed,
-                       float darkFrac, float haloGasFrac, float sphereFrac) {
+                       float darkFrac, float haloGasFrac, float sphereFrac,
+                       float bigBangShrink) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const unsigned s = (unsigned)i * 2654435761u + seed;
@@ -366,8 +367,20 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
             dz += amp * __sinf(k * (x + 0.23f * (float)m)) * __cosf(k * (y + 0.11f));
         }
         x += dx; y += dy; z += dz;
-        // 판 밖으로 밀려 나간 것은 반대편으로 감는다 — 이 장면은 주기 경계를 쓴다.
+        // 판 밖으로 밀려 나간 것은 반대편으로 감는다.
         x -= floorf(x); y -= floorf(y); z -= floorf(z);
+
+        // ── 빅뱅 — 방금 만든 무늬를 통째로 접어 한 덩어리로 모은다 ──────────────
+        //
+        // **무늬는 그대로 두고 좌표만 줄인다.** 그래서 팽창이 시작되면 접기 전 구조가
+        // 그대로 커진다 — 요동을 새로 만드는 것이 아니라 **이미 있는 요동이 자란다.**
+        // 실제 우주론이 초기 요동을 팽창시키는 것과 같은 짜임이고, 그래서 「빅뱅처럼
+        // 퍼지면서 필라멘트가 생긴다」가 연출이 아니라 결과가 된다.
+        if (bigBangShrink > 0.f) {
+            x = 0.5f + (x - 0.5f) * bigBangShrink;
+            y = 0.5f + (y - 0.5f) * bigBangShrink;
+            z = 0.5f + (z - 0.5f) * bigBangShrink;
+        }
     } else {                                     // 빈 판
         pos[i] = make_float4(-1.f, -1.f, -1.f, 0.f);
         vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -3455,7 +3468,8 @@ void Sim::Impl::placeInitial() {
                                           cfg.diskThickness, 12345u,
                                           cfg.darkMatterFraction,
                                           (preset == 0) ? cfg.haloGasFraction : 0.f,
-                                          (preset == 0) ? cfg.sphereStart : 0.f);
+                                          (preset == 0) ? cfg.sphereStart : 0.f,
+                                          (preset == 1) ? cfg.bigBangShrink : 0.f);
     CK(cudaGetLastError());
     active = (preset == 2) ? 0 : allocN;
     aliveShown = -1;                       // 판을 새로 열었으니 세어 둔 값은 버린다
