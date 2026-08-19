@@ -698,10 +698,26 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
     //
     // 이것이 없으면 판이 닫힌 우주가 되어 결국 가운데로 무너진다(2026-08-19 사용자:
     // 「우주가 가운데로 합쳐져서 무너져내리고있어」). 세기를 고른 근거는 `SimConfig::darkEnergy`.
+    //
+    // **경계 근처에서는 서서히 끈다.** 안 그러면 이 힘이 바깥 알갱이를 계속 밀어
+    // 판 끝에 쌓아 놓는다 — 구형 경계가 부드럽게 받아 튕기지는 않지만, 30만 중 1만 7천이
+    // 벽에 붙어 있었다(2026-08-19 실측, simTime 14). 밀어내는 힘이 경계에서 0 이 되면
+    // 붙을 이유가 없다. 유한한 판의 가장자리 처리다 — 실제 우주는 무한해서 이 문제가 없다.
     if (darkEnergy != 0.f) {
-        a.x += darkEnergy * (p.x - 0.5f);
-        a.y += darkEnergy * (p.y - 0.5f);
-        a.z += darkEnergy * (p.z - 0.5f);
+        float k = 1.0f;
+        if (softBoundR > 0.f) {
+            const float dx = p.x - 0.5f, dy = p.y - 0.5f, dz = p.z - 0.5f;
+            const float r = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (r > softBoundR) {
+                const float R1 = 0.497f;
+                k = 1.0f - fminf((r - softBoundR) / fmaxf(R1 - softBoundR, 1e-6f), 1.0f);
+            }
+        }
+        if (k > 0.f) {
+            a.x += darkEnergy * k * (p.x - 0.5f);
+            a.y += darkEnergy * k * (p.y - 0.5f);
+            a.z += darkEnergy * k * (p.z - 0.5f);
+        }
     }
 
     // **압력은 가스만 받는다 — 별은 서로 부딪히지 않는다(2026-08-19).**
