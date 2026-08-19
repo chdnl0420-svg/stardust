@@ -75,6 +75,55 @@ RenderField  g_field;
 int          g_w = 1600, g_h = 900;
 bool         g_boardOpen = true;
 
+// ── 테두리 없는 전체화면(창모드) ───────────────────────────────────────────
+//
+// **독점 전체화면이 아니라 「화면을 덮는 창」이다.** 해상도를 바꾸지 않고 창을 모니터
+// 크기로 늘려 테두리만 없앤다. 알트탭이 즉시 되고, 다른 창을 위에 띄울 수 있고,
+// 무엇보다 **화면 모드 전환이 없어 드라이버를 건드리지 않는다** — 이 판에서 드라이버를
+// 건드리는 일은 곧 시스템이 죽는 일이다(CLAUDE.md 0번의 여덟 번).
+//
+// **`HWND_TOPMOST` 를 쓰지 않는다.** 최상위 고정은 그 자체로 GPU 를 요구하고,
+// 2026-08-17 에 캡처 도구들이 마지막 여유를 밀어내 프레임이 89→53 으로 떨어진 적이 있다.
+// 창모드 전체화면의 목적(다른 창과 함께 쓰기)에도 최상위는 어긋난다.
+//
+// 되돌아갈 자리는 `WINDOWPLACEMENT` 로 통째 저장한다 — 위치·크기뿐 아니라 최대화
+// 상태까지 담겨서, 최대화된 창에서 들어갔다 나와도 최대화로 돌아온다.
+bool             g_fullscreen = false;
+WINDOWPLACEMENT  g_prevPlace{ sizeof(WINDOWPLACEMENT) };
+LONG             g_prevStyle = 0;
+
+void ToggleFullscreen(HWND hwnd) {
+    if (!g_fullscreen) {
+        g_prevStyle = GetWindowLongW(hwnd, GWL_STYLE);
+        if (!GetWindowPlacement(hwnd, &g_prevPlace)) return;
+
+        // **창이 지금 놓인 모니터**를 기준으로 잡는다. 주 모니터로 고정하면
+        // 보조 화면에서 쓰던 사람이 창을 잃는다.
+        MONITORINFO mi{ sizeof(MONITORINFO) };
+        if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+
+        SetWindowLongW(hwnd, GWL_STYLE, g_prevStyle & ~WS_OVERLAPPEDWINDOW);
+        SetWindowPos(hwnd, HWND_TOP,
+                     mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        g_fullscreen = true;
+    } else {
+        SetWindowLongW(hwnd, GWL_STYLE, g_prevStyle);
+        SetWindowPlacement(hwnd, &g_prevPlace);
+        // 테두리를 되살리려면 크기를 안 바꾸더라도 `SWP_FRAMECHANGED` 로 한 번 알려야 한다.
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        g_fullscreen = false;
+    }
+    if (g_app) g_app->fullscreen = g_fullscreen;   // 설정 창 체크박스가 읽는 값
+    // 크기는 `WM_SIZE` 가 받아 `g_w`·`g_h` 에 넣는다. 렌더 버퍼는 **커질 때만** 다시
+    // 잡히므로(`RenderField.cu` 의 `w <= allocW_` 검사) 창모드로 돌아올 때는 재할당이
+    // 없다 — 오갈 때마다 잡았다 버리면 그것이 곧 CLAUDE.md 1번이 막는 사고다.
+}
+
 // 카메라 드래그 상태. 도구가 카메라일 때만 화면을 끈다.
 bool  g_dragging = false;
 POINT g_dragLast{};
@@ -323,6 +372,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_KEYDOWN:
+            // **F11 은 설정 창이 떠 있어도 듣는다.** 창 크기를 바꾸는 것은 글자를 넣는
+            // 일과 겹치지 않고, 전체화면에서 빠져나오려는데 창 하나 때문에 막히면
+            // 갇힌 것처럼 느껴진다. 그래서 `WantCaptureKeyboard` 검사 앞에 둔다.
+            if (wp == VK_F11) { ToggleFullscreen(hwnd); return 0; }
             if (g_app && !ImGui::GetIO().WantCaptureKeyboard) {
                 if (wp == VK_SPACE) g_app->running = !g_app->running;
                 // S 와 Esc 는 아래 프레임 루프의 ImGui 쪽에서 함께 다룬다 —
@@ -694,6 +747,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             if (app.zoom < mz) app.zoom = mz;
             ClampPan(app);
         }
+
+        // 설정 창에서 전체화면을 뒤집었으면 여기서 실제로 창을 옮긴다.
+        // **UI 는 값만 바꾸고 창은 건드리지 않는다** — `ToggleFullscreen` 이 되돌아가며
+        // `app.fullscreen` 을 다시 맞추므로 이 검사가 두 번 돌지 않는다.
+        if (app.fullscreen != g_fullscreen) ToggleFullscreen(hwnd);
 
         // 배경 — 순수 검정이 기본이고, 「아주 옅은 보라」는 완전한 검정이 답답한 화면에서 쓴다.
         if (app.ui.background == 1) glClearColor(0.012f, 0.009f, 0.021f, 1.f);

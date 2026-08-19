@@ -424,6 +424,11 @@ void TabLook(App& app) {
     if (Segmented("bg", bgs, 2, &bg, nullptr, 146.0f, "배경")) app.ui.background = bg;
 
     Line();
+    // 여기서는 값만 뒤집는다 — 창을 실제로 옮기는 것은 `main.cpp` 의 프레임 루프다.
+    // 이 파일은 윈도 헤더를 안 쓰므로 창 손잡이(HWND)를 들고 있지 않다.
+    Toggle("fullscr", "전체화면 (F11)",
+           "테두리 없이 화면을 덮는 창이다. 해상도를 안 바꿔 알트탭이 즉시된다",
+           &app.fullscreen);
     Toggle("grid", "계산 격자 겹쳐 보기", nullptr, &app.ui.showGridOverlay);
     Toggle("horizon", "블랙홀 경계 그리기",
            "지평선\xC2\xB7광자 구면\xC2\xB7최소 안정 궤도를 원으로 얹는다", &app.showHorizon);

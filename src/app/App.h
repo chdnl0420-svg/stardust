@@ -86,6 +86,10 @@ struct App {
     UiSettings   ui;
 
     bool  running = true;      // 일시정지 여부
+    // 테두리 없는 전체화면(창모드)인가. **창을 실제로 바꾸는 것은 `main.cpp` 뿐이다** —
+    // 설정 창은 이 값만 뒤집고, 프레임 루프가 그것을 보고 창을 옮긴다. UI 쪽에
+    // 창 손잡이(HWND)를 넘기지 않으려는 것이다(`ui/Settings.cpp` 는 윈도 헤더를 안 쓴다).
+    bool  fullscreen = false;
     bool  stepOnce = false;    // "한 스텝" 버튼
     Tool  tool = Tool::Camera;
 
