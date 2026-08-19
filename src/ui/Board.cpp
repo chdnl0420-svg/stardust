@@ -244,10 +244,9 @@ bool ToolButton(const char* id, int shape, bool selected) {
 }
 
 struct Scene { Preset p; const char* name; const char* help; };
-constexpr int kSceneCount = 3;
+constexpr int kSceneCount = 2;
 const Scene kScenes[kSceneCount] = {
-    { Preset::SpiralDisk,  "나선 은하",     "나선 팔을 가진 은하 하나가 돕니다." },
-    { Preset::Filament,    "우주 필라멘트", "판 한 변이 1억 광년입니다. 암흑물질이 중력만으로 그물을 짭니다." },
+    { Preset::Filament,    "우주 필라멘트", "판 한 변이 1억 광년입니다. 중력 하나로 그물이 짜입니다." },
     { Preset::Empty,       "빈 우주",       "아무것도 없습니다. 놓기로 직접 채우세요." },
 };
 

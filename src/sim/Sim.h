@@ -9,9 +9,10 @@
 // **장면 셋만 둔다(2026-08-19).** 은하 충돌·블랙홀 장면을 지웠다 —
 // 블랙홀은 장면이 아니라 어느 장면에서나 켤 수 있는 설정(`blackHoleEnabled`)으로 남아 있고,
 // 충돌은 나선 은하 하나로 볼 수 있는 것을 둘로 늘린 것뿐이라 따로 둘 값이 없었다.
+// **장면 둘만 둔다(2026-08-19).** 나선 은하를 지웠다 — 중력 하나만 남기기로 하면서
+// 별·냉각·압력이 사라졌고, 그것들이 없으면 나선 은하는 팔도 별도 없는 빈 껍데기가 된다.
 enum class Preset {
-    SpiralDisk,   // 나선 은하 하나 — 처음부터 나선팔 모양으로 깐다
-    Filament,     // 판 전체를 고르게 채운 큐브 — 우주 필라멘트가 자란다. 눈금이 1000배다
+    Filament,     // 공 하나에서 빅뱅으로 퍼지며 우주 필라멘트가 자란다. 눈금이 1000배다
     Empty,        // 빈 판. 마우스로 직접 만든다
 };
 
@@ -247,7 +248,7 @@ struct SimConfig {
     // 영원히 평면에 머문다 — 물리적으로 맞는 결과이고, 그래서 씨앗이 필요하다.
     // 실제 우주에서는 초기 요동이 그 대칭을 깬다.
     float diskThickness        = 0.001f;
-    Preset preset              = Preset::SpiralDisk;
+    Preset preset              = Preset::Filament;
     Boundary boundary          = Boundary::Isolated;
 
     float gravity              = 0.6f;

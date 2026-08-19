@@ -306,7 +306,7 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
     // **표시를 `vel.w` 에 둔다.** 알갱이 번호로 가르면 정렬이 재배치하는 순간 뒤섞인다
     // (`kReorder` 는 `float4` 를 통째로 옮기므로 `vel.w` 는 알갱이를 따라간다).
     if (darkFrac > 0.f && rnd01(s * 13u + 7u) < darkFrac) {
-        if (preset == 1) {
+        if (preset == 0) {
             // **필라멘트 장면에서는 헤일로가 아니라 판 전체에 고르게 깐다.**
             // 여기서는 은하 하나가 주인공이 아니라 **판 전체가 우주 한 조각**이라,
             // 가운데로 모으면 그 순간 「중심이 있는 우주」가 되어 필라멘트가 아니라
@@ -336,30 +336,7 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
     // 속도는 여기서 0 으로 두고 `kSetOrbit` 이 **느린 회전**을 준다 — 그 느림이
     // 「떨어져 들어온다」의 전부다. 표시를 남기지 않고 같은 해시(`isHaloGas`)로 고른다.
     //
-    // 나선 장면에만 둔다. 필라멘트·빈 판은 원반 하나가 주인공이 아니라
-    // 저장고라는 개념이 성립하지 않는다.
-    if (preset == 0 && isHaloGas(s, haloGasFrac)) {
-        const float3 h = haloGasPoint(0.15f, 0.45f, s ^ 0x7FEB352Du);
-        pos[i] = make_float4(0.5f + h.x, 0.5f + h.y, 0.5f + h.z, 0.f);
-        vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);      // 가스다 — 나이 0, 별이 될 수 있다
-        return;
-    }
-
-    if (preset == 0) {                           // 나선 은하
-        const float R = 0.30f;
-        if (u3 < bulgeFrac) {
-            const float3 b = bulgePoint(bulgeR, s ^ 0x51ED2701u);
-            x = 0.5f + b.x; y = 0.5f + b.y; z = 0.5f + b.z;
-        } else if (sphereFrac > 0.f && rnd01(s * 23u + 11u) < sphereFrac) {
-            // **구형으로 깐다** — 원반은 결과여야지 초기 조건이면 안 된다(`spherePoint`).
-            // 거리 분포는 원반과 같고 방향만 구에 고르게 편다.
-            const float3 p = spherePoint(R, s ^ 0x9E3779B9u);
-            x = 0.5f + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
-        } else {
-            const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
-            x = 0.5f + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
-        }
-    } else if (preset == 1) {                    // 우주 필라멘트 — 고르게 깔고 씨앗을 심는다
+    if (preset == 0) {                           // 우주 필라멘트 — 고르게 깔고 씨앗을 심는다
         // **공 안에 고르게 깐다.** 큐브로 깔면 접었을 때 정육면체 덩어리가 보이고,
         // 팽창해도 모서리 방향이 한동안 남는다 — 빅뱅에 모서리는 없다.
         // 반지름 0.5 로 깔아 판에 꽉 채우고, 아래에서 `bigBangShrink` 로 접는다.
@@ -3580,43 +3557,24 @@ void Sim::Impl::computeAccel() {
 
 void Sim::Impl::placeInitial() {
     if (g_failed) return;
-    const int preset = (cfg.preset == Preset::SpiralDisk) ? 0
-                     : (cfg.preset == Preset::Filament)   ? 1 : 2;
+    const int preset = (cfg.preset == Preset::Filament) ? 0 : 1;
     // **씨앗 12345 는 `giveOrbits` 의 `kSetOrbit` 도 그대로 받아야 한다** — 두 커널이 같은
     // 해시로 CGM 가스를 골라내므로, 씨앗이 다르면 자리와 속도가 서로 다른 알갱이에 간다.
     kPlace<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, preset,
                                           cfg.bulgeFraction, cfg.bulgeRadius,
                                           cfg.diskThickness, 12345u,
                                           cfg.darkMatterFraction,
-                                          (preset == 0) ? cfg.haloGasFraction : 0.f,
-                                          (preset == 0) ? cfg.sphereStart : 0.f,
-                                          (preset == 1) ? cfg.bigBangShrink : 0.f);
+                                          0.f, 0.f,
+                                          (preset == 0) ? cfg.bigBangShrink : 0.f);
     CK(cudaGetLastError());
-    active = (preset == 2) ? 0 : allocN;
+    active = (preset == 1) ? 0 : allocN;
     aliveShown = -1;                       // 판을 새로 열었으니 세어 둔 값은 버린다
 }
 
-void Sim::Impl::giveOrbits() {
-    // 필라멘트는 원 궤도를 주지 않는다 — 판 전체가 우주 한 조각이라 「무엇을 도는가」가
-    // 없다. 각운동량은 `cfg.spin` 이 판 전체에 주는 회전으로 들어간다(`kAddSpin`).
-    if (g_failed || cfg.preset == Preset::Empty || cfg.preset == Preset::Filament) return;
-    computeAccel();
-    // 적분기가 쓰는 힘을 그대로 넘긴다 — 하나라도 빠지면 궤도가 어긋나 원반이 무너진다.
-    kAccelMag<<<(allocN + 255) / 256, 256>>>(accG, pos, accMag, allocN, allocG,
-                                             periodic() ? 1 : 0, packBH());
-    // 은하 충돌은 둘을 서로에게 밀어 준다. 나머지는 제자리에서 돈다.
-    const float2 base = make_float2(0.f, 0.f);
-    // CGM 가스에 느린 회전을 주려면 **`placeInitial` 이 쓴 것과 같은 씨앗**이 필요하다
-    // (`kPlace` 의 12345). 그 사이에 정렬이 없어 알갱이 번호가 유지되므로, 같은 해시가
-    // 같은 알갱이를 가리킨다.
-    const bool haloScene = (cfg.preset == Preset::SpiralDisk);
-    kSetOrbit<<<(allocN + 255) / 256, 256>>>(vel, pos, accMag, allocN,
-                                             cfg.bulgeRadius, base, cfg.diskThickness,
-                                             12345u, haloScene ? cfg.haloGasFraction : 0.f,
-                                             fmaxf(cfg.diskDispersion, 0.f),
-                                             fminf(fmaxf(cfg.diskSpinLag, 0.f), 0.9f));
-    CK(cudaGetLastError());
-}
+// **원 궤도를 주는 단계는 없앴다(2026-08-19).** 은하 장면과 함께 사라졌다 —
+// 남은 두 장면(필라멘트·빈 우주) 모두 「무엇을 도는가」가 없다. 필라멘트의 각운동량은
+// `cfg.spin` 이 판 전체에 주는 회전으로, 팽창은 `kAddHubble` 로 들어간다.
+void Sim::Impl::giveOrbits() {}
 
 void Sim::Impl::sortParticles() {
     if (g_failed || allocN <= 0) return;

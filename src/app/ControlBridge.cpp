@@ -67,23 +67,18 @@ bool  has(const std::map<std::string, std::string>& kv, const char* k) {
 }
 
 const char* presetSlug(Preset p) {
-    switch (p) {
-        case Preset::SpiralDisk:  return "spiral";
-        case Preset::Filament:    return "filament";
-        default:                  return "empty";
-    }
+    return (p == Preset::Filament) ? "filament" : "empty";
 }
 
 bool parsePreset(const std::string& s, Preset& out) {
-    if (s == "spiral")   { out = Preset::SpiralDisk; return true; }
-    if (s == "filament") { out = Preset::Filament;   return true; }
-    if (s == "empty")    { out = Preset::Empty;      return true; }
+    if (s == "filament") { out = Preset::Filament; return true; }
+    if (s == "empty")    { out = Preset::Empty;    return true; }
     // 지운 장면의 옛 이름. **오류로 튕기지 않고 가장 가까운 것으로 받는다** —
     // 밖에 있는 측정 스크립트들이 이 이름을 쓰고 있어서, 튕기면 그 스크립트가
     // 장면을 못 바꾼 채 **기본 장면에서 잰 값을 그 장면의 값이라고 보고한다.**
-    if (s == "web")   { out = Preset::Filament;   return true; }   // 우주 거미줄 → 필라멘트
-    if (s == "tidal") { out = Preset::SpiralDisk; return true; }   // 은하 충돌  → 나선 은하
-    if (s == "blackhole") { out = Preset::SpiralDisk; return true; }  // 블랙홀은 설정으로 켠다
+    if (s == "web" || s == "spiral" || s == "tidal" || s == "blackhole") {
+        out = Preset::Filament; return true;
+    }
     return false;
 }
 
