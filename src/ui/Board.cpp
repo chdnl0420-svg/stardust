@@ -675,106 +675,20 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
         Tip("장면을 고릅니다. Tab 으로도 열립니다.");
     }
 
-    Divider();
+    // ── 도구 다섯과 값 알약을 지웠다(2026-08-19) ──────────────────────────
+    //
+    // 사용자가 「장면 전환 하고 전체 옵션 버튼하고 UI안보이게하는 거하고 녹화 메뉴빼고
+    // 다 제거해줘」라고 했다. 남은 것은 장면 · 설정 · 감추기 · 녹화 넷이다.
+    // 시간 배속과 밝기는 설정 창에 그대로 있다.
 
-    // ── 도구 다섯 ─────────────────────────────────────────────────────────
-    {
-        // 화면 순서와 Tool 값의 순서가 다르다 — 자주 쓰는 「놓기」를 앞으로 뺐다.
-        const Tool order[5] = { Tool::Camera, Tool::AddShape, Tool::Spray, Tool::Well, Tool::Erase };
-        const char* tips[5] = {
-            "화면 옮기기 — 끌어서 이동, 휠로 확대·축소",
-            "놓기 — 고른 모양을 누른 자리에 뿌립니다",
-            "뿌리기 — 그 자리 가스를 바깥으로 밉니다",
-            "끌기 — 물질을 그쪽으로 당깁니다",
-            "지우개 — 그 자리 알갱이를 지웁니다",
-        };
-        for (int i = 0; i < 5; ++i) {
-            if (i > 0) ImGui::SameLine();
-            const bool on = (app.tool == order[i]) || (i == 1 && app.shapeDrawerOpen);
-            if (ToolButton(tips[i], i, on)) {
-                if (i == 1) {
-                    // 놓기는 바로 도구가 되지 않는다 — 무엇을 놓을지 먼저 고르게 서랍을 연다.
-                    app.shapeDrawerOpen = !app.shapeDrawerOpen;
-                    app.drawerOpen = false;
-                } else {
-                    app.tool = order[i];
-                    app.shapeDrawerOpen = false;
-                }
-            }
-            Tip(tips[i]);
-        }
-    }
-
-    Divider();
-
-    // ── 값 알약 ───────────────────────────────────────────────────────────
-    {
-        char v[32];
-        float drag = 0.0f;
-        snprintf(v, sizeof(v), "%.1f\xC3\x97", app.cfg.timeScale);   // × (곱셈 기호)
-        // 빠르기만 곱셈이 아니라 덧셈으로 끈다. 표시가 `%.1f` 라 0.1 이 한 눈금인데,
-        // 곱셈으로 하면 1.0 근처에서 한 픽셀이 0.008 밖에 못 움직여 눈금을 못 넘긴다.
-        const int rs = Pill("speed", "빠르기", v, &drag);
-        const ImVec2 aSpeed = ImGui::GetItemRectMin();
-        if (rs == 1) ImGui::OpenPopup("##speedpop");
-        else if (rs == 2) app.cfg.timeScale = Clampf(app.cfg.timeScale + drag * 0.02f, 0.1f, 10.0f);
-        Tip("시간이 흐르는 속도입니다. 좌우로 끌어도 됩니다.");
-        AnchorAbove(aSpeed);
-        if (ImGui::BeginPopup("##speedpop")) {
-            SliderRow("s", "빠르기", &app.cfg.timeScale, 0.1f, 10.0f, "%.1f\xC3\x97", true, 236.0f);
-            ImGui::Spacing();
-            if (ImGui::Button(app.running ? "멈춤" : "재생")) app.running = !app.running;
-            ImGui::SameLine();
-            if (ImGui::Button("처음부터")) { app.applyConfig(); app.sim.reset(); }
-            ImGui::EndPopup();
-        }
-
-        // 「한 번에」 알약은 뺐다. 놓기 서랍이 모양과 개수를 함께 고르는 자리라, 막대에도
-        // 같은 값을 두면 두 곳에서 같은 것을 만지게 된다 — 막대에 상주하는 것을 줄이는 것이
-        // 이 화면 설계의 핵심이다.
-
-        ImGui::SameLine();
-        snprintf(v, sizeof(v), "%.1f", app.view.brightness);
-        // 지금 쓰는 컬러맵을 알약 안에 띠로 보여 준다 — RenderField.cu 의 두 맵을
-        // 다섯 점으로 훑은 값이다. 밝기를 만질 때 어느 밝기가 무슨 색인지 함께 보인다.
-        static const ImU32 kAstro[5] = {
-            IM_COL32(0, 0, 0, 255),      IM_COL32(23, 22, 73, 255),  IM_COL32(88, 56, 150, 255),
-            IM_COL32(219, 136, 74, 255), IM_COL32(255, 255, 240, 255)
-        };
-        static const ImU32 kThermal[5] = {
-            IM_COL32(0, 0, 0, 255),     IM_COL32(140, 0, 0, 255),    IM_COL32(255, 87, 0, 255),
-            IM_COL32(255, 208, 41, 255), IM_COL32(255, 255, 245, 255)
-        };
-        drag = 0.0f;
-        const int rb = Pill("bright", "밝기", v, &drag, false,
-                            (app.look == App::Look::Density) ? kAstro : kThermal);
-        const ImVec2 aBright = ImGui::GetItemRectMin();
-        if (rb == 1) ImGui::OpenPopup("##brightpop");
-        else if (rb == 2) {
-            app.view.brightness = Clampf(app.view.brightness * expf(drag * 0.010f), 0.05f, 20.0f);
-            RememberLook(app);
-        }
-        Tip("화면이 하얗게 타면 내리고 너무 어두우면 올립니다. 좌우로 끌어도 됩니다.");
-        AnchorAbove(aBright);
-        if (ImGui::BeginPopup("##brightpop")) {
-            // 색은 밀도 하나로 고정이라 고를 것이 없다 — 밝기와 세기만 둔다.
-            if (SliderRow("b", "밝기", &app.view.brightness, 0.05f, 20.0f, "%.2f", true, 252.0f))
-                RememberLook(app);
-            if (SliderRow("g", "희미한 것", &app.view.gamma, 0.4f, 4.0f, "%.2f", false, 252.0f))
-                RememberLook(app);
-            ImGui::EndPopup();
-        }
-    }
 
     // ── 오른쪽 끝 — 설정 · 저장 · 녹화 ────────────────────────────────────
     {
         const float right = ImGui::GetWindowWidth();
-        const char* saveLabel = "한 장 저장";
         const char* recLabel = app.recording ? "정지" : "녹화";
-        const float wSave = ImGui::CalcTextSize(saveLabel).x + 26.0f;
         const float wRec  = ImGui::CalcTextSize(recLabel).x + 40.0f;
-        const float wHide = 34.0f, wMet = 34.0f;
-        ImGui::SameLine(right - wSave - wRec - 36.0f - wHide - wMet - 24.0f);
+        const float wHide = 34.0f;
+        ImGui::SameLine(right - wRec - 36.0f - wHide - 24.0f);
 
         // 눈 — 조작부를 통째로 감춘다.
         //
@@ -804,43 +718,12 @@ void DrawBottomBar(App& app, int viewW, int viewH) {
             Tip("조작부를 전부 감춥니다. H 로도 됩니다.");
         }
 
-        ImGui::SameLine();
-        // 눈금 — 회전곡선·프레임 시간·에너지를 보는 창.
-        {
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            const bool pressed = ImGui::InvisibleButton("##meters", ImVec2(wMet, 32.0f));
-            const bool hov = ImGui::IsItemHovered();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            if (hov || app.metersOpen)
-                dl->AddRectFilled(p, ImVec2(p.x + wMet, p.y + 32.0f),
-                                  app.metersOpen ? kAccentSoft : IM_COL32(255, 255, 255, 26), 9.0f);
-            const ImU32 col = app.metersOpen ? kAccent : (hov ? kInk : kInkDim);
-            // 막대그래프 셋
-            const float bx = p.x + wMet * 0.5f - 7.0f, by = p.y + 22.0f;
-            dl->AddRectFilled(ImVec2(bx,        by - 6.0f),  ImVec2(bx + 3.0f,  by), col, 1.0f);
-            dl->AddRectFilled(ImVec2(bx + 5.5f, by - 11.0f), ImVec2(bx + 8.5f,  by), col, 1.0f);
-            dl->AddRectFilled(ImVec2(bx + 11.f, by - 8.0f),  ImVec2(bx + 14.0f, by), col, 1.0f);
-            if (pressed) app.metersOpen = !app.metersOpen;
-            Tip("재기 — 회전곡선, 프레임 시간, 에너지. M 으로도 됩니다.");
-        }
-
+        // 재기(눈금)와 「한 장 저장」은 지웠다(2026-08-19) — 남기기로 한 넷에 없다.
         ImGui::SameLine();
         // 톱니 — 나머지 값 전부를 한가운데 큰 판으로 연다. 자주 만지지 않는 것들이라
         // 막대에 상주시키면 「평소엔 우주뿐」이 무너진다.
         if (ToolButton("settings", 4, app.settingsOpen)) app.settingsOpen = !app.settingsOpen;
-        Tip("설정 — 중력과 시간, 우주의 경계, 보기와 색, 성능, 조작, 저장과 녹화");
-        ImGui::SameLine();
-        {
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            const bool pressed = ImGui::InvisibleButton("##save", ImVec2(wSave, 32.0f));
-            const bool hov = ImGui::IsItemHovered();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            if (hov) dl->AddRectFilled(p, ImVec2(p.x + wSave, p.y + 32.0f), IM_COL32(255,255,255,26), 9.0f);
-            const ImVec2 t = ImGui::CalcTextSize(saveLabel);
-            dl->AddText(ImVec2(p.x + 13.0f, p.y + (32.0f - t.y) * 0.5f), hov ? kInk : kInkDim, saveLabel);
-            if (pressed) app.snapshotRequested = true;
-            Tip("지금 화면을 captures 폴더에 그림으로 남깁니다.");
-        }
+        Tip("설정");
 
         ImGui::SameLine();
         {
