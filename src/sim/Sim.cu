@@ -2433,6 +2433,41 @@ __global__ void kAddHubble(const float4* pos, float4* vel, int n, float H) {
     vel[i] = v;
 }
 
+// **속도 분산 — 무작위 속도로 구를 떠받친다.**
+//
+// 팽창 대신 이것으로 무너짐을 막는다. 실제 은하단·타원 은하가 그렇게 버틴다(비리얼 평형)
+// — 전체로는 회전도 팽창도 안 하는데, 별들이 제각기 다른 방향으로 도느라 안 무너진다.
+//
+// 필요한 세기는 비리얼 정리가 정해 준다. 균일 구의 위치에너지가 `U = -(3/5)GM²/R` 이고
+// 평형 조건이 `2K + U = 0` 이므로:
+//
+//   v²_rms = (3/5)·GM/R      R=0.40, GM=0.9 이면 v_rms = 1.16
+//
+// 방향을 고르게 뽑아야 한다 — 성분마다 따로 난수를 뽑으면 정육면체 쪽으로 치우친다.
+// 구면에서 방향을 뽑고 크기를 따로 준다.
+//
+// 비용: N 스레드 × O(1). 판을 깔 때 한 번.
+__global__ void kAddDispersion(const float4* pos, float4* vel, int n, float vrms, unsigned seed) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (pos[i].x < 0.f) return;
+    const unsigned s = (unsigned)i * 2654435761u + seed;
+
+    // 방향 — 구면에 고르게
+    const float cz = rnd01(s * 3u + 1u) * 2.0f - 1.0f;
+    const float sz = sqrtf(fmaxf(1.0f - cz * cz, 0.0f));
+    const float ph = rnd01(s * 7u + 5u) * 6.2831853f;
+
+    // 크기 — 셋을 더해 가우시안에 가깝게 만든다(중심극한). 평균이 vrms 가 되게 맞춘다.
+    const float g = (rnd01(s * 11u + 3u) + rnd01(s * 13u + 7u) + rnd01(s * 17u + 9u)) / 1.5f;
+
+    float4 v = vel[i];
+    v.x += vrms * g * sz * __cosf(ph);
+    v.y += vrms * g * sz * __sinf(ph);
+    v.z += vrms * g * cz;
+    vel[i] = v;
+}
+
 // 셀 키(정렬용). 빈 슬롯은 -1 로 두어 뒤로 밀린다.
 __global__ void kCellKey(const float4* pos, int n, int G, int* keys, int* idx) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -4111,6 +4146,10 @@ void Sim::reset() {
     // 회전을 먼저 두어야 「도는 판이 부푼다」는 읽는 순서와 맞는다.
     if (d.cfg.hubble != 0.0f)
         kAddHubble<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.cfg.hubble);
+    // 속도 분산은 맨 마지막에 얹는다 — 회전·팽창 위에 무작위를 더하는 순서다.
+    if (d.cfg.velDispersion > 0.0f)
+        kAddDispersion<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN,
+                                                        d.cfg.velDispersion, 24680u);
 
     // **무게중심을 정지시킨다.** 궤도 속도·회전·난수를 다 주고 나면 그 합이 정확히 0 이
     // 되지 않고, 그 나머지가 판 전체를 한 방향으로 민다. 2026-08-16 실측: 70초에 은하
