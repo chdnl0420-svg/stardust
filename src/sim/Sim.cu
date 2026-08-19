@@ -703,7 +703,7 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
                            int n, int G, float dt, int periodic,
                            BHPack bh, float c2, int* eaten, float* eatenP,
                            const float4* accContact, const float4* accPress,
-                           float softBoundR) {
+                           float softBoundR, float darkEnergy) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -712,6 +712,20 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
 
     float4 a = sampleAcc(accG, p, G, periodic);
     if (accContact) { const float4 c = accContact[i]; a.x += c.x; a.y += c.y; a.z += c.z; }
+
+    // **암흑에너지 — 거리에 비례해 바깥으로 민다**(`a = Λ·r`).
+    //
+    // 중력이 거리의 제곱에 반비례해 **가까울수록** 세지는 것과 반대로, 이것은 **멀수록**
+    // 세진다. 그 어긋남이 우주의 한살이를 만든다 — 처음 뭉쳐 있을 때는 중력이 압도해
+    // 구조가 자라고, 퍼져서 성겨지면 이쪽이 이겨 다시는 안 무너진다.
+    //
+    // 이것이 없으면 판이 닫힌 우주가 되어 결국 가운데로 무너진다(2026-08-19 사용자:
+    // 「우주가 가운데로 합쳐져서 무너져내리고있어」). 세기를 고른 근거는 `SimConfig::darkEnergy`.
+    if (darkEnergy != 0.f) {
+        a.x += darkEnergy * (p.x - 0.5f);
+        a.y += darkEnergy * (p.y - 0.5f);
+        a.z += darkEnergy * (p.z - 0.5f);
+    }
 
     // **압력은 가스만 받는다 — 별은 서로 부딪히지 않는다(2026-08-19).**
     //
@@ -4252,7 +4266,8 @@ void Sim::step() {
         // 압력 가속도 — 적분이 **가스에만** 더한다. 별은 서로 부딪히지 않는다.
         d.accPress,
         // 구형 경계(0 이면 예전 큐브 벽). 주기 경계에서는 애초에 안 쓴다.
-        d.periodic() ? 0.f : fmaxf(d.cfg.softBoundR, 0.f));
+        d.periodic() ? 0.f : fmaxf(d.cfg.softBoundR, 0.f),
+        d.cfg.darkEnergy);
     CK(cudaGetLastError());
 
     if (d.bhCount > 0) {

@@ -280,7 +280,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 전자기력·약력이 켜진 채 도는 것을 사용자가 눈으로 먼저 알아챘다.
         // 끄는 코드를 넣는 것만으로는 부족하다 — **껐다는 것을 잴 수 있어야 한다.**
         "coreStrong=%d\ncoreEm=%d\ncoreWeak=%d\ncoreSpin=%.4f\ncoreLenScale=%.1f\n"
-        "coreHubble=%.4f\ncoreBigBang=%.4f\n"
+        "coreHubble=%.4f\ncoreBigBang=%.4f\ncoreDarkE=%.2f\ncoreSoftBound=%.3f\n"
         // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
         //
         // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
@@ -377,6 +377,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         sim.config().strongForceEnabled ? 1 : 0, sim.config().emForceEnabled ? 1 : 0,
         sim.config().weakForceEnabled ? 1 : 0, sim.config().spin, sim.config().lengthScale,
         sim.config().hubble, sim.config().bigBangShrink,
+        sim.config().darkEnergy, sim.config().softBoundR,
         // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
         // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
         sim.config().coolingRate, sim.config().starFormEfficiency,
@@ -604,6 +605,8 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         // **접기 비율의 하한을 코어가 강제한다.** 0.05 아래는 한 칸에 4000 개가 넘게 몰려
         // 이 판을 죽인 조건에 든다(`SimConfig::bigBangShrink` 의 표). 밖에서 0.01 을
         // 보내도 0.05 로 잘린다 — 한계를 아는 쪽이 코어다(CLAUDE.md 3번).
+        if (has(kv, "darkEnergy"))     app.cfg.darkEnergy = clampF(getFloat(kv, "darkEnergy", app.cfg.darkEnergy), 0.0f, 500.0f, app.cfg.darkEnergy);
+        if (has(kv, "softBoundR"))     app.cfg.softBoundR = clampF(getFloat(kv, "softBoundR", app.cfg.softBoundR), 0.0f, 0.49f, app.cfg.softBoundR);
         if (has(kv, "bigBangShrink"))
             app.cfg.bigBangShrink = clampF(getFloat(kv, "bigBangShrink", app.cfg.bigBangShrink), 0.0f, 1.0f, app.cfg.bigBangShrink);
         if (app.cfg.bigBangShrink > 0.0f && app.cfg.bigBangShrink < 0.05f)
