@@ -240,8 +240,13 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 10~40°. 진폭(spiralM2)만으로는 둘이 구별되지 않는다 — 둘 다 m=2 가 크다.
         // spiralPhase 는 팔이 지금 놓인 각도(r=0.3 기준)로, **시간에 따라 고르게 도는지가
         // 「유지되는가」의 답**이다. 진폭이 커도 매번 다른 각도면 팔이 아니라 잡음이다.
+        //
+        // **Lum 붙은 것이 사진에서 보이는 팔이다** — 별을 밝기(M^3.5)로 가중한 값.
+        // 붙지 않은 것은 질량 기준(가스·별·잔해를 고르게). 관측이 근적외선과 푸른빛을
+        // 갈라 보는 것과 같고, 둘의 pitch 차이가 「팔에서 별이 나는가」를 말한다.
         "spiralM2=%.4f\nbarM2=%.4f\nspiralRings=%d\n"
         "spiralPitch=%.1f\nspiralPhase=%.1f\n"
+        "spiralM2Lum=%.4f\nspiralPitchLum=%.1f\nspiralPhaseLum=%.1f\nspiralRingsLum=%d\n"
         "ashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n"
         // 위 재 분포가 착시인지 가르는 값들 — 재를 뿌린 칸 수와 알갱이 분포.
         "ashCellsIn=%d\nashCellsOut=%d\nnInner=%d\nnMid=%d\nnOuter=%d\n"
@@ -337,6 +342,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         cons.maxCellCount, cons.momentum,
         emg.spiralM2, emg.barM2, emg.spiralRings,
         emg.spiralPitch, emg.spiralPhase,
+        emg.spiralM2Lum, emg.spiralPitchLum, emg.spiralPhaseLum, emg.spiralRingsLum,
         emg.ashInner, emg.ashMid, emg.ashOuter,
         emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter,
         sim.bornAshMean(),
