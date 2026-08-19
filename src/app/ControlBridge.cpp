@@ -247,6 +247,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         "spiralM2=%.4f\nbarM2=%.4f\nspiralRings=%d\n"
         "spiralPitch=%.1f\nspiralPhase=%.1f\n"
         "spiralM2Lum=%.4f\nspiralPitchLum=%.1f\nspiralPhaseLum=%.1f\nspiralRingsLum=%d\n"
+        // `diskLum` 이 곧 「화면이 얼마나 밝은가」다 — 별 형성 효율을 낮추면 나선은
+        // 좋아지지만 별이 줄어 어두워지는 맞바꿈을 수로 견주는 자리.
+        "diskCount=%.0f\ndiskLum=%.4g\n"
         "ashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n"
         // 위 재 분포가 착시인지 가르는 값들 — 재를 뿌린 칸 수와 알갱이 분포.
         "ashCellsIn=%d\nashCellsOut=%d\nnInner=%d\nnMid=%d\nnOuter=%d\n"
@@ -343,6 +346,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         emg.spiralM2, emg.barM2, emg.spiralRings,
         emg.spiralPitch, emg.spiralPhase,
         emg.spiralM2Lum, emg.spiralPitchLum, emg.spiralPhaseLum, emg.spiralRingsLum,
+        emg.diskCount, emg.diskLum,
         emg.ashInner, emg.ashMid, emg.ashOuter,
         emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter,
         sim.bornAshMean(),

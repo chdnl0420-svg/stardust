@@ -4415,6 +4415,11 @@ struct RingFit {
     double pitch = 0.0;   // 감김 각도(도). 90 은 안 감긴 것 = 막대
     double phase = 0.0;   // 패턴이 놓인 각도(도, r=0.3 기준)
     int    rings = 0;     // 평균에 쓴 링 수
+    // 원반(r 0.1~0.5) 전체 합. 질량 쪽이면 알갱이 수, 빛 쪽이면 **총 광도**다.
+    // 진폭을 정규화하느라 어차피 구하던 값인데, 밖에서 보면 그 자체로 쓸모가 있다 —
+    // 「별 형성 효율을 낮추면 나선은 좋아지지만 화면이 어두워진다」는 맞바꿈을
+    // 눈이 아니라 수로 견주려면 이 값이 있어야 한다(2026-08-19).
+    double sum   = 0.0;
 };
 
 RingFit fitSpiralRings(const double* h, int bins) {
@@ -4425,6 +4430,7 @@ RingFit fitSpiralRings(const double* h, int bins) {
     for (int b = 0; b < bins; ++b) {
         gRe += h[3 * b + 0]; gIm += h[3 * b + 1]; gSum += h[3 * b + 2];
     }
+    f.sum = gSum;
     if (gSum <= 1e-9) return f;
     f.bar = sqrt(gRe * gRe + gIm * gIm) / gSum;
 
@@ -4541,6 +4547,7 @@ Sim::Emergence Sim::measureEmergence() const {
         e.spiralPhase = mass.phase;
         e.spiralM2Lum    = light.amp;   e.spiralPitchLum = light.pitch;
         e.spiralPhaseLum = light.phase; e.spiralRingsLum = light.rings;
+        e.diskCount = mass.sum;         e.diskLum    = light.sum;
     }
 
     // ── 금속 기울기: 재를 안·중간·바깥 세 구간으로 ─────────────────────

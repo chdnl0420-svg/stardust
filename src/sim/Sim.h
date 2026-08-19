@@ -770,6 +770,12 @@ public:
         double spiralPitchLum = 0.0;
         double spiralPhaseLum = 0.0;
         int    spiralRingsLum = 0;
+        // 원반(r 0.1~0.5)의 알갱이 수와 **총 광도**. 나선 진폭을 정규화하느라 어차피
+        // 구하던 값이다. **밝기를 수로 견주려면 이것이 있어야 한다** — 별 형성 효율을
+        // 낮추면 나선은 좋아지는데 별이 줄어 화면이 어두워지는 맞바꿈이 있고, 여태
+        // 그 한쪽(밝기)을 잴 자가 없어 눈으로만 말했다(2026-08-19).
+        double diskCount = 0.0;
+        double diskLum   = 0.0;
         // 재의 반지름별 평균(안·중간·바깥). 안쪽이 진하면 「금속 기울기」가 생긴 것이다.
         float  ashInner = 0.0f;
         float  ashMid   = 0.0f;
