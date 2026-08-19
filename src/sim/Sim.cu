@@ -2023,6 +2023,10 @@ __global__ void kParticleRadial(const float4* pos, int n, float* outCnt, int bin
     atomicAdd(&outCnt[b], 1.0f);
 }
 
+// 나선 진폭을 재는 반지름 링 개수. 링 하나가 (0.5−0.1)/16 = 0.025 —
+// 그 안에서는 pitch 10° 짜리 팔도 m=2 위상이 0.18 rad(10°) 밖에 안 감겨 지워지지 않는다.
+static constexpr int kSpiralBins = 16;
+
 // 나선팔이 생겼는지 **수치로** 잰다 — 밀도의 m=2 푸리에 진폭.
 //
 // 두 팔 구조는 밀도가 각도에 대해 `1 + A·cos(2θ + φ)` 로 변조된다는 뜻이다.
@@ -2030,12 +2034,35 @@ __global__ void kParticleRadial(const float4* pos, int n, float* outCnt, int bin
 //
 //   A2 = |Σ ρ(cos2θ + i·sin2θ)| / Σ ρ
 //
-// **0 에 가까우면 팔이 없고, 0.1 을 넘으면 눈에 보이는 팔이다**(실제 은하는 0.1~0.3).
-// 이것이 있어야 「팔이 생겼다/흐릿하다/안 생겼다」를 스크린샷 인상이 아니라 숫자로 적을 수 있다.
-//
 // **중심 근처는 뺀다.** r 이 작으면 각도가 불안정하고(중심 한 칸은 모든 각도를 갖는다)
 // 팽대부가 팔과 무관하게 밝아 A2 를 흐린다.
-__global__ void kSpiralM2(const float* rho, int G, int S, double* out /* [3]: re, im, sum */) {
+//
+// ── 반지름을 통틀어 합치면 나선을 못 잰다 (2026-08-19 에 알았다) ──────────
+//
+// 예전에는 r=0.1~0.5 를 **한 덩어리로** 합쳐 A2 하나를 냈다. 그것이 틀렸다.
+// 나선은 반지름마다 팔의 각도가 감기는 구조다 — 그 감김이 나선의 정의다.
+// 통째로 합치면 안쪽 팔과 바깥 팔의 위상이 서로 지운다.
+//
+// 합성 데이터로 쟀다(같은 진하기의 팔을 넣고 예전 식과 링별 식을 견줬다):
+//
+//   모양                    예전 식   링별 식   예전/링별
+//   막대(위상 안 감김)        0.2499   0.2497     1.00
+//   나선 pitch 40°           0.1729   0.2491     0.69
+//   나선 pitch 20°(전형적)    0.0921   0.2463     0.37   ← 63% 가 지워진다
+//   나선 pitch 10°           0.0439   0.2340     0.19   ← 81% 가 지워진다
+//
+// **예전 식은 막대를 1.00 배로, 나선을 0.19~0.69 배로 쟀다.** 나선일수록 작게 나오니,
+// 이 값이 오르내리는 것을 보고 「팔이 생겼다 풀렸다」로 읽으면 사실은 **막대가 생겼다
+// 풀렸다** 하는 것을 본 것이다. 실제로 그렇게 읽고 열한 번을 헤맸다.
+//
+// 그래서 링마다 따로 모은다. 링 안에서는 팔의 각도가 거의 같아 지워지지 않는다.
+// 부르는 쪽이 링별로 나눈 뒤 평균하면 나선 진폭이고, 링을 다 더한 뒤 나누면
+// 예전 값(= 막대 진폭)이 그대로 나온다 — 둘 다 이 한 번의 훑기로 나온다.
+//
+// 비용: G³ 스레드 × 3 atomicAdd = 3G³. G=128 이면 630만 회(예전과 같다 —
+// 링을 갈랐을 뿐 스레드당 원자연산 수는 그대로다). status 를 물을 때만 돈다.
+__global__ void kSpiralM2(const float* rho, int G, int S, int bins,
+                          double* out /* [3*bins]: 링마다 re, im, sum */) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     const int z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -2049,10 +2076,16 @@ __global__ void kSpiralM2(const float* rho, int G, int S, double* out /* [3]: re
     const float d = rho[(size_t)(z * S + y) * S + x];
     if (d <= 0.f) return;
 
+    // 0.1~0.5 를 bins 등분. 위쪽 경계(r=0.5)가 그대로 bins 가 되므로 잘라 준다 —
+    // 안 자르면 out 배열 밖에 쓴다(이 판에서 배열 밖 쓰기는 시스템을 재부팅시킨다).
+    int b = (int)((sqrtf(r2) - 0.1f) / 0.4f * (float)bins);
+    if (b < 0) b = 0;
+    if (b >= bins) b = bins - 1;
+
     const float th2 = 2.0f * atan2f(fy, fx);
-    atomicAdd(&out[0], (double)(d * __cosf(th2)));
-    atomicAdd(&out[1], (double)(d * __sinf(th2)));
-    atomicAdd(&out[2], (double)d);
+    atomicAdd(&out[3 * b + 0], (double)(d * __cosf(th2)));
+    atomicAdd(&out[3 * b + 1], (double)(d * __sinf(th2)));
+    atomicAdd(&out[3 * b + 2], (double)d);
 }
 
 // 한 칸에 알갱이가 얼마나 몰렸는지 — **원자 연산 경합의 선행 지표다.**
@@ -3247,7 +3280,8 @@ void Sim::Impl::allocate() {
     // **2 에서 4 로 늘렸다(2026-08-16).** 총 운동량이 x·y·z 세 칸을 쓴다 —
     // 2칸짜리에 3칸을 `cudaMemset` 하면 범위 밖 쓰기이고, 그 뒤 커널들이 조용히 실패한다.
     // 4 → 12 로 늘렸다(2026-08-17). 회전곡선이 반지름 네 구간의 합·개수로 8칸을 쓴다.
-    CK(cudaMalloc(&redD, sizeof(double) * 12));
+    // 12 → 64 로 늘렸다(2026-08-19). 나선 진폭이 링 16 개 × (re,im,sum) 로 48칸을 쓴다.
+    CK(cudaMalloc(&redD, sizeof(double) * 64));
     // 상태별 개수 5칸 + 셀 최대 점유 1칸 + 여유. 늘려 두어도 32바이트다.
     CK(cudaMalloc(&redI, sizeof(int) * 8));
     CK(cudaMalloc(&redU, sizeof(unsigned long long)));
@@ -4338,12 +4372,46 @@ Sim::Emergence Sim::measureEmergence() const {
     const int G = d.allocG;
 
     // ── 나선팔: 밀도의 m=2 푸리에 진폭 ──────────────────────────────────
+    //
+    // 링별로 재고 평균하면 **나선**(`spiralM2`), 링을 다 더한 뒤 나누면 **막대**(`barM2`).
+    // 왜 둘이 다른지는 `kSpiralM2` 주석에 실측표와 함께 적었다 — 한 줄로는,
+    // 나선은 반지름마다 팔이 감겨 통째로 합치면 스스로 지워지고 막대는 안 지워진다.
     if (d.rho) {
-        CK(cudaMemset(d.redD, 0, sizeof(double) * 3));
-        kSpiralM2<<<grd3(G), blk3()>>>(d.rho, G, d.stride(), d.redD);
-        double h[3] = {0.0, 0.0, 0.0};
-        CK(cudaMemcpy(h, d.redD, sizeof(double) * 3, cudaMemcpyDeviceToHost));
-        if (h[2] > 1e-9) e.spiralM2 = sqrt(h[0] * h[0] + h[1] * h[1]) / h[2];
+        const int kBins = kSpiralBins;
+        CK(cudaMemset(d.redD, 0, sizeof(double) * 3 * kBins));
+        kSpiralM2<<<grd3(G), blk3()>>>(d.rho, G, d.stride(), kBins, d.redD);
+        double h[3 * kSpiralBins] = {};
+        CK(cudaMemcpy(h, d.redD, sizeof(double) * 3 * kBins, cudaMemcpyDeviceToHost));
+
+        double gRe = 0.0, gIm = 0.0, gSum = 0.0;
+        for (int b = 0; b < kBins; ++b) {
+            gRe += h[3 * b + 0]; gIm += h[3 * b + 1]; gSum += h[3 * b + 2];
+        }
+        if (gSum > 1e-9) e.barM2 = sqrt(gRe * gRe + gIm * gIm) / gSum;
+
+        // 거의 빈 링은 뺀다 — 밀도가 몇 칸에만 남으면 그 몇 칸의 각도가 곧 A2 가 되어
+        // 1 에 가깝게 튄다. 그것은 팔이 아니라 표본이 없는 것이다.
+        // 문턱은 「평균 링의 5%」— 가스가 다 타서 바깥이 비어도 별이 남은 링은 살아남는다.
+        const double floorSum = gSum / (double)kBins * 0.05;
+
+        // **밀도로 가중하지 않고 링을 고르게 센다.** 묻는 것이 「팔이 원반 전체에 걸쳐
+        // 있는가」라서다. 밀도로 가중하면 제일 무거운 안쪽 한두 링(팽대부·막대가 있는
+        // 자리)이 값을 지배해 `barM2` 와 거의 같아지고, 그러면 둘을 나눈 뜻이 없어진다.
+        //
+        // 그 대가로 **`spiralM2` 가 `barM2` 보다 작아질 수 있다.** 삼각부등식
+        // |Σ Z_b| ≤ Σ |Z_b| 이 보장하는 것은 `barM2` ≤ **가중**평균까지이고,
+        // 고른 평균은 그 아래로 내려갈 수 있다 — 안쪽 링만 팔이 세고 바깥이 밋밋하면
+        // 그렇게 된다. 실측에서 14 표본 중 5 번 그랬다(2026-08-19). 버그가 아니다.
+        double acc = 0.0;
+        int used = 0;
+        for (int b = 0; b < kBins; ++b) {
+            const double s = h[3 * b + 2];
+            if (s <= floorSum || s <= 1e-9) continue;
+            acc += sqrt(h[3 * b + 0] * h[3 * b + 0] + h[3 * b + 1] * h[3 * b + 1]) / s;
+            ++used;
+        }
+        if (used > 0) e.spiralM2 = acc / (double)used;
+        e.spiralRings = used;
     }
 
     // ── 금속 기울기: 재를 안·중간·바깥 세 구간으로 ─────────────────────

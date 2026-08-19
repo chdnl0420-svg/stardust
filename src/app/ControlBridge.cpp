@@ -230,7 +230,13 @@ std::string ControlBridge::statusBody(const App& app) const {
         "maxCellCount=%d\ntotalMomentum=%.4f\n"
         // 창발 — 코드에 「그렇게 되라」고 안 적은 것들이 나왔는지.
         // spiralM2 가 0.1 을 넘으면 눈에 보이는 두 팔이고, ash 안쪽이 진하면 금속 기울기다.
-        "spiralM2=%.4f\nashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n"
+        //
+        // **spiralM2 와 barM2 를 함께 읽어야 한다.** 앞은 링별로 재 나선을, 뒤는 통째로 재
+        // 막대를 말한다. barM2 만 크면 팔이 아니라 막대(또는 두 덩어리로 갈린 것)다 —
+        // 2026-08-19 이전에는 뒤엣것 하나만 있었고, 그것을 팔로 읽어 열한 번을 헤맸다.
+        // spiralRings 가 16 보다 많이 작으면 판이 비어 spiralM2 를 믿을 수 없다.
+        "spiralM2=%.4f\nbarM2=%.4f\nspiralRings=%d\n"
+        "ashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n"
         // 위 재 분포가 착시인지 가르는 값들 — 재를 뿌린 칸 수와 알갱이 분포.
         "ashCellsIn=%d\nashCellsOut=%d\nnInner=%d\nnMid=%d\nnOuter=%d\n"
         // 「폭발 자리에서 새 별이 태어나는가」 — 새로 난 별이 있던 칸의 재 평균과
@@ -323,7 +329,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         cons.gas, cons.stars, cons.exploding, cons.remnants, cons.neutronStars,
         cons.darkMatter, cons.bad,
         cons.maxCellCount, cons.momentum,
-        emg.spiralM2, emg.ashInner, emg.ashMid, emg.ashOuter,
+        emg.spiralM2, emg.barM2, emg.spiralRings,
+        emg.ashInner, emg.ashMid, emg.ashOuter,
         emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter,
         sim.bornAshMean(),
         // 판 전체의 칸당 재 평균. 격자는 패딩 없이 G³ 다.
