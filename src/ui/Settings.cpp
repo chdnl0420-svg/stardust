@@ -317,83 +317,47 @@ void KeyCell(const char* key, const char* what, float colW) {
 // ── 갈래별 내용 ──────────────────────────────────────────────────────────
 
 void TabGravity(App& app) {
+    // ── 중력 하나만 남았다(2026-08-19) ──────────────────────────────────────
+    //
+    // 별의 한살이·냉각·압력·접촉·블랙홀·세 힘을 걷어냈다. 여기 남은 것은 중력과,
+    // 중력만 받는 것들(암흑물질·팽창·암흑에너지)뿐이다.
     GroupLabel("중력");
     SliderLine("g", "중력 세기 G", &app.cfg.gravity, 0.05f, 4.0f, "%.2f");
     SliderLine("soft", "뭉침 방지 거리", &app.cfg.softeningCells, 0.5f, 8.0f, "%.1f 칸");
+    UnderNote("가까운 거리의 힘이 발산하지 않게 막는다. 너무 작으면 알갱이가 튄다.");
 
     Line();
     GroupLabel("시간 나아가기");
-    SliderLine("dt", "한 칸의 크기", &app.cfg.timeScale, 0.1f, 10.0f, "%.3f", true);
-    UnderNote("한 스텝이 너무 크면 알갱이가 튀므로, 위험한 값은 자동으로 잘린다.");
+    SliderLine("dt", "빠르기", &app.cfg.timeScale, 0.1f, 10.0f, "%.2f", true);
+    UnderNote("배속 1.0 에서 팽창은 10 초쯤, 구조는 4 분쯤에 여문다. "
+              "낮추면 팽창이 천천히 보이는 대신 구조까지 오래 걸린다.");
 
     Line();
-    GroupLabel("알갱이끼리");
-    // 알갱이가 너무 많으면 판에 움직일 자리가 없어 접촉이 스스로 꺼진다.
-    // 켤 수 없는 상태를 감추면 「켰는데 아무 일도 안 일어난다」가 되므로 이유를 적는다.
-    const bool fits = ContactFitsCount(app.cfg.particleCount, app.cfg.gridSize);
-    // 설명이 「모여서 덩어리가 된다」였는데 사실이 아니다 — 이 힘은 밀기만 하고 당기지 않아
-    // (kContact 의 f<0 절단) 켜면 오히려 퍼진다. 실측: 점유 셀 40만 → 156만.
-    // 덩어리를 만드는 것은 아래의 식히기다.
-    if (Toggle("contact", "서로 통과하지 못하게 하기",
-               "겹치면 밀어내고 부딪히면 에너지를 잃는다 \xE2\x80\x94 뭉친 자리가 부풀어 퍼진다",
-               &app.cfg.contactEnabled, fits))
-        ApplyAutoGrid(app.cfg);
-    if (!fits) UnderNote("알갱이가 너무 많아 지금은 켤 수 없다 \xE2\x80\x94 상한을 낮추면 켜진다.");
-    // 세 힘이 켜져 있으면 코어가 접촉을 물린다(Sim.cu 의 doContact 참조). 켰는데 아무 일도
-    // 안 일어나는 것처럼 보이지 않게 그 사실을 적는다.
-    if (app.cfg.contactEnabled && (app.cfg.strongForceEnabled || app.cfg.emForceEnabled))
-        UnderNote("아래 강한핵력\xEF\xBC\x8F전자기력이 켜져 있어 지금은 물러나 있다 \xE2\x80\x94 그쪽이 같은 일을 한다.");
+    GroupLabel("우주의 눈금");
+    SliderLine("dark", "암흑물질 비율", &app.cfg.darkMatterFraction, 0.0f, 0.9f, "%.2f");
+    UnderNote("알갱이 중 이만큼을 암흑물질로 깐다 — 중력만 주고받는다. 실제 우주는 물질의 85% 다.");
 
-    // **덩어리를 만드는 것은 이것이다.** 끄면 중력으로 모인 자리가 데워져 도로 흩어지고,
-    // 모였다 흩어졌다만 되풀이한다. 오래 UI 에 없어 켤 방법조차 없었다.
-    Toggle("cooling", "식어서 뭉치기",
-           "이웃과 어긋난 움직임을 걷어낸다 \xE2\x80\x94 함께 도는 속도는 그대로라 회전은 살아 있다",
-           &app.cfg.coolingEnabled);
-    SliderLine("coolingRate", "식는 빠르기", &app.cfg.coolingRate, 0.0f, 1.0f, "%.2f",
-               false, app.cfg.coolingEnabled);
-    UnderNote("높이면 빨리 뭉치고, 0 이면 끈 것과 같다.");
-
-    // ── 나머지 세 가지 기본 힘 ──────────────────────────────────────────────
-    // 이 판의 알갱이는 별과 가스라 핵력의 실제 크기(10⁻¹⁵ m)와는 열다섯 자리가 어긋난다.
-    // 크기가 아니라 거동을 옮겨 담았다 — 자세한 것은 Sim.h 의 그 자리 주석에 있다.
-    // 셋 다 접촉력과 같은 이웃 훑기 위에서 돌므로 값이 같다 — 켤 수 있는 알갱이 수도 같다.
-    GroupLabel("나머지 세 가지 힘");
-    Toggle("strong", "강한핵력",
-           "아주 가까울 때만 세게 당기고 더 붙으면 밀어낸다 \xE2\x80\x94 붙은 것끼리 덩어리로 굳는다",
-           &app.cfg.strongForceEnabled, fits);
-    SliderLine("strongK", "강한핵력 세기", &app.cfg.strongForceK, 1000.0f, 300000.0f, "%.0f",
-               true, app.cfg.strongForceEnabled && fits);
-
-    Toggle("em", "전자기력",
-           "알갱이마다 +/- 가 있어 같은 부호는 밀고 다른 부호는 당긴다 \xE2\x80\x94 뭉치지 않고 늘어선다",
-           &app.cfg.emForceEnabled, fits);
-    SliderLine("emK", "전자기력 세기", &app.cfg.emForceK, 0.001f, 0.5f, "%.3f",
-               true, app.cfg.emForceEnabled);
-
-    Toggle("weak", "약한핵력",
-           "부호가 이따금 뒤집힌다(베타 붕괴) \xE2\x80\x94 굳어 있던 배치가 스스로 풀린다",
-           &app.cfg.weakForceEnabled, app.cfg.emForceEnabled);
-    if (!app.cfg.emForceEnabled) UnderNote("전자기력을 켜야 뒤집힌 부호가 뜻을 갖는다.");
-
-    SliderLine("newDamp", "이 힘들의 감쇠", &app.cfg.newForceDamping, 0.3f, 2.0f, "%.2f",
-               false, app.cfg.strongForceEnabled || app.cfg.emForceEnabled);
-    UnderNote("1 이 임계 감쇠다. 낮추면 더 오래 출렁이고, 너무 낮추면 에너지가 쌓여 튄다.");
-
-    // 판 전체 회전. 다시 시작해야 얹히므로 그 사실을 밑줄로 알린다.
     SliderLine("spin", "판 전체 회전", &app.cfg.spin, -1.0f, 1.0f, "%.2f");
-    UnderNote("돌면 뭉칠 때 공이 아니라 원반이 된다. 크게 주면 바깥이 궤도를 넘어 흩어진다 \xE2\x80\x94 다시 시작해야 얹힌다.");
+    UnderNote("각운동량. 크게 주면 원심력이 중력을 이겨 그물이 자라기 전에 펴진다 — "
+              "다시 시작해야 얹힌다.");
 
-    // 놓는 블랙홀이 얼마나 무거운가. 개수 × 이 값이 무게가 된다.
-    SliderLine("bhScale", "블랙홀 무게 배율", &app.cfg.blackHoleMassScale, 0.002f, 1.0f, "%.3f", true);
-    UnderNote("놓는 개수에 이 값을 곱한 만큼 무겁다. 1 이면 개수 그대로 \xE2\x80\x94 판을 통째로 삼킨다.");
+    Line();
+    GroupLabel("팽창");
+    SliderLine("bigbang", "처음 뭉친 크기", &app.cfg.bigBangShrink, 0.05f, 1.0f, "%.2f");
+    UnderNote("판 전체 구조를 이 비율로 접어 한 덩어리로 모은 뒤 터뜨린다. 작을수록 "
+              "조밀하게 시작한다 — 0.05 아래는 한 칸에 너무 몰려 코어가 자른다.");
 
-    // **배경 힘 근사를 걷어내고 진짜 알갱이로 바꿨다(2026-08-17).**
-    // 전에는 켜고 끄는 스위치였는데, 그것은 암흑물질을 「보이지 않는 배경 중력」으로
-    // 때우는 근사였다. 이제 알갱이의 일부를 실제로 암흑물질로 깐다 — 중력만 주고받고
-    // 서로 부딪히지 않아 식지 못해 넓은 구형 헤일로로 남는다.
-    SliderLine("dark", "암흑물질 비율", &app.cfg.darkMatterFraction, 0.0f, 0.9f, "%.2f", true);
-    UnderNote("알갱이 중 이만큼을 암흑물질로 깐다. 중력만 주고받고 화면에는 안 보인다 \xE2\x80\x94 "
-              "재기 창의 회전곡선이 바깥에서 안 떨어지는 것으로 확인한다.");
+    SliderLine("hubble", "팽창 속도 H", &app.cfg.hubble, 0.0f, 150.0f, "%.0f");
+    UnderNote("빅뱅의 처음 속도(v = H·r). 84 면 판 크기에서 팽창이 멎는다. "
+              "낮추면 오히려 나빠진다 — 퍼져야 그물이 될 공간이 생긴다.");
+
+    SliderLine("darkE", "암흑에너지", &app.cfg.darkEnergy, 0.0f, 100.0f, "%.0f");
+    UnderNote("거리에 비례해 바깥으로 미는 힘. 0 이면 팽창이 멎은 뒤 가운데로 무너진다. "
+              "33 이 실제 우주 비율(암흑에너지 : 물질 = 7 : 3)이다.");
+
+    SliderLine("vdisp", "속도 분산", &app.cfg.velDispersion, 0.0f, 3.0f, "%.2f");
+    UnderNote("알갱이마다 무작위 속도를 얹어 떠받친다(비리얼 평형). 구는 유지되지만 "
+              "구조가 안 생긴다 — 뭉치지도 흩어지지도 않는 상태라서다.");
 }
 
 void TabBounds(App& app) {
