@@ -270,6 +270,9 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
     const unsigned s = (unsigned)i * 2654435761u + seed;
     const float u1 = rnd01(s), u2 = rnd01(s * 3u + 1u), u3 = rnd01(s * 7u + 5u);
     float x = 0.5f, y = 0.5f, z = 0.5f;
+    // `vel.w` 표시. 0 이면 보통 물질, -100 이면 암흑물질이다. **마지막 줄에서 한 번만
+    // 쓴다** — 중간에 `vel[i]` 를 써 두면 끝에서 통째로 덮어써 표시가 지워진다.
+    float velW = 0.f;
 
     // ── 암흑물질 ────────────────────────────────────────────────────────────
     //
@@ -286,11 +289,21 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
     // **표시를 `vel.w` 에 둔다.** 알갱이 번호로 가르면 정렬이 재배치하는 순간 뒤섞인다
     // (`kReorder` 는 `float4` 를 통째로 옮기므로 `vel.w` 는 알갱이를 따라간다).
     if (darkFrac > 0.f && rnd01(s * 13u + 7u) < darkFrac) {
-        // 헤일로는 원반보다 훨씬 크다(실제로도 광학 반지름의 수 배까지 뻗는다).
-        const float3 h = bulgePoint(0.42f, s ^ 0x2545F491u);
-        pos[i] = make_float4(0.5f + h.x, 0.5f + h.y, 0.5f + h.z, 0.f);
-        vel[i] = make_float4(0.f, 0.f, 0.f, -100.f);   // -100 = 암흑물질
-        return;
+        if (preset == 1) {
+            // **필라멘트 장면에서는 헤일로가 아니라 판 전체에 고르게 깐다.**
+            // 여기서는 은하 하나가 주인공이 아니라 **판 전체가 우주 한 조각**이라,
+            // 가운데로 모으면 그 순간 「중심이 있는 우주」가 되어 필라멘트가 아니라
+            // 공 하나가 자란다. 자리는 아래 필라멘트 분기와 **같은 변위**를 받아야
+            // 보통 물질과 같은 씨앗에서 함께 자란다 — 그래서 여기서 끝내지 않고
+            // 표시만 남긴 뒤 아래로 흘려보낸다.
+            velW = -100.f;                                 // -100 = 암흑물질
+        } else {
+            // 헤일로는 원반보다 훨씬 크다(실제로도 광학 반지름의 수 배까지 뻗는다).
+            const float3 h = bulgePoint(0.42f, s ^ 0x2545F491u);
+            pos[i] = make_float4(0.5f + h.x, 0.5f + h.y, 0.5f + h.z, 0.f);
+            vel[i] = make_float4(0.f, 0.f, 0.f, -100.f);   // -100 = 암흑물질
+            return;
+        }
     }
 
     // ── 은하주변물질(CGM) — 원반이 다 쓰고 나면 채워 줄 가스 저장고 ──────────────
@@ -306,16 +319,16 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
     // 속도는 여기서 0 으로 두고 `kSetOrbit` 이 **느린 회전**을 준다 — 그 느림이
     // 「떨어져 들어온다」의 전부다. 표시를 남기지 않고 같은 해시(`isHaloGas`)로 고른다.
     //
-    // 나선·블랙홀 장면에만 둔다. 충돌·거미줄·빈 판은 원반 하나가 주인공이 아니라
+    // 나선 장면에만 둔다. 필라멘트·빈 판은 원반 하나가 주인공이 아니라
     // 저장고라는 개념이 성립하지 않는다.
-    if ((preset == 0 || preset == 3) && isHaloGas(s, haloGasFrac)) {
+    if (preset == 0 && isHaloGas(s, haloGasFrac)) {
         const float3 h = haloGasPoint(0.15f, 0.45f, s ^ 0x7FEB352Du);
         pos[i] = make_float4(0.5f + h.x, 0.5f + h.y, 0.5f + h.z, 0.f);
         vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);      // 가스다 — 나이 0, 별이 될 수 있다
         return;
     }
 
-    if (preset == 0 || preset == 3) {            // 나선 은하 · 블랙홀
+    if (preset == 0) {                           // 나선 은하
         const float R = 0.30f;
         if (u3 < bulgeFrac) {
             const float3 b = bulgePoint(bulgeR, s ^ 0x51ED2701u);
@@ -329,18 +342,7 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
             const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
             x = 0.5f + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
         }
-    } else if (preset == 1) {                    // 은하 충돌 — 나선 둘이 양옆에서
-        const int side = (i & 1);
-        const float cx = side ? 0.72f : 0.28f;
-        const float R = 0.20f;
-        if (u3 < bulgeFrac) {
-            const float3 b = bulgePoint(bulgeR * 0.8f, s ^ 0x51ED2701u);
-            x = cx + b.x; y = 0.5f + b.y; z = 0.5f + b.z;
-        } else {
-            const float3 p = diskPoint(R, thickness, s ^ 0x9E3779B9u);
-            x = cx + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
-        }
-    } else if (preset == 2) {                    // 우주 거미줄 — 고르게 깔고 씨앗을 심는다
+    } else if (preset == 1) {                    // 우주 필라멘트 — 고르게 깔고 씨앗을 심는다
         x = u1; y = u2; z = u3;
 
         // **알갱이를 밀어 밀도 요동을 만든다.**
@@ -373,7 +375,7 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
     }
 
     pos[i] = make_float4(x, y, z, 0.f);
-    vel[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+    vel[i] = make_float4(0.f, 0.f, 0.f, velW);
     // `temp`(지금은 전자기력의 전하 배열)는 여기서 건드리지 않는다 — reset() 이 이 커널
     // 직후 `kInitCharge` 로 전체를 ±1 로 깐다. 온도 배열이던 시절의 0.02 쓰기는 지웠다.
 }
@@ -2934,7 +2936,10 @@ struct Sim::Impl {
     }
     float horizonOf(float eatenCount) const {
         const float M = eatenCount / (float)(allocN > 0 ? allocN : 1);
-        return 2.0f * cfg.gravity * M / kLightSpeedSq;
+        // 길이 눈금을 늘리면 광속이 그만큼 느려지고, 지평선은 c² 에 반비례하므로
+        // 눈금 제곱만큼 커진다 — 판을 크게 볼수록 같은 질량의 지평선이 화면에서
+        // 작아 보이는 것과 앞뒤가 맞는다(`lightSpeedFor` 참조).
+        return 2.0f * cfg.gravity * M / lightSpeedSqFor(cfg.lengthScale);
     }
 
     // 커널에 넘길 블랙홀 묶음을 만든다. 삼킴 반경의 바닥(격자 한 칸)도 여기서 건다.
@@ -3420,24 +3425,24 @@ void Sim::Impl::computeAccel() {
 void Sim::Impl::placeInitial() {
     if (g_failed) return;
     const int preset = (cfg.preset == Preset::SpiralDisk) ? 0
-                     : (cfg.preset == Preset::TidalPair)  ? 1
-                     : (cfg.preset == Preset::CosmicWeb)  ? 2
-                     : (cfg.preset == Preset::BlackHole)  ? 3 : 4;
+                     : (cfg.preset == Preset::Filament)   ? 1 : 2;
     // **씨앗 12345 는 `giveOrbits` 의 `kSetOrbit` 도 그대로 받아야 한다** — 두 커널이 같은
     // 해시로 CGM 가스를 골라내므로, 씨앗이 다르면 자리와 속도가 서로 다른 알갱이에 간다.
     kPlace<<<(allocN + 255) / 256, 256>>>(pos, vel, allocN, preset,
                                           cfg.bulgeFraction, cfg.bulgeRadius,
                                           cfg.diskThickness, 12345u,
                                           cfg.darkMatterFraction,
-                                          (preset == 0 || preset == 3) ? cfg.haloGasFraction : 0.f,
-                                          (preset == 0 || preset == 3) ? cfg.sphereStart : 0.f);
+                                          (preset == 0) ? cfg.haloGasFraction : 0.f,
+                                          (preset == 0) ? cfg.sphereStart : 0.f);
     CK(cudaGetLastError());
-    active = (preset == 4) ? 0 : allocN;
+    active = (preset == 2) ? 0 : allocN;
     aliveShown = -1;                       // 판을 새로 열었으니 세어 둔 값은 버린다
 }
 
 void Sim::Impl::giveOrbits() {
-    if (g_failed || cfg.preset == Preset::Empty || cfg.preset == Preset::CosmicWeb) return;
+    // 필라멘트는 원 궤도를 주지 않는다 — 판 전체가 우주 한 조각이라 「무엇을 도는가」가
+    // 없다. 각운동량은 `cfg.spin` 이 판 전체에 주는 회전으로 들어간다(`kAddSpin`).
+    if (g_failed || cfg.preset == Preset::Empty || cfg.preset == Preset::Filament) return;
     computeAccel();
     // 적분기가 쓰는 힘을 그대로 넘긴다 — 하나라도 빠지면 궤도가 어긋나 원반이 무너진다.
     kAccelMag<<<(allocN + 255) / 256, 256>>>(accG, pos, accMag, allocN, allocG,
@@ -3447,7 +3452,7 @@ void Sim::Impl::giveOrbits() {
     // CGM 가스에 느린 회전을 주려면 **`placeInitial` 이 쓴 것과 같은 씨앗**이 필요하다
     // (`kPlace` 의 12345). 그 사이에 정렬이 없어 알갱이 번호가 유지되므로, 같은 해시가
     // 같은 알갱이를 가리킨다.
-    const bool haloScene = (cfg.preset == Preset::SpiralDisk || cfg.preset == Preset::BlackHole);
+    const bool haloScene = (cfg.preset == Preset::SpiralDisk);
     kSetOrbit<<<(allocN + 255) / 256, 256>>>(vel, pos, accMag, allocN,
                                              cfg.bulgeRadius, base, cfg.diskThickness,
                                              12345u, haloScene ? cfg.haloGasFraction : 0.f,
@@ -3944,10 +3949,11 @@ void Sim::reset() {
         d.bhs[i] = BlackHoleState{};
     }
 
-    // 블랙홀 장면은 알갱이를 놓기 **전에** 세운다. 나중에 세우면 초기 궤도 속도가
+    // 블랙홀은 알갱이를 놓기 **전에** 세운다. 나중에 세우면 초기 궤도 속도가
     // 블랙홀 없는 중력만 보고 정해져, 원반이 통째로 빨려 든다.
     // (마우스로 놓는 쪽은 그럴 수 없으므로 그때는 둘레에 궤도를 따로 준다 — addShape 참조.)
-    if (d.cfg.preset == Preset::BlackHole || d.cfg.blackHoleEnabled) {
+    // 장면이 아니라 설정으로 켠다(2026-08-19 에 블랙홀 장면을 지웠다).
+    if (d.cfg.blackHoleEnabled) {
         // **질량을 먼저 정하고 지평선을 거기서 낸다.** 반대로 하면 안 된다.
         //
         // 지평선 크기(0.006)에서 질량을 역산하면 rs·c²/(2G) = 1.5 — 판의 모든 알갱이를
@@ -4127,7 +4133,7 @@ void Sim::step() {
 
     kIntegrate<<<(d.allocN + 255) / 256, 256>>>(
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
-        bhPack, kLightSpeedSq, d.eaten, d.eatenP,
+        bhPack, lightSpeedSqFor(d.cfg.lengthScale), d.eaten, d.eatenP,
         // 세 힘 중 하나라도 켜져 있으면 그 가속도를 함께 넘긴다.
         (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
             ? d.accContact : nullptr,

@@ -69,19 +69,21 @@ bool  has(const std::map<std::string, std::string>& kv, const char* k) {
 const char* presetSlug(Preset p) {
     switch (p) {
         case Preset::SpiralDisk:  return "spiral";
-        case Preset::TidalPair:   return "tidal";
-        case Preset::CosmicWeb:   return "web";
-        case Preset::BlackHole:   return "blackhole";
+        case Preset::Filament:    return "filament";
         default:                  return "empty";
     }
 }
 
 bool parsePreset(const std::string& s, Preset& out) {
-    if (s == "spiral") { out = Preset::SpiralDisk;  return true; }
-    if (s == "tidal")  { out = Preset::TidalPair;   return true; }
-    if (s == "web")    { out = Preset::CosmicWeb;   return true; }
-    if (s == "blackhole") { out = Preset::BlackHole; return true; }
-    if (s == "empty")  { out = Preset::Empty;       return true; }
+    if (s == "spiral")   { out = Preset::SpiralDisk; return true; }
+    if (s == "filament") { out = Preset::Filament;   return true; }
+    if (s == "empty")    { out = Preset::Empty;      return true; }
+    // 지운 장면의 옛 이름. **오류로 튕기지 않고 가장 가까운 것으로 받는다** —
+    // 밖에 있는 측정 스크립트들이 이 이름을 쓰고 있어서, 튕기면 그 스크립트가
+    // 장면을 못 바꾼 채 **기본 장면에서 잰 값을 그 장면의 값이라고 보고한다.**
+    if (s == "web")   { out = Preset::Filament;   return true; }   // 우주 거미줄 → 필라멘트
+    if (s == "tidal") { out = Preset::SpiralDisk; return true; }   // 은하 충돌  → 나선 은하
+    if (s == "blackhole") { out = Preset::SpiralDisk; return true; }  // 블랙홀은 설정으로 켠다
     return false;
 }
 
@@ -539,7 +541,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starSunMass"))    app.cfg.starSunMass    = clampF(getFloat(kv, "starSunMass", app.cfg.starSunMass), 1.0f, 1.0e6f, app.cfg.starSunMass);
         if (has(kv, "starSunLifeSim")) app.cfg.starSunLifeSim = clampF(getFloat(kv, "starSunLifeSim", app.cfg.starSunLifeSim), 0.001f, 1.0e6f, app.cfg.starSunLifeSim);
         if (has(kv, "starExplodeSim")) app.cfg.starExplodeSim = clampF(getFloat(kv, "starExplodeSim", app.cfg.starExplodeSim), 0.0001f, 10.0f, app.cfg.starExplodeSim);
-        if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, kLightSpeed * 0.2f, app.cfg.starKickSpeed);
+        if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, lightSpeedFor(app.cfg.lengthScale) * 0.2f, app.cfg.starKickSpeed);
         if (has(kv, "starBHRatio"))    app.cfg.starBHRatio    = clampF(getFloat(kv, "starBHRatio", app.cfg.starBHRatio), 1.0f, 1.0e5f, app.cfg.starBHRatio);
         if (has(kv, "starCollapseToBH")) app.cfg.starCollapseToBH = getInt(kv, "starCollapseToBH", 0) != 0;
         if (has(kv, "bhFrictionK"))   app.cfg.bhFrictionK    = clampF(getFloat(kv, "bhFrictionK", app.cfg.bhFrictionK), 0.0f, 100.0f, app.cfg.bhFrictionK);

@@ -16,7 +16,7 @@ Opened log file 'D:\Project\Nbody\tools\dumps\081526-11968-01.txt'
       ----> Repository : LocalInstalled, Enabled: true
       ----> Repository : UserExtensions, Enabled: true
 
->>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.469 seconds
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
 
 ************* Waiting for Debugger Extensions Gallery to Initialize **************
 
@@ -160,10 +160,10 @@ Debugging Details:
 KEY_VALUES_STRING: 1
 
     Key  : Analysis.CPU.mSec
-    Value: 1031
+    Value: 968
 
     Key  : Analysis.Elapsed.mSec
-    Value: 4183
+    Value: 1928
 
     Key  : Analysis.IO.Other.Mb
     Value: 0
@@ -175,10 +175,10 @@ KEY_VALUES_STRING: 1
     Value: 0
 
     Key  : Analysis.Init.CPU.mSec
-    Value: 328
+    Value: 312
 
     Key  : Analysis.Init.Elapsed.mSec
-    Value: 1102
+    Value: 628
 
     Key  : Analysis.Memory.CommitPeak.Mb
     Value: 83

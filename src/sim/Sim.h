@@ -6,11 +6,12 @@
 #include <string>
 
 // 초기조건 프리셋. 각 값이 파티클을 어디에 어떤 속도로 놓을지를 정한다.
+// **장면 셋만 둔다(2026-08-19).** 은하 충돌·블랙홀 장면을 지웠다 —
+// 블랙홀은 장면이 아니라 어느 장면에서나 켤 수 있는 설정(`blackHoleEnabled`)으로 남아 있고,
+// 충돌은 나선 은하 하나로 볼 수 있는 것을 둘로 늘린 것뿐이라 따로 둘 값이 없었다.
 enum class Preset {
     SpiralDisk,   // 나선 은하 하나 — 처음부터 나선팔 모양으로 깐다
-    TidalPair,    // 나선 은하 둘이 양옆에서 서로를 끌어당긴다
-    CosmicWeb,    // 균일 난수 + 미세 요동 — 우주 거대구조가 자란다
-    BlackHole,    // 중심에 블랙홀 — 휘어진 시공간의 최단경로를 따라 돈다
+    Filament,     // 판 전체를 고르게 채운 큐브 — 우주 필라멘트가 자란다. 눈금이 1000배다
     Empty,        // 빈 판. 마우스로 직접 만든다
 };
 
@@ -64,6 +65,25 @@ constexpr double kLightYearsPerUnit = 1.0e5;
 constexpr float kLightSpeed   = (float)(kYearsPerSimUnit / kLightYearsPerUnit);
 constexpr float kLightSpeedSq = kLightSpeed * kLightSpeed;
 
+// **판을 더 크게 보고 싶으면 길이 눈금만 늘린다 — 광속은 따라온다.**
+//
+// 위 식이 c = (시간 눈금)/(길이 눈금) 이므로, 판 한 변을 1000 배로 잡으면 광속이
+// 저절로 1000 분의 1 이 된다. 「1000 배 큰 우주를 보되 빛의 속도도 1/1000 로」는
+// 두 가지 요구가 아니라 **한 가지 요구의 앞뒷면**이다 — 눈금 하나만 바꾸면 된다.
+//
+// 필라멘트 장면이 `lengthScale = 1000` 을 쓴다. 판 한 변이 1억 광년(약 30 Mpc)이 되어
+// 실제 우주 거대구조(수십~수백 Mpc)의 눈금에 든다. 그때 c = 0.1 [판단위/시뮬단위].
+//
+// **시간 눈금은 건드리지 않는다.** 그것까지 바꾸면 별 수명·나이가 통째로 어긋나는데,
+// 이 장면에는 별이 없어 얻는 것이 없고 다른 장면과 견줄 자만 잃는다.
+inline float lightSpeedFor(float lengthScale) {
+    return kLightSpeed / (lengthScale > 1e-6f ? lengthScale : 1e-6f);
+}
+inline float lightSpeedSqFor(float lengthScale) {
+    const float c = lightSpeedFor(lengthScale);
+    return c * c;
+}
+
 // **참고 — 이 눈금에서 실제 우리 은하가 갖는 값들.**
 // 코드가 쓰는 값이 아니라, 지금 판이 실제와 얼마나 다른지 견주는 자
 //   회전 속도 220 km/s → 0.073 판단위/시뮬단위 (광속 100 의 0.07%)
@@ -82,6 +102,13 @@ struct SimConfig {
     // 나선팔이 유지된다 — 3D 로 옮기는 이유가 그것이다.
     int   particleCount        = 2000000;
     int   gridSize             = 128;    // 2의 거듭제곱만 쓴다(주기 wrap 을 비트 마스크로 처리)
+
+    // **판 한 변을 실제 몇 배로 볼 것인가.** 1 이면 우리 은하 하나(10만 광년).
+    //
+    // 이 값을 올리면 **광속이 그만큼 느려진다** — `lightSpeedFor` 참조. 같은 판 좌표가
+    // 더 먼 거리를 뜻하게 되므로 「초당 몇 판단위」로 잰 빛도 그만큼 느려지는 것이다.
+    // 필라멘트 장면이 1000 을 써서 한 변을 1억 광년(약 30 Mpc)으로 본다.
+    float lengthScale          = 1.0f;
 
     // 원반의 두께. 실제 나선 은하의 원반은 지름에 견주면 아주 얇다(대략 1/100).
     // 이 값이 0 이면 알갱이가 한 평면에 갇혀 2D 와 같아진다.

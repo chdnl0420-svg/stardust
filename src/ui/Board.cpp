@@ -244,13 +244,11 @@ bool ToolButton(const char* id, int shape, bool selected) {
 }
 
 struct Scene { Preset p; const char* name; const char* help; };
-constexpr int kSceneCount = 5;
+constexpr int kSceneCount = 3;
 const Scene kScenes[kSceneCount] = {
-    { Preset::SpiralDisk,  "나선 은하",   "나선 팔을 가진 은하 하나가 돕니다." },
-    { Preset::TidalPair,   "은하 충돌",   "나선 은하 둘이 양옆에서 서로를 끌어당겨 긴 꼬리를 남깁니다." },
-    { Preset::CosmicWeb,   "우주 거미줄", "고루 뿌려 두면 거미줄 구조가 자랍니다. 빠르기를 올려 보세요." },
-    { Preset::BlackHole,   "블랙홀",      "물질이 휘어진 시공간의 최단경로를 따라갑니다." },
-    { Preset::Empty,       "빈 우주",     "아무것도 없습니다. 놓기로 직접 채우세요." },
+    { Preset::SpiralDisk,  "나선 은하",     "나선 팔을 가진 은하 하나가 돕니다." },
+    { Preset::Filament,    "우주 필라멘트", "판 한 변이 1억 광년입니다. 암흑물질이 중력만으로 그물을 짭니다." },
+    { Preset::Empty,       "빈 우주",       "아무것도 없습니다. 놓기로 직접 채우세요." },
 };
 
 // 카드에 그 장면의 **실제 초기 배치**를 축소해 그린다.
@@ -286,27 +284,30 @@ void DrawScenePreview(ImDrawList* dl, const ImVec2& c, float w, float h, int sce
         case 0:  // 나선 은하
             spiral(0.f, 0.f, 1.0f, 11u, warm);
             break;
-        case 1:  // 은하 충돌 — 나선 둘이 양옆에
-            spiral(-w * 0.20f,  h * 0.06f, 0.62f, 23u, warm);
-            spiral( w * 0.20f, -h * 0.06f, 0.62f, 57u, cool);
-            break;
-        case 2:  // 우주 거미줄 — 판 전체에 고루
-            for (int i = 0; i < 210; ++i) {
-                const float x = (rnd((unsigned)i * 2u + 5u) - 0.5f) * w * 0.94f;
-                const float y = (rnd((unsigned)i * 2u + 6u) - 0.5f) * h * 0.90f;
-                dl->AddCircleFilled(ImVec2(c.x + x, c.y + y), 1.05f, cool, 4);
+        case 1: {
+            // 우주 필라멘트 — **고르게 뿌린 뒤 코어와 같은 식으로 민다.**
+            // 균일한 점만 찍으면 「그냥 뿌린 것」과 구별이 안 된다. `kPlace` 의 필라멘트
+            // 분기와 같은 변위(파장 셋을 겹친 사인·코사인)를 써야 미리보기가 실제로
+            // 자랄 그물의 씨앗을 보여 준다. **코어의 식을 바꾸면 여기도 함께 고친다.**
+            const float tau = 6.2831853f;
+            const float zc  = 0.5f;                    // 판 한가운데를 자른 단면
+            for (int i = 0; i < 260; ++i) {
+                float px = rnd((unsigned)i * 2u + 5u);
+                float py = rnd((unsigned)i * 2u + 6u);
+                float dx = 0.f, dy = 0.f;
+                for (int m = 0; m < 3; ++m) {
+                    const float k   = tau * (2.0f + (float)m * 2.0f);
+                    const float amp = 0.16f / (1.0f + (float)m);
+                    dx += amp * sinf(k * (py + 0.13f * (float)m)) * cosf(k * (zc + 0.29f));
+                    dy += amp * sinf(k * (zc + 0.19f * (float)m)) * cosf(k * (px + 0.37f));
+                }
+                px += dx; py += dy;
+                px -= floorf(px); py -= floorf(py);
+                dl->AddCircleFilled(ImVec2(c.x + (px - 0.5f) * w * 0.94f,
+                                           c.y + (py - 0.5f) * h * 0.90f), 1.05f, cool, 4);
             }
             break;
-        case 3:  // 블랙홀 — 가운데가 빈 고리와 지평선
-            for (int i = 0; i < 190; ++i) {
-                const float u = rnd((unsigned)i * 2u + 9u);
-                const float a = rnd((unsigned)i * 2u + 10u) * 6.2831853f;
-                const float r = R * (0.34f + 0.66f * sqrtf(u));
-                dl->AddCircleFilled(ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r), 1.1f, warm, 4);
-            }
-            dl->AddCircleFilled(c, R * 0.17f, IM_COL32(0, 0, 0, 255), 20);
-            dl->AddCircle(c, R * 0.17f, IM_COL32(255, 150, 90, 190), 20, 1.2f);
-            break;
+        }
         default: // 빈 우주 — 아무것도 없다
             dl->AddText(ImVec2(c.x - 7.0f, c.y - 9.0f), IM_COL32(107, 103, 121, 255), "+");
             break;
@@ -315,6 +316,11 @@ void DrawScenePreview(ImDrawList* dl, const ImVec2& c, float w, float h, int sce
 
 void SwitchScene(App& app, Preset p) {
     ApplyPresetDefaults(app.cfg, p);
+    // **필라멘트는 밀도로 봐야 보인다.** 주인공이 암흑물질인데 그것은 스스로 빛나지
+    // 않아 빛 모드에서는 화면이 거의 비어 보인다(`kScatterLight` 는 별만 그린다).
+    // 밀도 모드는 알갱이를 가리지 않고 전부 뿌리므로 그물이 드러난다.
+    // 다른 장면으로 돌아갈 때는 별빛으로 되돌린다 — 거기서는 그쪽이 주인공이다.
+    app.view.colorBy = (p == Preset::Filament) ? ColorBy::Density : ColorBy::Light;
     ApplyAutoGrid(app.cfg);
     app.applyConfig();
     app.sim.reset();

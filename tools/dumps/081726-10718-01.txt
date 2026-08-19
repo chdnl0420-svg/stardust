@@ -20,7 +20,7 @@ Opened log file 'D:\Project\Nbody\tools\dumps\081726-10718-01.txt'
 
 ************* Waiting for Debugger Extensions Gallery to Initialize **************
 
->>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.032 seconds
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
    ----> Repository : UserExtensions, Enabled: true, Packages count: 0
    ----> Repository : LocalInstalled, Enabled: true, Packages count: 46
 
@@ -101,28 +101,28 @@ Debugging Details:
 KEY_VALUES_STRING: 1
 
     Key  : Analysis.CPU.mSec
-    Value: 1312
+    Value: 937
 
     Key  : Analysis.Elapsed.mSec
-    Value: 8291
+    Value: 2896
 
     Key  : Analysis.IO.Other.Mb
-    Value: 5
+    Value: 0
 
     Key  : Analysis.IO.Read.Mb
     Value: 1
 
     Key  : Analysis.IO.Write.Mb
-    Value: 25
+    Value: 0
 
     Key  : Analysis.Init.CPU.mSec
-    Value: 500
+    Value: 312
 
     Key  : Analysis.Init.Elapsed.mSec
-    Value: 12956
+    Value: 646
 
     Key  : Analysis.Memory.CommitPeak.Mb
-    Value: 87
+    Value: 86
 
     Key  : Analysis.Version.DbgEng
     Value: 10.0.29617.1000

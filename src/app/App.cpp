@@ -192,7 +192,7 @@ void App::guardPerformance() {
     // 두고 보다가 기록만 남기고, 30초를 넘기면 멈춘다.
     {
         const SimTimings t = sim.timings();
-        const float c = kLightSpeed;
+        const float c = lightSpeedFor(cfg.lengthScale);
         if (running && t.maxSpeed > c * 0.98f) ++speedPinnedFrames;
         else                                    speedPinnedFrames = 0;
 
@@ -502,7 +502,9 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     //
     // 무너져 생기는 쪽은 알갱이끼리 부딪히게 해 두었을 때만 뜻이 있다. 버티는 힘이 있어야
     // 「중력이 그것을 이겼다」는 말이 성립하기 때문이다. 그래서 접촉과 함께 켜고 끈다.
-    cfg.blackHoleEnabled = (preset == Preset::BlackHole);
+    // 블랙홀은 이제 장면이 아니라 어느 장면에서나 켜는 설정이다(2026-08-19 에 장면을 지웠다).
+    // 판 어딘가가 무너지면 그때 생기고, 물질이 따라가는 길은 처음부터 놓인 것과 같다.
+    cfg.blackHoleEnabled = false;
     // 3D 로 오면서 기본을 끔으로 돌렸다.
     //
     // 밀도의 대비가 2D 와 완전히 다르다. 원반은 위아래로 얇아(두께가 지름의 1/50) 그 칸들의
@@ -546,13 +548,55 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     // **여기서 배율을 낮추는 것은 그 수정이 들어오기 전까지의 완화다** — 고친 뒤에는
     // 실제 비율(0.31)로 되돌릴지 다시 판단한다.
     cfg.timeScale = 0.18f;
-    if (preset == Preset::BlackHole) {
-        // 자기중력을 살려 둔다. 지평선 크기는 이제 삼킨 질량에서 나오고(rs = 2GM/c²),
-        // 그 G 가 곧 여기 있는 중력 세기다 — 0 으로 두면 블랙홀도 함께 사라진다.
-        // 낮게 잡아 알갱이끼리 뭉치는 것보다 중심이 주인공이 되게 한다.
-        cfg.gravity = 0.15f;
-        cfg.boundary = Boundary::Isolated;
-        cfg.pressureEnabled = false;
+
+    // ── 우주 필라멘트 — 판 전체가 우주 한 조각이다 ──────────────────────────
+    //
+    // 여기서 보려는 것은 은하 하나가 아니라 **암흑물질이 중력만으로 짜 내는 그물**이다.
+    // 그래서 은하 장면과 켜는 것이 정반대다 — 가스 물리를 전부 끄고 중력만 남긴다.
+    //
+    // **눈금이 1000 배다.** 판 한 변이 10만 광년(은하 하나)이 아니라 1억 광년(약 30 Mpc)
+    // 이고, 그 결과 광속이 100 → 0.1 로 떨어진다(`lightSpeedFor`). 실제 우주 거대구조가
+    // 수십~수백 Mpc 눈금이라 이 크기여야 필라멘트가 판 안에 들어온다.
+    if (preset == Preset::Filament) {
+        cfg.lengthScale = 1000.0f;
+
+        // 반대편으로 이어진다 — 우주론 계산의 표준이다. 고립 경계로 두면 판 가장자리가
+        // 곧 우주의 끝이 되어 전체가 가운데로 무너진다(그물이 아니라 공이 된다).
+        cfg.boundary = Boundary::Periodic;
+
+        // **물질의 85%가 암흑물질이다** — 실제 우주의 비율이고, 거대구조를 실제로
+        // 짜는 것이 그쪽이다. 보통 물질은 그 그물을 따라 흘러 들어갈 뿐이다.
+        // 암흑물질은 빛 모드에서 안 보이므로 이 장면은 밀도로 본다(호출부에서 정한다).
+        cfg.darkMatterFraction = 0.85f;
+
+        // 각운동량 — 판 전체에 얹는 약한 회전. 크게 주면 원심력이 중력을 이겨
+        // 그물이 자라기 전에 펴진다(2.0 에서 원반이 되기 전에 흩어진 실측이 있다).
+        cfg.spin = 0.15f;
+
+        // **가스 물리를 전부 끈다.** 냉각·압력·별 형성·별의 붕괴는 은하 눈금(광년)의
+        // 이야기이고, 여기 한 알갱이는 은하 하나보다 크다. 켜 두면 눈금이 안 맞는
+        // 계산이 도는 것이라 결과가 아니라 잡음이 된다.
+        cfg.coolingEnabled       = false;
+        cfg.pressureEnabled      = false;
+        cfg.starFormationEnabled = false;
+        cfg.collapseEnabled      = false;
+        cfg.contactEnabled       = false;
+        cfg.blackHoleEnabled     = false;
+
+        // **나머지 세 힘도 여기서 끈다 — 기본값이 꺼짐인 것으로는 부족하다.**
+        //
+        // `ApplyPresetDefaults` 가 안 건드리는 설정은 **장면을 갈아타도 그대로 따라온다.**
+        // 사용자가 전에 설정 창에서 전자기력을 켜 두었으면 필라멘트 장면에서도 켜진 채로
+        // 돌고, 그러면 「중력만으로 짜인 그물」이 아니라 전하가 밀고 당긴 무언가가 된다.
+        // 2026-08-19 에 사용자가 「중력 공식만으로 동작하는 걸로는 안 보였어」라고 알린
+        // 것이 이것이다 — 끄는 것을 빠뜨렸다.
+        cfg.strongForceEnabled = false;
+        cfg.emForceEnabled     = false;
+        cfg.weakForceEnabled   = false;
+
+        // 구조가 자라는 데 시간이 걸린다 — 은하가 한 바퀴 도는 눈금이 아니라
+        // 우주가 팽창해 온 눈금이다. 은하 장면(0.18)보다 훨씬 빠르게 흘려보낸다.
+        cfg.timeScale = 1.5f;
         return;
     }
     // 알갱이끼리 부딪히게 할지는 장면이 정하지 않는다 — 어느 장면에서든 체크박스로 켠다.
@@ -588,7 +632,7 @@ void ApplyPresetDefaults(SimConfig& cfg, Preset preset) {
     // 그때는 못 봤다.
     //
     // 벽에 튕기는 것을 고치려면 경계가 아니라 **그 벽에 닿지 않게** 해야 한다.
-    cfg.boundary = (preset == Preset::CosmicWeb) ? Boundary::Periodic : Boundary::Isolated;
+    cfg.boundary = Boundary::Isolated;
 
     // 압력 — **켠다(2026-08-16).**
     //

@@ -160,10 +160,10 @@ Debugging Details:
 KEY_VALUES_STRING: 1
 
     Key  : Analysis.CPU.mSec
-    Value: 953
+    Value: 937
 
     Key  : Analysis.Elapsed.mSec
-    Value: 2734
+    Value: 1990
 
     Key  : Analysis.IO.Other.Mb
     Value: 0
@@ -172,13 +172,13 @@ KEY_VALUES_STRING: 1
     Value: 1
 
     Key  : Analysis.IO.Write.Mb
-    Value: 1
+    Value: 0
 
     Key  : Analysis.Init.CPU.mSec
-    Value: 328
+    Value: 375
 
     Key  : Analysis.Init.Elapsed.mSec
-    Value: 615
+    Value: 654
 
     Key  : Analysis.Memory.CommitPeak.Mb
     Value: 84
