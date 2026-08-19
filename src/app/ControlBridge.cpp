@@ -275,6 +275,12 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 판을 열 때 중심에 놓는 블랙홀 — 켰는지와 그 무게. 여태 `reset` 안에 박혀 있어
         // 밖에서 켤 수도 되읽을 수도 없었다.
         "coreBhOn=%d\ncoreBhFrac=%.5f\ncoreSphere=%.4f\ncoreDiskDisp=%.4f\ncoreSpinLag=%.4f\n"
+        // **힘 스위치는 쓸 수만 있고 되읽을 수 없었다(2026-08-19 에 넣었다).**
+        // 그래서 「필라멘트는 중력만 돈다」를 밖에서 증명할 방법이 없었고, 실제로 강력·
+        // 전자기력·약력이 켜진 채 도는 것을 사용자가 눈으로 먼저 알아챘다.
+        // 끄는 코드를 넣는 것만으로는 부족하다 — **껐다는 것을 잴 수 있어야 한다.**
+        "coreStrong=%d\ncoreEm=%d\ncoreWeak=%d\ncoreSpin=%.4f\ncoreLenScale=%.1f\n"
+        "coreHubble=%.4f\n"
         // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
         //
         // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
@@ -313,7 +319,10 @@ std::string ControlBridge::statusBody(const App& app) const {
         app.cfg.coolingEnabled ? 1 : 0,
         app.cfg.starFormationEnabled ? 1 : 0,
         app.cfg.starCollapseToBH ? 1 : 0,
-        app.running ? 1 : 0, app.sim.simTime(), app.sim.simTime() * kYearsPerSimUnit,
+        // **시간 환율은 장면의 눈금을 따른다.** 필라멘트는 판이 1000 배 크고 시간도
+        // 1000 배라, 고정 상수를 쓰면 100억 년을 1000만 년이라 말하게 된다.
+        app.running ? 1 : 0, app.sim.simTime(),
+        app.sim.simTime() * yearsPerSimUnitFor(app.cfg.lengthScale),
         app.sim.activeCount(), app.sim.starCount(),
         app.view.mode == RenderMode::Points ? "points" : "field",
         // **`Ash` 가 빠져 있어 재 보기가 `density` 로 보고됐다(2026-08-18에 고침).**
@@ -365,6 +374,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         sim.config().starEmbedTime, sim.config().haloGasFraction,
         sim.config().blackHoleEnabled ? 1 : 0, sim.config().centralBHFraction,
         sim.config().sphereStart, sim.config().diskDispersion, sim.config().diskSpinLag,
+        sim.config().strongForceEnabled ? 1 : 0, sim.config().emForceEnabled ? 1 : 0,
+        sim.config().weakForceEnabled ? 1 : 0, sim.config().spin, sim.config().lengthScale,
+        sim.config().hubble,
         // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
         // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
         sim.config().coolingRate, sim.config().starFormEfficiency,
@@ -586,6 +598,8 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "displayGamma"))   app.view.gamma         = clampF(getFloat(kv, "displayGamma", app.view.gamma), 0.5f, 4.0f, app.view.gamma);
         if (has(kv, "hud"))            app.view.showHud       = getInt(kv, "hud", 1) != 0;
         if (has(kv, "spin"))           app.cfg.spin = clampF(getFloat(kv, "spin", app.cfg.spin), -3.0f, 3.0f, app.cfg.spin);
+        // 허블 팽창. 음수(수축)도 받되 판을 곧장 터뜨릴 값은 코어가 자른다.
+        if (has(kv, "hubble"))         app.cfg.hubble = clampF(getFloat(kv, "hubble", app.cfg.hubble), -3.0f, 3.0f, app.cfg.hubble);
         if (has(kv, "strongForce"))    app.cfg.strongForceEnabled = getInt(kv, "strongForce", 0) != 0;
         if (has(kv, "emForce"))        app.cfg.emForceEnabled     = getInt(kv, "emForce", 0) != 0;
         if (has(kv, "weakForce"))      app.cfg.weakForceEnabled   = getInt(kv, "weakForce", 0) != 0;

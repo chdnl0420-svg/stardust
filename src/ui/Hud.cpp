@@ -111,9 +111,11 @@ void DrawHud(const App& app) {
         // 흐른 시간을 무차원 t 가 아니라 **천문 시간**으로 적는다. 별의 한살이를 보는 판이라
         // "t 0.096" 보다 "96만 년"이 훨씬 많은 것을 말한다 — 무거운 별 하나가 1000만 년을
         // 사는데, 그것이 화면에서 10초라는 것을 이 줄로 알 수 있어야 한다.
-        // 환율은 kYearsPerSimUnit(Sim.h). 자릿수가 넓어 세 구간으로 나눠 적는다.
+        // 환율은 **장면의 눈금을 따른다**(`yearsPerSimUnitFor`). 필라멘트는 판이 1000 배
+        // 크고 시간도 1000 배라, 고정 상수를 쓰면 100억 년을 1000만 년이라 적게 된다.
+        // 자릿수가 넓어 세 구간으로 나눠 적는다.
         char age[32];
-        const double yrs = app.sim.simTime() * kYearsPerSimUnit;
+        const double yrs = app.sim.simTime() * yearsPerSimUnitFor(app.cfg.lengthScale);
         if      (yrs >= 1.0e8) snprintf(age, sizeof(age), "%.2f\xEC\x96\xB5 \xEB\x85\x84", yrs / 1.0e8);
         else if (yrs >= 1.0e4) snprintf(age, sizeof(age), "%.0f\xEB\xA7\x8C \xEB\x85\x84", yrs / 1.0e4);
         else                   snprintf(age, sizeof(age), "%.0f \xEB\x85\x84", yrs);

@@ -2312,6 +2312,28 @@ __global__ void kAddSpin(const float4* pos, float4* vel, int n, float omega) {
     vel[i] = v;
 }
 
+// **허블 팽창** — 알갱이를 중심에서 바깥으로, 거리에 비례해 민다(`v = H·r`).
+//
+// 이것이 우주 그물을 만드는 열쇠다. 팽창이 없으면 판이 통째로 한 점으로 무너져
+// 필라멘트가 아니라 공이 된다(2026-08-19 실측: 점유셀 183만 → 5.8만).
+// 팽창이 그 전체 붕괴를 붙잡아 두면 **국소 요동만 자라** 그물이 남는다.
+//
+// 강체 회전(`kAddSpin`)과 달리 **방향이 지름 방향**이라 각운동량을 안 만든다 —
+// 실제 우주 팽창도 회전이 아니다.
+//
+// 비용: N 스레드 × O(1). 판을 깔 때 한 번.
+__global__ void kAddHubble(const float4* pos, float4* vel, int n, float H) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;
+    float4 v = vel[i];
+    v.x += H * (p.x - 0.5f);
+    v.y += H * (p.y - 0.5f);
+    v.z += H * (p.z - 0.5f);
+    vel[i] = v;
+}
+
 // 셀 키(정렬용). 빈 슬롯은 -1 로 두어 뒤로 밀린다.
 __global__ void kCellKey(const float4* pos, int n, int G, int* keys, int* idx) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3985,6 +4007,10 @@ void Sim::reset() {
     // 통째로 덮어써 사라진다.
     if (d.cfg.spin != 0.0f)
         kAddSpin<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.cfg.spin);
+    // 팽창은 회전 **뒤에** 얹는다. 둘은 방향이 달라(지름 대 접선) 순서가 결과를 안 바꾸지만,
+    // 회전을 먼저 두어야 「도는 판이 부푼다」는 읽는 순서와 맞는다.
+    if (d.cfg.hubble != 0.0f)
+        kAddHubble<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.vel, d.allocN, d.cfg.hubble);
 
     // **무게중심을 정지시킨다.** 궤도 속도·회전·난수를 다 주고 나면 그 합이 정확히 0 이
     // 되지 않고, 그 나머지가 판 전체를 한 방향으로 민다. 2026-08-16 실측: 70초에 은하
