@@ -2059,22 +2059,38 @@ static constexpr int kSpiralBins = 16;
 // 부르는 쪽이 링별로 나눈 뒤 평균하면 나선 진폭이고, 링을 다 더한 뒤 나누면
 // 예전 값(= 막대 진폭)이 그대로 나온다 — 둘 다 이 한 번의 훑기로 나온다.
 //
-// 비용: G³ 스레드 × 3 atomicAdd = 3G³. G=128 이면 630만 회(예전과 같다 —
-// 링을 갈랐을 뿐 스레드당 원자연산 수는 그대로다). status 를 물을 때만 돈다.
-__global__ void kSpiralM2(const float* rho, int G, int S, int bins,
+// ── 격자가 아니라 **알갱이에서 직접** 잰다 (2026-08-19 에 옮겼다) ──────────
+//
+// 예전에는 밀도 격자 `rho` 를 훑었다. 그것이 값을 두 개로 갈라 놓고 있었다.
+//
+// `rho` 는 **스텝 중에 다른 용도로 빌려 쓰인다** — 격자를 하나 더 잡지 않으려고
+// 압력 쪽에서 `cellCnt`(칸에 직접 센 개수)를 그 위에 복사해 넣는다(`step` 안).
+// 그래서 `measureEmergence` 가 언제 불리느냐에 따라 **CIC 로 부드럽게 뿌린 개수 밀도**
+// 를 읽기도 하고 **칸에 딱 떨어지게 센 개수**를 읽기도 했다. 둘은 다른 분포다.
+//
+// 실측(2026-08-19): 판을 세워 두고 0.4초 간격으로 열 번 읽으니 값이 두 무리로 갈렸다 —
+// 진폭 0.28 대(pitch 26°)와 0.43 대(pitch 60~66°)가 번갈아 나왔고, **각 무리 안에서는
+// 매끄럽게 이어졌다.** 잡음이 아니라 서로 다른 두 신호를 번갈아 본 것이다.
+// 어제 나선팔을 열한 번 시험하며 본 「요동」의 상당 부분이 이것이었다.
+//
+// 알갱이에서 직접 재면 빌려 쓰는 격자를 아예 안 거친다. 곁들여 격자 해상도에도
+// 안 묶이고, 비용도 준다(격자 훑기 630만 → 300만 원자연산).
+//
+// 개수로 센다(알갱이 하나를 1 로). `kScatter` 가 질량을 안 곱하고 개수를 뿌리므로
+// 예전 값과 같은 뜻을 유지하는 쪽이다 — 여기서 질량 가중으로 바꾸면 고치는 것이
+// 둘이 되어 무엇이 값을 바꿨는지 못 가른다.
+//
+// 비용: N 스레드 × 3 atomicAdd = 3N. N=100만이면 300만 회. status 를 물을 때만 돈다.
+__global__ void kSpiralM2(const float4* pos, int n, int bins,
                           double* out /* [3*bins]: 링마다 re, im, sum */) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int z = blockIdx.z * blockDim.z + threadIdx.z;
-    if (x >= G || y >= G || z >= G) return;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float4 p = pos[i];
+    if (p.x < 0.f) return;                          // 죽은 자리
 
-    const float fx = ((float)x + 0.5f) / (float)G - 0.5f;
-    const float fy = ((float)y + 0.5f) / (float)G - 0.5f;
+    const float fx = p.x - 0.5f, fy = p.y - 0.5f;   // 판 중심이 (0.5, 0.5)
     const float r2 = fx * fx + fy * fy;
-    if (r2 < 0.01f || r2 > 0.25f) return;          // 반지름 0.1~0.5 만 본다
-
-    const float d = rho[(size_t)(z * S + y) * S + x];
-    if (d <= 0.f) return;
+    if (r2 < 0.01f || r2 > 0.25f) return;           // 반지름 0.1~0.5 만 본다
 
     // 0.1~0.5 를 bins 등분. 위쪽 경계(r=0.5)가 그대로 bins 가 되므로 잘라 준다 —
     // 안 자르면 out 배열 밖에 쓴다(이 판에서 배열 밖 쓰기는 시스템을 재부팅시킨다).
@@ -2083,9 +2099,9 @@ __global__ void kSpiralM2(const float* rho, int G, int S, int bins,
     if (b >= bins) b = bins - 1;
 
     const float th2 = 2.0f * atan2f(fy, fx);
-    atomicAdd(&out[3 * b + 0], (double)(d * __cosf(th2)));
-    atomicAdd(&out[3 * b + 1], (double)(d * __sinf(th2)));
-    atomicAdd(&out[3 * b + 2], (double)d);
+    atomicAdd(&out[3 * b + 0], (double)__cosf(th2));
+    atomicAdd(&out[3 * b + 1], (double)__sinf(th2));
+    atomicAdd(&out[3 * b + 2], 1.0);
 }
 
 // 한 칸에 알갱이가 얼마나 몰렸는지 — **원자 연산 경합의 선행 지표다.**
@@ -4376,10 +4392,10 @@ Sim::Emergence Sim::measureEmergence() const {
     // 링별로 재고 평균하면 **나선**(`spiralM2`), 링을 다 더한 뒤 나누면 **막대**(`barM2`).
     // 왜 둘이 다른지는 `kSpiralM2` 주석에 실측표와 함께 적었다 — 한 줄로는,
     // 나선은 반지름마다 팔이 감겨 통째로 합치면 스스로 지워지고 막대는 안 지워진다.
-    if (d.rho) {
+    if (d.pos && d.allocN > 0) {
         const int kBins = kSpiralBins;
         CK(cudaMemset(d.redD, 0, sizeof(double) * 3 * kBins));
-        kSpiralM2<<<grd3(G), blk3()>>>(d.rho, G, d.stride(), kBins, d.redD);
+        kSpiralM2<<<(d.allocN + 255) / 256, 256>>>(d.pos, d.allocN, kBins, d.redD);
         double h[3 * kSpiralBins] = {};
         CK(cudaMemcpy(h, d.redD, sizeof(double) * 3 * kBins, cudaMemcpyDeviceToHost));
 
@@ -4402,16 +4418,76 @@ Sim::Emergence Sim::measureEmergence() const {
         // |Σ Z_b| ≤ Σ |Z_b| 이 보장하는 것은 `barM2` ≤ **가중**평균까지이고,
         // 고른 평균은 그 아래로 내려갈 수 있다 — 안쪽 링만 팔이 세고 바깥이 밋밋하면
         // 그렇게 된다. 실측에서 14 표본 중 5 번 그랬다(2026-08-19). 버그가 아니다.
+        //
+        // 같은 훑기에서 **링별 위상**도 모은다 — 그 기울기가 곧 팔이 감긴 각도다.
+        // 진폭만으로는 막대와 나선을 못 가른다(둘 다 m=2 가 크다). 가르는 것은 위상이다.
+        constexpr double kPi = 3.14159265358979323846;
         double acc = 0.0;
         int used = 0;
+        double lnr[kSpiralBins] = {}, unw[kSpiralBins] = {};
+        double prevPh = 0.0;
         for (int b = 0; b < kBins; ++b) {
             const double s = h[3 * b + 2];
             if (s <= floorSum || s <= 1e-9) continue;
-            acc += sqrt(h[3 * b + 0] * h[3 * b + 0] + h[3 * b + 1] * h[3 * b + 1]) / s;
+            const double re = h[3 * b + 0], im = h[3 * b + 1];
+            acc += sqrt(re * re + im * im) / s;
+
+            // 위상을 잇는다(unwrap). atan2 는 −π~π 로 접혀 나오므로 이웃 링과의 차를
+            // (−π, π] 로 되접어 누적해야 「계속 감기는 각도」가 된다.
+            // **링당 위상차가 π 를 넘으면 못 푼다** — pitch 3° 아래가 그렇다(실측:
+            // 5° 는 링당 132°로 안전, 3° 는 220°로 불가). 실제 나선은하는 10~40° 다.
+            const double ph = atan2(im, re);
+            if (used == 0) {
+                unw[0] = ph;
+            } else {
+                double dd = ph - prevPh;
+                while (dd >  kPi) dd -= 2.0 * kPi;
+                while (dd < -kPi) dd += 2.0 * kPi;
+                unw[used] = unw[used - 1] + dd;
+            }
+            prevPh = ph;
+            lnr[used] = log(0.1 + ((double)b + 0.5) / (double)kBins * 0.4);
             ++used;
         }
         if (used > 0) e.spiralM2 = acc / (double)used;
         e.spiralRings = used;
+
+        // ── 팔이 감긴 각도(pitch angle) ────────────────────────────────────
+        //
+        // 로그 나선은 θ(r) = θ₀ + ln(r)/tan(i) 이고 m=2 위상은 그 두 배다:
+        //
+        //   dφ/d(ln r) = 2/tan(i)   →   i = atan( 2 / |dφ/d ln r| )
+        //
+        // 기울기가 0 이면 반지름이 달라도 각도가 같다는 뜻 — 그것이 **막대**(90°)다.
+        // 실제 나선은하는 10~40°(Sa 는 6° 안팎, Sc 는 20~30°).
+        //
+        // 합성 데이터로 알고리즘을 먼저 검증했다(2026-08-19): 넣은 값 7~40° 와 막대를
+        // 전부 오차 0.1° 안에서 되찾았다. **팔이 없으면 이 값은 뜻이 없다** —
+        // 위상이 잡음이면 기울기도 잡음이다. `spiralM2` 와 반드시 함께 읽는다.
+        if (used >= 4) {
+            double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+            for (int k = 0; k < used; ++k) {
+                sx += lnr[k]; sy += unw[k];
+                sxx += lnr[k] * lnr[k]; sxy += lnr[k] * unw[k];
+            }
+            const double den = (double)used * sxx - sx * sx;
+            if (fabs(den) > 1e-12) {
+                const double slope = ((double)used * sxy - sx * sy) / den;
+                e.spiralPitch = (fabs(slope) < 1e-6)
+                              ? 90.0
+                              : atan(2.0 / fabs(slope)) * 180.0 / kPi;
+
+                // 패턴이 지금 어느 각도에 있는가 — 회귀 직선을 r=0.3(원반 대표 반지름)
+                // 에 넣어 읽는다. **이 값이 시간에 따라 고르게 도는지가 「팔이 유지되는가」다.**
+                // 진폭이 커도 매 순간 다른 각도에 뭉치면 그것은 팔이 아니라 잡음이다.
+                // m=2 라 팔은 π 주기이므로 절반을 취해 −90~90° 로 접는다.
+                const double icept = (sy - slope * sx) / (double)used;
+                double ang = (icept + slope * log(0.3)) * 0.5 * 180.0 / kPi;
+                while (ang >   90.0) ang -= 180.0;
+                while (ang <= -90.0) ang += 180.0;
+                e.spiralPhase = ang;
+            }
+        }
     }
 
     // ── 금속 기울기: 재를 안·중간·바깥 세 구간으로 ─────────────────────

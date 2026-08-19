@@ -235,7 +235,13 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 막대를 말한다. barM2 만 크면 팔이 아니라 막대(또는 두 덩어리로 갈린 것)다 —
         // 2026-08-19 이전에는 뒤엣것 하나만 있었고, 그것을 팔로 읽어 열한 번을 헤맸다.
         // spiralRings 가 16 보다 많이 작으면 판이 비어 spiralM2 를 믿을 수 없다.
+        //
+        // **spiralPitch 가 막대와 나선을 가른다.** 90° 는 안 감긴 것(막대), 실제 나선은하는
+        // 10~40°. 진폭(spiralM2)만으로는 둘이 구별되지 않는다 — 둘 다 m=2 가 크다.
+        // spiralPhase 는 팔이 지금 놓인 각도(r=0.3 기준)로, **시간에 따라 고르게 도는지가
+        // 「유지되는가」의 답**이다. 진폭이 커도 매번 다른 각도면 팔이 아니라 잡음이다.
         "spiralM2=%.4f\nbarM2=%.4f\nspiralRings=%d\n"
+        "spiralPitch=%.1f\nspiralPhase=%.1f\n"
         "ashInner=%.1f\nashMid=%.1f\nashOuter=%.1f\n"
         // 위 재 분포가 착시인지 가르는 값들 — 재를 뿌린 칸 수와 알갱이 분포.
         "ashCellsIn=%d\nashCellsOut=%d\nnInner=%d\nnMid=%d\nnOuter=%d\n"
@@ -330,6 +336,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         cons.darkMatter, cons.bad,
         cons.maxCellCount, cons.momentum,
         emg.spiralM2, emg.barM2, emg.spiralRings,
+        emg.spiralPitch, emg.spiralPhase,
         emg.ashInner, emg.ashMid, emg.ashOuter,
         emg.ashCellsInner, emg.ashCellsOuter, emg.nInner, emg.nMid, emg.nOuter,
         sim.bornAshMean(),
