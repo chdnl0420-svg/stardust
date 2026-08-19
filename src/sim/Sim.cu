@@ -183,6 +183,22 @@ __device__ __forceinline__ float3 spherePoint(float R, unsigned s) {
     return make_float3(r * sz * __cosf(ph), r * sz * __sinf(ph), r * cz);
 }
 
+// **공 안에 고르게** — 빅뱅의 첫 덩어리를 만드는 자리.
+//
+// `bulgePoint`(r = R·u²)나 `spherePoint`(은하 반지름 분포)와 **반지름 분포가 다르다.**
+// 저 둘은 중심으로 몰리는데, 여기서는 밀도가 고른 공이어야 한다 — 처음부터 가운데가
+// 무거우면 팽창해도 그 자리가 그대로 남아 「중심이 있는 우주」가 된다.
+//
+// 부피가 r³ 로 자라므로 **세제곱근**을 취해야 고르게 찬다. `u` 를 그냥 반지름으로 쓰면
+// 중심이 빽빽해진다(부피가 작은 안쪽에 같은 수가 들어가므로).
+__device__ __forceinline__ float3 ballPoint(float R, unsigned s) {
+    const float r  = R * cbrtf(fmaxf(rnd01(s), 1e-9f));
+    const float cz = rnd01(s * 3u + 1u) * 2.0f - 1.0f;     // cos θ 를 균등하게
+    const float sz = sqrtf(fmaxf(1.0f - cz * cz, 0.0f));
+    const float ph = rnd01(s * 7u + 5u) * 6.2831853f;
+    return make_float3(r * sz * __cosf(ph), r * sz * __sinf(ph), r * cz);
+}
+
 __device__ __forceinline__ float3 diskPoint(float R, float thickness, unsigned s) {
     const float u2 = rnd01(s * 3u + 1u);
     const float r  = galaxyRadius(R, s);
@@ -344,7 +360,11 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
             x = 0.5f + p.x; y = 0.5f + p.y; z = 0.5f + p.z;
         }
     } else if (preset == 1) {                    // 우주 필라멘트 — 고르게 깔고 씨앗을 심는다
-        x = u1; y = u2; z = u3;
+        // **공 안에 고르게 깐다.** 큐브로 깔면 접었을 때 정육면체 덩어리가 보이고,
+        // 팽창해도 모서리 방향이 한동안 남는다 — 빅뱅에 모서리는 없다.
+        // 반지름 0.5 로 깔아 판에 꽉 채우고, 아래에서 `bigBangShrink` 로 접는다.
+        const float3 b = ballPoint(0.5f, s ^ 0x6C8E9CF5u);
+        x = 0.5f + b.x; y = 0.5f + b.y; z = 0.5f + b.z;
 
         // **알갱이를 밀어 밀도 요동을 만든다.**
         //
@@ -367,8 +387,18 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
             dz += amp * __sinf(k * (x + 0.23f * (float)m)) * __cosf(k * (y + 0.11f));
         }
         x += dx; y += dy; z += dz;
-        // 판 밖으로 밀려 나간 것은 반대편으로 감는다.
-        x -= floorf(x); y -= floorf(y); z -= floorf(z);
+
+        // 구 밖으로 밀려 나간 것은 **표면에 붙인다.** 예전처럼 반대편으로 감으면
+        // (`x -= floorf(x)`) 한쪽 끝의 알갱이가 반대쪽에 나타나 **구가 깨진다** —
+        // 그것은 판이 주기 경계였을 때의 처리다. 지금은 고립 경계이고 모양이 공이다.
+        {
+            const float rx = x - 0.5f, ry = y - 0.5f, rz = z - 0.5f;
+            const float rr = sqrtf(rx * rx + ry * ry + rz * rz);
+            if (rr > 0.5f) {
+                const float k = 0.5f / rr;
+                x = 0.5f + rx * k; y = 0.5f + ry * k; z = 0.5f + rz * k;
+            }
+        }
 
         // ── 빅뱅 — 방금 만든 무늬를 통째로 접어 한 덩어리로 모은다 ──────────────
         //
