@@ -206,16 +206,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     // 보이는 화면의 가로축·세로축으로 옮긴다 — 회전 행렬의 첫 두 행이
                     // 곧 그 축이다.
                     //
-                    // 부호: 마우스를 오른쪽으로 끌면 **판이 오른쪽으로 따라와야** 하므로
-                    // 카메라는 왼쪽(가로축의 반대)으로 간다. 세로는 창 좌표가 아래로
-                    // 커지는 것과 화면 세로축이 위로 커지는 것이 맞물려 그대로 더한다.
-                    const float unit = (float)(g_w < g_h ? g_w : g_h);
-                    const float dx = (now.x - g_dragLast.x) * s / unit;
-                    const float dy = (now.y - g_dragLast.y) * s / unit;
+                    // 부호: 마우스를 오른쪽으로 끌면 **판이 오른쪽으로 따라와야** 한다.
+                    // 화면 좌표가 `ox = row0·(p − cam)` 이라 카메라를 +row0 로 옮기면 모든 점의
+                    // ox 가 줄어 판이 왼쪽으로 간다 — 그러니 카메라는 **−row0** 로 가야 한다.
+                    // (2026-08-19 에 이 부호를 두 번 뒤집었다. 사용자 보고 「좌우가 반대」→ +로
+                    //  바꿨더니 「다시 반대로 됐어 회귀됐어」. 수학으로 확정: 음수가 맞다.
+                    //  첫 보고 때 반대였던 것은 아마 우클릭 조준의 좌우였을 것이다.)
+                    // 세로도 음수다. 「창 좌표가 아래로 커지고 화면은 `fyp=(1−v)·H` 로 뒤집혀
+                    // 그려지니 그대로 더한다」고 유도했는데 실측이 반대였다(2026-08-19 사용자
+                    // 보고 「위아래도 반대로 돼있어」, 조작을 좌클릭 드래그로 특정한 뒤 고침).
+                    // 유도가 두 번 어긋난 자리라 **부호는 사용자 실측을 따르고**, 바꿀 때는
+                    // 가로·세로 둘을 한 번에 사용자에게 확인받는다.
+                    // **가까이 있을수록 조금씩 움직인다(2026-08-19).** 화면에 보이는 폭이
+                    // 카메라와 판 중심 사이 거리에 비례하므로(원근), 마우스가 화면을 한 번
+                    // 가로지를 때 카메라가 「지금 보이는 폭」만큼 가게 하면 어느 거리에서나
+                    // 판이 손을 따라온다. 거리를 안 곱하면 확대해 놓았을 때 조금만 끌어도
+                    // 화면이 통째로 날아간다(사용자 보고: 「확대됐을때 너무 화면이 빨리 변해」).
+                    // 휠 확대(아래 WM_MOUSEWHEEL)와 같은 거리 기준을 쓴다.
                     const float* rx = g_app->camRot + 0;   // 화면 가로축
                     const float* ry = g_app->camRot + 3;   // 화면 세로축
+                    const float* rz = g_app->camRot + 6;   // 화면 깊이축
+                    const float toC[3] = { 0.5f - g_app->camPos[0],
+                                           0.5f - g_app->camPos[1],
+                                           0.5f - g_app->camPos[2] };
+                    const float dist = toC[0]*rz[0] + toC[1]*rz[1] + toC[2]*rz[2];
+                    const float ref  = (dist > 0.05f) ? dist : 0.05f;
+                    // 그 거리에서 화면 세로가 덮는 폭 = 2·dist·tan(fov/2). 세로 픽셀로 나눠
+                    // 픽셀당 이동량을 낸다. 가로도 같은 눈금이라야 종횡비가 안 뒤틀린다.
+                    const float span = 2.0f * ref * std::tan(g_app->camFovY * 0.5f);
+                    const float perPx = span / (float)(g_h > 0 ? g_h : 1) * s;
+                    const float dx = (now.x - g_dragLast.x) * perPx;
+                    const float dy = (now.y - g_dragLast.y) * perPx;
                     for (int k = 0; k < 3; ++k)
-                        g_app->camPos[k] += -rx[k] * dx + ry[k] * dy;
+                        g_app->camPos[k] += -rx[k] * dx - ry[k] * dy;
                 } else {
                     // 화면 픽셀 이동량을 시뮬레이션 공간 이동량으로 바꾼다.
                     // 짧은 변이 [0,1] 에 대응하므로 그 값으로 나눈다.
@@ -249,20 +272,48 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_app->camPos[0] = 0.5f;
                 g_app->camPos[1] = 0.5f;
                 g_app->camPos[2] = -0.6f;
+                g_app->camFovY = 1.0f;                // 휠로 좁혀 둔 시야각도 처음으로
             }
             return 0;
 
         case WM_MOUSEWHEEL:
-            if (g_app && !ImGui::GetIO().WantCaptureMouse) {
+            // **우클릭을 누르고 있는 동안(자유 모드)은 휠을 무시한다(2026-08-19).**
+            // 그때는 WASD 로 앞뒤를 오가므로 휠 확대가 겹치면 두 조작이 같은 일을 다르게 해
+            // 헷갈린다. 사용자 요청: 「패널 모드에서 휠로 줌 기능은 살려줘. 자유모드일때는
+            // 동작안하게해주고」.
+            if (g_app && !g_orbiting && !ImGui::GetIO().WantCaptureMouse) {
                 float d = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
                 if (g_app->ui.wheelInverted) d = -d;
                 // 한 칸에 얼마나 확대할지. 설정의 「휠 확대 속도」가 1.0 일 때 12% 다.
                 const float step = 1.0f + 0.15f * g_app->ui.wheelZoomSpeed;
-                g_app->zoom *= (d > 0) ? step : (1.0f / step);
-                const float mz = MinZoom();     // 판이 화면을 꽉 채우는 선까지만 줄인다
-                if (g_app->zoom < mz)     g_app->zoom = mz;
-                if (g_app->zoom > 64.0f)  g_app->zoom = 64.0f;
-                ClampPan(*g_app);
+                if (g_app->camFly) {
+                    // **원근에서 확대란 카메라를 앞으로 옮기는 것이다**(돌리 줌).
+                    //
+                    // 처음엔 시야각을 좁혔는데(망원렌즈) 하한 17도까지 좁혀도 3.6배라, 예전
+                    // 궤도 모드의 64배에 한참 못 미쳤다(2026-08-19 사용자 보고: 「확대가
+                    // 이전보다 덜되는데」). 시야각은 좁힐수록 원근이 사라져 평면처럼 보이는
+                    // 한계도 있다. 가까이 보는 것의 본질은 **가까이 가는 것**이다 — 자유
+                    // 모드의 W/S 와 같은 일을 우클릭 없이 휠로 한다.
+                    //
+                    // 한 칸에 「지금 판 중심까지 거리」의 일정 비율만큼 간다. 그래야 멀리서는
+                    // 성큼, 가까이서는 조금씩 움직여 원하는 자리에 세우기 쉽다. 판 중심을
+                    // 지나쳐 뒤로 넘어가지 않게 최소 거리를 둔다.
+                    const float* rz = g_app->camRot + 6;   // 화면 깊이축(보는 방향)
+                    const float toC[3] = { 0.5f - g_app->camPos[0],
+                                           0.5f - g_app->camPos[1],
+                                           0.5f - g_app->camPos[2] };
+                    // 보는 방향으로 잰 판 중심까지의 거리(뒤에 있으면 음수).
+                    const float dist = toC[0]*rz[0] + toC[1]*rz[1] + toC[2]*rz[2];
+                    const float ref  = (dist > 0.05f) ? dist : 0.05f;
+                    const float mv   = ((d > 0) ? 1.f : -1.f) * ref * (step - 1.0f);
+                    for (int k = 0; k < 3; ++k) g_app->camPos[k] += rz[k] * mv;
+                } else {
+                    g_app->zoom *= (d > 0) ? step : (1.0f / step);
+                    const float mz = MinZoom();     // 판이 화면을 꽉 채우는 선까지만 줄인다
+                    if (g_app->zoom < mz)     g_app->zoom = mz;
+                    if (g_app->zoom > 64.0f)  g_app->zoom = 64.0f;
+                    ClampPan(*g_app);
+                }
             }
             return 0;
 

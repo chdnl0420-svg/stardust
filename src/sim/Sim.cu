@@ -387,7 +387,8 @@ __global__ void kPlace(float4* pos, float4* vel, int n, int preset,
 __global__ void kSetOrbit(float4* vel, const float4* pos,
                           const float* accMag, int n,
                           float bulgeR, float2 base, float thickness,
-                          unsigned seed, float haloGasFrac) {
+                          unsigned seed, float haloGasFrac, float diskDisp,
+                          float diskSpinLag) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float4 p = pos[i];
@@ -403,10 +404,32 @@ __global__ void kSetOrbit(float4* vel, const float4* pos,
     const float v = sqrtf(fmaxf(accMag[i], 0.f) * r);
 
     // 팽대부에 가까울수록 회전보다 흩어짐이 지배한다 — 실제 은하의 중심부가 그렇다.
-    // 원반 쪽 흩어짐은 0 이다 — 압력(속도 분산 텐서)이 그 일을 한다(`orbitDispersion` 을 지운 이유).
+    //
+    // **원반에도 태어날 때의 속도 분산을 준다(2026-08-19, `diskDisp`).**
+    //
+    // 전에는 원반 쪽 흩어짐을 0 으로 두고 「압력이 그 일을 한다」고 적었다. 그런데 나선팔
+    // 시도 9회가 전부 m=2 요동으로 실패했고, 마지막 시도(별을 냉각·압력에서 뺀 것)가 Q 를
+    // 0.05→0.14 로 올리긴 했으나 실제 나선은하(1~2)의 1/10 에 머물렀다. 원반이 **태어날
+    // 때부터 완벽한 원운동**이라 Q 가 0 에서 출발하고, 별은 부딪히지 않아 뜨거워질 길이 없다.
+    //
+    // 실제 별은 가스 구름의 난류를 물려받아 태어날 때부터 속도 분산을 갖는다 — 얇은 원반
+    // 별의 분산이 회전 속도의 10~20% 다. 그것이 곧 「Q 가 1 근처인 원반」의 초기 조건이고,
+    // 이 판에는 그것이 없었다. 연출이 아니라 빠져 있던 초기 조건이다.
+    //
+    // 팽대부 몫(0.85·bulgeMix)과 합쳐 하나의 `disp` 로 쓴다 — 아래 `g1·v·disp` 통로가 이미
+    // 있어 식이 안 바뀐다.
     const float bulgeMix = (bulgeR > 0.f) ? __expf(-(r * r) / (bulgeR * bulgeR)) : 0.f;
-    const float disp = 0.85f * bulgeMix;
-    float spin = 1.0f - 0.55f * bulgeMix;
+    const float disp = 0.85f * bulgeMix + diskDisp * (1.0f - bulgeMix);
+    // **분산을 준 만큼 회전을 덜 준다 — 비대칭 흐름(asymmetric drift).**
+    //
+    // 실제 별 원반은 원 궤도 속도로 돌지 않는다. 속도 분산이 있으면 그 압력이 중력의
+    // 일부를 대신 버티므로, 평형을 이루는 회전 속도는 원 궤도보다 느리다(우리 은하
+    // 태양 근처에서 10~15%). 시도 10 은 분산(0.15)을 주면서 회전은 원 궤도 그대로 두어
+    // **과잉 지지** — 회전과 압력이 둘 다 중력을 버텨 원반이 바깥으로 부풀었다가 되돌아
+    // 오는 진동을 시작했고, 그것이 m=2 요동의 씨앗이 됐을 수 있다.
+    //
+    // 원반 몫(1−bulgeMix)에만 건다. 팽대부는 원래 회전이 아니라 분산으로 지지된다.
+    float spin = (1.0f - 0.55f * bulgeMix) * (1.0f - diskSpinLag * (1.0f - bulgeMix));
 
     // **CGM 가스는 원반보다 느리게 돈다 — 그래서 떨어져 들어온다.**
     //
@@ -436,6 +459,10 @@ __global__ void kSetOrbit(float4* vel, const float4* pos,
 __global__ void kClearF(float* a, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) a[i] = 0.f;
+}
+__global__ void kClearF4(float4* a, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] = make_float4(0.f, 0.f, 0.f, 0.f);
 }
 __global__ void kFillInt(int* a, int n, int v) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -630,7 +657,7 @@ __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
 __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
                            int n, int G, float dt, int periodic,
                            BHPack bh, float c2, int* eaten, float* eatenP,
-                           const float4* accContact) {
+                           const float4* accContact, const float4* accPress) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -639,6 +666,22 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
 
     float4 a = sampleAcc(accG, p, G, periodic);
     if (accContact) { const float4 c = accContact[i]; a.x += c.x; a.y += c.y; a.z += c.z; }
+
+    // **압력은 가스만 받는다 — 별은 서로 부딪히지 않는다(2026-08-19).**
+    //
+    // 여태 압력이 `accG` 에 합쳐져 별에도 걸렸다. 그런데 별 사이 거리는 별 지름의 수천만
+    // 배라 별끼리는 충돌이 없고, 압력이란 충돌이 만드는 힘이다 — 별에는 걸릴 근거가 없다.
+    // 압력을 받는 별 원반은 가스처럼 부풀고 뭉치기를 반복해, 밀도파(나선팔)가 살아남을
+    // 「차가운 별 원반」이 만들어지지 않았다. 나선팔 시도 8회(냉각·압력·형성속도·암흑물질·
+    // 해상도·팽대부)가 전부 m=2 요동으로 실패한 뿌리가 이것이다(`.goal-prompt/spiral-arms-
+    // emerge/log.md`).
+    //
+    // 가스는 `p.w == 0`, 별은 `p.w > 0`, 폭발 중은 `p.w < 0`(바깥층이 날아가는 가스라 압력을
+    // 받는다). 암흑물질은 `vel.w < -50` 이고 애초에 압력 격자에 안 쌓이지만 여기서도 뺀다.
+    if (accPress && p.w <= 0.f && v.w >= -50.f) {
+        const float4 pr = sampleAcc(accPress, p, G, periodic);
+        a.x += pr.x; a.y += pr.y; a.z += pr.z;
+    }
 
     // (암흑물질 헤일로 근사와 나선 밀도파를 지웠다 — 2026-08-17)
     //
@@ -1178,7 +1221,26 @@ __global__ void kCoolCell(const float4* pos, const float4* vel, int n, int G, in
 
     if (k > 0.5f) k = 0.5f;
 
-    // v + k·(v̄ − v). **한 칸 안에서 합이 정확히 0 이라 총 운동량이 보존된다.**
+    // **별은 식지 않는다 — 서로 부딪히지 않기 때문이다(2026-08-19).**
+    //
+    // 냉각이란 충돌로 무작위 운동을 잃는 것인데, 별 사이 거리는 별 지름의 수천만 배라
+    // 별끼리는 충돌이 없다. 여태 별도 가스처럼 칸 평균으로 당겨져 별 원반이 「차가움」을
+    // 유지하지 못하고 계속 뭉쳤고, 그것이 나선팔이 요동으로 무너지던 뿌리다(`kIntegrate` 의
+    // 압력 주석과 같은 갈래).
+    //
+    // 분산 격자에는 **위에서 이미 쌓았다** — 별 형성 문턱(`kStarForm`)과 압력은 그 칸 전체의
+    // 운동 상태를 봐야 하므로 별의 몫도 들어가야 한다. 속도만 안 건드린다.
+    //
+    // 폭발 중(`p.w < 0`)은 날아가는 바깥층 = 가스라 식힌다. 별(`p.w > 0`)만 뺀다.
+    if (p.w > 0.f) return;               // velOut 은 맨 위에서 v 그대로 넣어 두었다
+
+    // v + k·(v̄ − v). `v̄` 는 그 칸의 **별을 포함한** 전체 평균이다.
+    //
+    // **별을 뺀 뒤로는 한 칸의 운동량이 정확히 보존되지 않는다** — 가스가 전체 평균으로
+    // 당겨지는데 별은 안 움직이므로 「가스 몫의 합」이 0 이 아니다. 실제로도 가스가 별의
+    // 중력장 안에서 식는 것이라 별과 가스 사이에 운동량이 오가는 것이 맞고, 판 전체 합은
+    // 스텝 끝의 무게중심 정지(`kMomentumAccum` 이후)가 잡는다. 이 편차가 은하를 어디로
+    // 밀지는 그 무게중심 창(`totalMomentum`)으로 밖에서 본다.
     velOut[i] = make_float4(v.x + k * dvx, v.y + k * dvy, v.z + k * dvz, v.w);
 }
 
@@ -1204,7 +1266,7 @@ __global__ void kCoolCell(const float4* pos, const float4* vel, int n, int G, in
 // 위아래 분산이 작은 만큼 덜 밀려 **원반이 스스로 납작해진다**(diskThickness 를 손으로
 // 정하지 않아도 되는 이유가 이것이다).
 __global__ void kPressure(const float* dispX, const float* dispY, const float* dispZ,
-                          const float* dispCnt, float4* accG, int G, int periodic,
+                          const float* dispCnt, float4* accP, int G, int periodic,
                           float k, float maxAcc) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1241,11 +1303,15 @@ __global__ void kPressure(const float* dispX, const float* dispY, const float* d
     ay = fminf(fmaxf(ay, -maxAcc), maxAcc);
     az = fminf(fmaxf(az, -maxAcc), maxAcc);
 
-    // 중력 위에 **더한다** — 덮어쓰지 않는다. 이렇게 두면 kIntegrate 도 sampleAcc 도
-    // 손댈 필요가 없다. 알갱이는 두 힘의 합을 하나로 받는다.
-    float4 a = accG[c];
-    a.x += ax; a.y += ay; a.z += az;
-    accG[c] = a;
+    // **압력 전용 격자에 쓴다 — 중력과 섞지 않는다(2026-08-19).**
+    //
+    // 전에는 `accG` 에 더해 알갱이가 두 힘의 합을 하나로 받았다. 그러면 별도 압력을 받는데,
+    // 별은 서로 부딪히지 않아 압력이 걸릴 근거가 없다(`kIntegrate` 의 주석). 따로 담아
+    // 두면 적분이 가스에만 더할 수 있다. `w` 는 안 쓴다(0).
+    //
+    // 빈 칸(`rho < 1e-6`)은 위에서 이미 반환했는데 그 칸에 묵은 값이 남지 않게 매 스텝
+    // 호출부가 먼저 비운다(`kClearF4`).
+    accP[c] = make_float4(ax, ay, az, 0.f);
 }
 
 // 가스가 별이 되는 자리. **문턱을 손으로 정하지 않고 Jeans 조건으로 판정한다.**
@@ -2639,6 +2705,7 @@ struct Sim::Impl {
     float4 *posTmp = nullptr, *velTmp = nullptr;
     float  *temp = nullptr, *tempTmp = nullptr;
     float4 *accG = nullptr;          // 격자 가속도 G³
+    float4 *accPress = nullptr;      // 압력 가속도 G³ — 가스만 받는다(별은 안 부딪힌다)
     float4 *accContact = nullptr;    // 접촉 가속도 N
     float  *rho = nullptr;           // 밀도(패딩 포함) S³
     float  *pot = nullptr;           // 퍼텐셜(패딩 포함) S³
@@ -3088,7 +3155,7 @@ void Sim::Impl::freeAll() {
     auto F = [](void*& p) { if (p) { cudaFree(p); p = nullptr; } };
     F((void*&)pos); F((void*&)vel); F((void*&)posTmp); F((void*&)velTmp);
     F((void*&)temp); F((void*&)tempTmp);
-    F((void*&)accG); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
+    F((void*&)accG); F((void*&)accPress); F((void*&)accContact); F((void*&)rho); F((void*&)pot);
     F((void*&)proj); F((void*&)projA); F((void*&)projB); F((void*&)accMag);
     F((void*&)projT); F((void*&)bornStat);
     F((void*&)dispX); F((void*&)dispY); F((void*&)dispZ); F((void*&)dispCnt);
@@ -3120,6 +3187,10 @@ void Sim::Impl::allocate() {
     CK(cudaMalloc(&accMag, sizeof(float) * N));
     CK(cudaMalloc(&accContact, sizeof(float4) * N));
     CK(cudaMalloc(&accG, sizeof(float4) * (size_t)G * G * G));
+    // 압력 가속도 격자. `accG` 와 같은 G³ 이고, **잡은 직후 비운다** — 압력이 꺼져 있으면
+    // 아무도 안 쓰는데 적분이 읽으므로 미초기화 값이 그대로 힘이 된다.
+    CK(cudaMalloc(&accPress, sizeof(float4) * (size_t)G * G * G));
+    CK(cudaMemset(accPress, 0, sizeof(float4) * (size_t)G * G * G));
     // 압력 격자 넷. **패딩 없이 G³ 이다**(kPressure 주석 참조 — 국소 미분이라 패딩이 필요 없다).
     // 잡은 직후에 반드시 비운다. 미초기화 값을 분산으로 읽으면 첫 스텝에 판이 통째로 터진다 —
     // 이 프로젝트에서 미초기화 배열로 죽은 적이 이미 있다.
@@ -3251,10 +3322,17 @@ void Sim::Impl::computeAccel() {
     // 일부러 그렇게 나눴다 — 분산을 매 스텝 다시 재려면 399만 개를 매 스텝 줄 세워야 하고,
     // 그것이 2026-08-14 에 드라이버를 죽인 바로 그 일이다. 분산은 천천히 변하는 값이라
     // 여덟 스텝 묵은 값을 써도 힘이 튀지 않는다.
+    // 압력 격자는 **매 스텝 먼저 비운다.** `kPressure` 는 알갱이가 있는 칸에만 쓰므로,
+    // 비우지 않으면 알갱이가 떠난 칸에 지난 스텝의 힘이 남아 다음에 지나가는 것을 민다.
+    // 압력이 꺼져 있으면 비워진 채로 있어 적분이 0 을 더한다.
+    {
+        const int gcells = allocG * allocG * allocG;
+        kClearF4<<<(gcells + 255) / 256, 256>>>(accPress, gcells);
+    }
     if (cfg.pressureEnabled) {
         // 상한은 중력 쪽과 같은 자리에서 잘라야 뜻이 있다. kIntegrate 가 쓰는 값과 맞춘다.
         constexpr float kMaxPressureAcc = 5.0f;
-        kPressure<<<grd3(allocG), blk3()>>>(dispX, dispY, dispZ, dispCnt, accG,
+        kPressure<<<grd3(allocG), blk3()>>>(dispX, dispY, dispZ, dispCnt, accPress,
                                             allocG, periodic() ? 1 : 0,
                                             cfg.pressureK, kMaxPressureAcc);
     }
@@ -3294,7 +3372,9 @@ void Sim::Impl::giveOrbits() {
     const bool haloScene = (cfg.preset == Preset::SpiralDisk || cfg.preset == Preset::BlackHole);
     kSetOrbit<<<(allocN + 255) / 256, 256>>>(vel, pos, accMag, allocN,
                                              cfg.bulgeRadius, base, cfg.diskThickness,
-                                             12345u, haloScene ? cfg.haloGasFraction : 0.f);
+                                             12345u, haloScene ? cfg.haloGasFraction : 0.f,
+                                             fmaxf(cfg.diskDispersion, 0.f),
+                                             fminf(fmaxf(cfg.diskSpinLag, 0.f), 0.9f));
     CK(cudaGetLastError());
 }
 
@@ -3590,6 +3670,7 @@ size_t Sim::estimateBytes(int particleCount, int gridSize, Boundary boundary) {
     b += sizeof(float4) * N;          // accContact
     b += sizeof(int)    * N * 4;      // keys, order, flag, scan
     b += sizeof(float4) * G * G * G;  // accG
+    b += sizeof(float4) * G * G * G;  // accPress
     b += sizeof(float)  * cells * 2;  // rho, pot
     b += sizeof(cufftComplex) * spec * 2;
     b += sizeof(int) * G * G * G * 2; // cellStart, cellEnd
@@ -3971,7 +4052,9 @@ void Sim::step() {
         bhPack, kLightSpeedSq, d.eaten, d.eatenP,
         // 세 힘 중 하나라도 켜져 있으면 그 가속도를 함께 넘긴다.
         (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
-            ? d.accContact : nullptr);
+            ? d.accContact : nullptr,
+        // 압력 가속도 — 적분이 **가스에만** 더한다. 별은 서로 부딪히지 않는다.
+        d.accPress);
     CK(cudaGetLastError());
 
     if (d.bhCount > 0) {

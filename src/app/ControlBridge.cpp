@@ -252,7 +252,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         "coreIonizeK=%.4f\ncoreDark=%.4f\ncoreEmbed=%.4f\ncoreHaloGas=%.4f\n"
         // 판을 열 때 중심에 놓는 블랙홀 — 켰는지와 그 무게. 여태 `reset` 안에 박혀 있어
         // 밖에서 켤 수도 되읽을 수도 없었다.
-        "coreBhOn=%d\ncoreBhFrac=%.5f\ncoreSphere=%.4f\n"
+        "coreBhOn=%d\ncoreBhFrac=%.5f\ncoreSphere=%.4f\ncoreDiskDisp=%.4f\ncoreSpinLag=%.4f\n"
         // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
         //
         // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
@@ -338,7 +338,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         sim.config().starIonizeK, sim.config().darkMatterFraction,
         sim.config().starEmbedTime, sim.config().haloGasFraction,
         sim.config().blackHoleEnabled ? 1 : 0, sim.config().centralBHFraction,
-        sim.config().sphereStart,
+        sim.config().sphereStart, sim.config().diskDispersion, sim.config().diskSpinLag,
         // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
         // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
         sim.config().coolingRate, sim.config().starFormEfficiency,
@@ -532,6 +532,10 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         // 다시 걸어야 반영된다** — 자리를 놓는 것은 `Sim::reset` 이라, 도는 판에 값만
         // 바꾸면 아무 일도 일어나지 않는다.
         if (has(kv, "sphereStart")) app.cfg.sphereStart = clampF(getFloat(kv, "sphereStart", app.cfg.sphereStart), 0.0f, 1.0f, app.cfg.sphereStart);
+        // 원반 알갱이의 초기 속도 분산(회전 속도 대비). 실제 얇은 원반 0.1~0.2. `reset` 필요.
+        if (has(kv, "diskDispersion")) app.cfg.diskDispersion = clampF(getFloat(kv, "diskDispersion", app.cfg.diskDispersion), 0.0f, 1.0f, app.cfg.diskDispersion);
+        // 원반 회전을 원 궤도보다 얼마나 느리게(비대칭 흐름). 실제 0.1~0.15. `reset` 필요.
+        if (has(kv, "diskSpinLag")) app.cfg.diskSpinLag = clampF(getFloat(kv, "diskSpinLag", app.cfg.diskSpinLag), 0.0f, 0.9f, app.cfg.diskSpinLag);
         // 판을 열 때 중심에 블랙홀을 놓을지. **`preset` 을 다시 걸어야 반영된다** —
         // 놓는 자리가 `Sim::reset` 이라, 도는 판에 켜기만 하면 아무 일도 일어나지 않는다.
         if (has(kv, "blackHole")) app.cfg.blackHoleEnabled = (getInt(kv, "blackHole", app.cfg.blackHoleEnabled ? 1 : 0) != 0);
