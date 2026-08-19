@@ -22,5 +22,10 @@ void DrawShapeDrawer(App& app, int viewW, int viewH);
 // 하단 막대 — 장면 칩 · 도구 · 값 알약 · 녹화.
 void DrawBottomBar(App& app, int viewW, int viewH);
 
+// 화면 왼쪽 가운데의 줌 막대. 위아래로 끌어 확대·축소한다.
+// 실제로 카메라를 옮기는 것은 프레임 루프다 — 여기서는 `app.zoomRequest` 에 얼마나
+// 확대할지만 적는다(휠 처리와 같은 코드를 쓰려는 것이다).
+void DrawZoomBar(App& app, int viewW, int viewH);
+
 // 서랍의 i 번째 장면으로 갈아탄다(0~6). 숫자키가 이걸 부른다.
 void SwitchSceneByIndex(App& app, int index);

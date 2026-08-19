@@ -165,6 +165,44 @@ float MinZoom() {
     return (aspect > 1.0f) ? aspect : (1.0f / aspect);
 }
 
+// **확대·축소를 한 곳에 둔다.** 휠과 왼쪽 줌 막대가 이것을 함께 부른다 —
+// 둘로 나뉘면 같은 일을 다르게 해서 서로 어긋나기 시작한다.
+// `notches` 는 휠 한 칸을 1 로 센 양(양수 = 확대).
+void ApplyZoom(App& app, float notches) {
+    if (notches == 0.0f) return;
+    // 한 칸에 얼마나 확대할지. 설정의 「휠 확대 속도」가 1.0 일 때 12% 다.
+    // 막대에서 온 것은 칸이 잘게 쪼개져 오므로 그 크기를 그대로 지수에 싣는다.
+    const float mag  = fabsf(notches);
+    const float step = powf(1.0f + 0.15f * app.ui.wheelZoomSpeed, mag);
+
+    if (app.camFly) {
+        // **원근에서 확대란 카메라를 앞으로 옮기는 것이다**(돌리 줌).
+        //
+        // 처음엔 시야각을 좁혔는데(망원렌즈) 하한 17도까지 좁혀도 3.6배라, 예전 궤도
+        // 모드의 64배에 한참 못 미쳤다(2026-08-19 사용자 보고: 「확대가 이전보다 덜되는데」).
+        // 시야각은 좁힐수록 원근이 사라져 평면처럼 보이는 한계도 있다. 가까이 보는 것의
+        // 본질은 **가까이 가는 것**이다.
+        //
+        // 한 칸에 「지금 판 중심까지 거리」의 일정 비율만큼 간다. 그래야 멀리서는 성큼,
+        // 가까이서는 조금씩 움직여 원하는 자리에 세우기 쉽다. 판 중심을 지나쳐 뒤로
+        // 넘어가지 않게 최소 거리를 둔다.
+        const float* rz = app.camRot + 6;   // 화면 깊이축(보는 방향)
+        const float toC[3] = { 0.5f - app.camPos[0],
+                               0.5f - app.camPos[1],
+                               0.5f - app.camPos[2] };
+        const float dist = toC[0]*rz[0] + toC[1]*rz[1] + toC[2]*rz[2];
+        const float ref  = (dist > 0.05f) ? dist : 0.05f;
+        const float mv   = ((notches > 0) ? 1.f : -1.f) * ref * (step - 1.0f);
+        for (int k = 0; k < 3; ++k) app.camPos[k] += rz[k] * mv;
+    } else {
+        app.zoom *= (notches > 0) ? step : (1.0f / step);
+        const float mz = MinZoom();     // 판이 화면을 꽉 채우는 선까지만 줄인다
+        if (app.zoom < mz)     app.zoom = mz;
+        if (app.zoom > 64.0f)  app.zoom = 64.0f;
+        ClampPan(app);
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
 
@@ -333,36 +371,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_app && !g_orbiting && !ImGui::GetIO().WantCaptureMouse) {
                 float d = GET_WHEEL_DELTA_WPARAM(wp) / 120.0f;
                 if (g_app->ui.wheelInverted) d = -d;
-                // 한 칸에 얼마나 확대할지. 설정의 「휠 확대 속도」가 1.0 일 때 12% 다.
-                const float step = 1.0f + 0.15f * g_app->ui.wheelZoomSpeed;
-                if (g_app->camFly) {
-                    // **원근에서 확대란 카메라를 앞으로 옮기는 것이다**(돌리 줌).
-                    //
-                    // 처음엔 시야각을 좁혔는데(망원렌즈) 하한 17도까지 좁혀도 3.6배라, 예전
-                    // 궤도 모드의 64배에 한참 못 미쳤다(2026-08-19 사용자 보고: 「확대가
-                    // 이전보다 덜되는데」). 시야각은 좁힐수록 원근이 사라져 평면처럼 보이는
-                    // 한계도 있다. 가까이 보는 것의 본질은 **가까이 가는 것**이다 — 자유
-                    // 모드의 W/S 와 같은 일을 우클릭 없이 휠로 한다.
-                    //
-                    // 한 칸에 「지금 판 중심까지 거리」의 일정 비율만큼 간다. 그래야 멀리서는
-                    // 성큼, 가까이서는 조금씩 움직여 원하는 자리에 세우기 쉽다. 판 중심을
-                    // 지나쳐 뒤로 넘어가지 않게 최소 거리를 둔다.
-                    const float* rz = g_app->camRot + 6;   // 화면 깊이축(보는 방향)
-                    const float toC[3] = { 0.5f - g_app->camPos[0],
-                                           0.5f - g_app->camPos[1],
-                                           0.5f - g_app->camPos[2] };
-                    // 보는 방향으로 잰 판 중심까지의 거리(뒤에 있으면 음수).
-                    const float dist = toC[0]*rz[0] + toC[1]*rz[1] + toC[2]*rz[2];
-                    const float ref  = (dist > 0.05f) ? dist : 0.05f;
-                    const float mv   = ((d > 0) ? 1.f : -1.f) * ref * (step - 1.0f);
-                    for (int k = 0; k < 3; ++k) g_app->camPos[k] += rz[k] * mv;
-                } else {
-                    g_app->zoom *= (d > 0) ? step : (1.0f / step);
-                    const float mz = MinZoom();     // 판이 화면을 꽉 채우는 선까지만 줄인다
-                    if (g_app->zoom < mz)     g_app->zoom = mz;
-                    if (g_app->zoom > 64.0f)  g_app->zoom = 64.0f;
-                    ClampPan(*g_app);
-                }
+                ApplyZoom(*g_app, d);
             }
             return 0;
 
@@ -748,6 +757,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             ClampPan(app);
         }
 
+        // 왼쪽 줌 막대가 요청한 확대를 여기서 처리한다 — 휠과 **같은 함수**를 쓴다.
+        if (app.zoomRequest != 0.0f) {
+            ApplyZoom(app, app.zoomRequest);
+            app.zoomRequest = 0.0f;
+        }
+
         // 설정 창에서 전체화면을 뒤집었으면 여기서 실제로 창을 옮긴다.
         // **UI 는 값만 바꾸고 창은 건드리지 않는다** — `ToggleFullscreen` 이 되돌아가며
         // `app.fullscreen` 을 다시 맞추므로 이 검사가 두 번 돌지 않는다.
@@ -813,6 +828,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             DrawBlackHoleRings(app, g_w, g_h);
             DrawSceneDrawer(app, g_w, g_h);
             DrawShapeDrawer(app, g_w, g_h);
+            DrawZoomBar(app, g_w, g_h);
             DrawBottomBar(app, g_w, g_h);
             DrawMeters(app, g_w, g_h);
             // 설정은 맨 마지막이다 — 열려 있는 동안은 막대까지 뒤로 물러나야 한다.

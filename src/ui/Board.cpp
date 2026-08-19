@@ -634,6 +634,76 @@ void DrawSceneDrawer(App& app, int viewW, int viewH) {
     ImGui::PopStyleColor();
 }
 
+// ── 왼쪽 줌 막대 ────────────────────────────────────────────────────────────
+//
+// 「마우스 클릭 드래그 만으로도 줌 할수있게 화면 왼쪽에 UI만들어줘」(2026-08-19).
+//
+// 위아래로 끌면 확대·축소한다. 휠이 없는 자리(터치패드·태블릿)에서도 쓸 수 있고,
+// 확대가 어디까지 되는지 손잡이 위치로 보인다.
+//
+// **여기서는 카메라를 안 만진다.** 원근에서 확대는 카메라를 앞으로 옮기는 일이라
+// `camRot`·`camPos`·시야각이 얽히는데, 그 계산이 이미 휠 처리에 있다. 막대는
+// 「얼마나」만 `app.zoomRequest` 에 적고 프레임 루프가 「어떻게」를 맡는다 —
+// 둘로 나뉘면 휠과 막대가 서로 다르게 움직이기 시작한다.
+void DrawZoomBar(App& app, int viewW, int viewH) {
+    if (app.uiHidden || viewH <= 0) return;
+
+    const float w = 34.0f, h = 190.0f;
+    const float x = 20.0f, y = (float)viewH * 0.5f - h * 0.5f;
+
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::Begin("##zoombar", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                 ImGuiWindowFlags_NoNav);
+
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##track", ImVec2(w - 6.0f, h - 12.0f));
+    const bool hov = ImGui::IsItemHovered();
+    const bool act = ImGui::IsItemActive();
+
+    if (act) {
+        const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 1.0f);
+        if (d.y != 0.0f) {
+            // 위로 끌면 확대. 한 픽셀에 휠 한 칸의 1/12 쯤 — 끌어서 세밀하게 맞추기 좋다.
+            app.zoomRequest += -d.y * (1.0f / 12.0f);
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+        }
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float cx = p.x + (w - 6.0f) * 0.5f;
+    const float top = p.y + 16.0f, bot = p.y + h - 28.0f;
+
+    // 트랙
+    dl->AddLine(ImVec2(cx, top), ImVec2(cx, bot), IM_COL32(255, 255, 255, 30), 3.0f);
+
+    // 위아래 끝의 +/− 표시. 어느 쪽이 확대인지 알려 준다.
+    const ImU32 mark = (hov || act) ? kInk : kInkGhost;
+    dl->AddLine(ImVec2(cx - 5.0f, top - 8.0f), ImVec2(cx + 5.0f, top - 8.0f), mark, 1.6f);
+    dl->AddLine(ImVec2(cx, top - 13.0f), ImVec2(cx, top - 3.0f), mark, 1.6f);
+    dl->AddLine(ImVec2(cx - 5.0f, bot + 9.0f), ImVec2(cx + 5.0f, bot + 9.0f), mark, 1.6f);
+
+    // 손잡이 — 지금 얼마나 확대돼 있는지를 판 중심까지의 거리로 나타낸다.
+    // 가까울수록 위(확대), 멀수록 아래. 거리 0.05~3.0 을 로그로 편다.
+    float t = 0.5f;
+    {
+        const float* rz = app.camRot + 6;
+        const float toC[3] = { 0.5f - app.camPos[0], 0.5f - app.camPos[1], 0.5f - app.camPos[2] };
+        const float dist = toC[0]*rz[0] + toC[1]*rz[1] + toC[2]*rz[2];
+        const float d = Clampf(dist, 0.05f, 3.0f);
+        t = 1.0f - logf(d / 0.05f) / logf(3.0f / 0.05f);   // 가까우면 1(위)
+    }
+    const float gy = bot - (bot - top) * Clampf(t, 0.0f, 1.0f);
+    dl->AddCircleFilled(ImVec2(cx, gy), (hov || act) ? 8.0f : 6.5f, kAccent);
+
+    Tip("위아래로 끌어 확대·축소합니다. 휠로도 됩니다.");
+    ImGui::End();
+}
+
 void DrawBottomBar(App& app, int viewW, int viewH) {
     if (app.uiHidden) return;
 
