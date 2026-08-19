@@ -8,9 +8,16 @@
 // 이게 없으면 윈도우가 보여 줄 이름이 없어 창 제목 첫 글자만 덩그러니 뜬다.
 #include <winver.h>
 
+// **버전을 담은 자리가 셋이고, 셋이 같아야 한다.**
+//   · `src/app/Version.h`   STARDUST_VERSION — 자동 업데이트가 견주는 기준
+//   · `packaging/stardust.iss` AppVersion    — 설치 프로그램이 말하는 버전
+//   · 여기                                    — 탐색기 파일 속성이 보여 주는 버전
+// 앞의 둘만 챙기다 여기가 **0.6.1 에 멈춰 0.6.2~0.6.8 내내 어긋나 있었다**
+// (2026-08-19 에 발견 — 설치본 파일 속성은 0.6.1, 레지스트리는 0.6.6 이었다).
+// 설치는 `ignoreversion` 플래그 덕에 되고 있었으므로 아무도 안 걸렸다.
 1 VERSIONINFO
-FILEVERSION    0,6,1,0
-PRODUCTVERSION 0,6,1,0
+FILEVERSION    0,6,8,0
+PRODUCTVERSION 0,6,8,0
 FILEOS         VOS_NT_WINDOWS32
 FILETYPE       VFT_APP
 BEGIN
@@ -21,11 +28,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "JustKim"
       VALUE "FileDescription",  "Stardust"
-      VALUE "FileVersion",      "0.6.1"
+      VALUE "FileVersion",      "0.6.8"
       VALUE "InternalName",     "Stardust"
       VALUE "OriginalFilename", "Stardust.exe"
       VALUE "ProductName",      "Stardust"
-      VALUE "ProductVersion",   "0.6.1"
+      VALUE "ProductVersion",   "0.6.8"
     END
   END
   BLOCK "VarFileInfo"
