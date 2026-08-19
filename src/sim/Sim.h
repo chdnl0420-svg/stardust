@@ -85,16 +85,40 @@ constexpr float kLightSpeedSq = kLightSpeed * kLightSpeed;
 //
 // 그때 물질 속도 0.1~0.3 은 **광속의 0.1~0.3%** 인데, 실제 우주 거대구조의 특이속도가
 // 약 1000 km/s = 광속의 0.3% 다. 눈금을 이렇게 잡아야 실제와 맞는다.
+// **길이 배율과 시간 배율은 따로 둔다 — 묶으면 나이가 어긋난다.**
+//
+// 처음에는 둘을 한 값으로 묶었다(둘 다 1000 배). 그래야 광속이 안 변하니까. 그런데
+// 사용자가 「몇백억년이 흘렀는데도 필라멘트 구조가 눈에띄게 생성되지않는데 실제 우주보다
+// 느린거같아」라고 알렸고, 재 보니 맞았다 — 이 판에서 구조가 여무는 것은 simTime 21.9
+// 인데, 1 단위를 100억 년으로 두면 **2190억 년**이 된다. 실제 우주는 138억 년이다(16 배).
+//
+// 시간 배율을 따로 두면 그 나이를 맞출 수 있지만, 광속(= 시간/길이)이 함께 내려가
+// 빅뱅 초기 팽창(5.16)이 광속에 닿는다. 둘을 저울질해 골랐다(2026-08-19 실측):
+//
+//   시간배율  1단위     광속   초기팽창/광속   구조가 여무는 나이   실제 대비
+//     1000    100억년   100        5%          2190억년          15.9 배
+//      300     30억년    30       17%           657억년           4.8 배
+//      100     10억년    10       52%           219억년           1.6 배  ← 골랐다
+//       63    6.3억년   6.3       82%           138억년           1.0 배  아슬아슬
+//
+// 63 이면 나이가 정확히 맞지만 안전장치(광속의 98% 에서 30 초)에 너무 가깝다.
+// 빅뱅 초기 속도는 곧 감속하지만 30 초 안에 떨어지지는 않는다.
 inline double lightYearsPerUnitFor(float lengthScale) {
     return kLightYearsPerUnit * (double)(lengthScale > 1e-6f ? lengthScale : 1e-6f);
 }
-inline double yearsPerSimUnitFor(float lengthScale) {
-    return kYearsPerSimUnit * (double)(lengthScale > 1e-6f ? lengthScale : 1e-6f);
+inline double yearsPerSimUnitFor(float timeUnitScale) {
+    return kYearsPerSimUnit * (double)(timeUnitScale > 1e-6f ? timeUnitScale : 1e-6f);
 }
-// 판 단위 광속. 위 둘의 **비**라서 눈금 배율과 무관하게 일정하다 —
-// 인자를 받는 것은 부르는 쪽이 눈금을 의식하게 두려는 것이고, 값은 바뀌지 않는다.
-inline float lightSpeedFor(float /*lengthScale*/) { return kLightSpeed; }
-inline float lightSpeedSqFor(float /*lengthScale*/) { return kLightSpeedSq; }
+// 판 단위 광속 = (시간 눈금)/(길이 눈금). 둘이 같은 배율이면 기본값 100 그대로다.
+inline float lightSpeedFor(float lengthScale, float timeUnitScale) {
+    const double L = lightYearsPerUnitFor(lengthScale);
+    const double T = yearsPerSimUnitFor(timeUnitScale);
+    return (float)(T / (L > 1e-30 ? L : 1e-30));
+}
+inline float lightSpeedSqFor(float lengthScale, float timeUnitScale) {
+    const float c = lightSpeedFor(lengthScale, timeUnitScale);
+    return c * c;
+}
 
 // **참고 — 이 눈금에서 실제 우리 은하가 갖는 값들.**
 // 코드가 쓰는 값이 아니라, 지금 판이 실제와 얼마나 다른지 견주는 자
@@ -117,11 +141,16 @@ struct SimConfig {
 
     // **판을 실제 몇 배 크기로 볼 것인가.** 1 이면 우리 은하 하나(한 변 10만 광년).
     //
-    // 길이와 시간에 **함께** 걸린다 — 한 변 10만×N 광년, 시뮬 시간 1단위 1000만×N 년.
-    // 둘을 같은 배율로 늘리므로 **판 단위 광속은 안 바뀐다**(`lightSpeedFor` 주석에
-    // 길이만 늘렸다가 물질이 빛보다 빨라져 판이 멈춘 실측이 있다).
-    // 필라멘트 장면이 1000 을 써서 한 변 1억 광년(약 30 Mpc)·1단위 100억 년으로 본다.
+    // 판 한 변이 10만 × 이 값(광년). 필라멘트가 1000 을 써서 한 변 1억 광년(약 30 Mpc).
     float lengthScale          = 1.0f;
+
+    // **시뮬 시간 1단위가 1000만 × 이 값(년).** 길이 배율과 따로 둔다.
+    //
+    // 묶어 두면 광속은 안 변해서 편하지만 **나이가 어긋난다** — 이 판에서 우주 구조가
+    // 여무는 것은 simTime 21.9 인데, 길이에 맞춰 1단위를 100억 년으로 두면 2190억 년이
+    // 된다(실제 138억 년의 16 배). 사용자가 「실제 우주보다 느린거같아」로 알린 자리다.
+    // 고른 값과 근거는 `lightSpeedFor` 위의 표에 있다. 필라멘트가 100(1단위 10억 년).
+    float timeUnitScale        = 1.0f;
 
     // **허블 팽창** — 알갱이가 처음에 `v = H·r` 로 바깥을 향한다(중심에서 멀수록 빠르다).
     // 0 이면 팽창이 없다.

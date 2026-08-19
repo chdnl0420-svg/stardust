@@ -322,7 +322,7 @@ std::string ControlBridge::statusBody(const App& app) const {
         // **시간 환율은 장면의 눈금을 따른다.** 필라멘트는 판이 1000 배 크고 시간도
         // 1000 배라, 고정 상수를 쓰면 100억 년을 1000만 년이라 말하게 된다.
         app.running ? 1 : 0, app.sim.simTime(),
-        app.sim.simTime() * yearsPerSimUnitFor(app.cfg.lengthScale),
+        app.sim.simTime() * yearsPerSimUnitFor(app.cfg.timeUnitScale),
         app.sim.activeCount(), app.sim.starCount(),
         app.view.mode == RenderMode::Points ? "points" : "field",
         // **`Ash` 가 빠져 있어 재 보기가 `density` 로 보고됐다(2026-08-18에 고침).**
@@ -553,7 +553,7 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "starSunMass"))    app.cfg.starSunMass    = clampF(getFloat(kv, "starSunMass", app.cfg.starSunMass), 1.0f, 1.0e6f, app.cfg.starSunMass);
         if (has(kv, "starSunLifeSim")) app.cfg.starSunLifeSim = clampF(getFloat(kv, "starSunLifeSim", app.cfg.starSunLifeSim), 0.001f, 1.0e6f, app.cfg.starSunLifeSim);
         if (has(kv, "starExplodeSim")) app.cfg.starExplodeSim = clampF(getFloat(kv, "starExplodeSim", app.cfg.starExplodeSim), 0.0001f, 10.0f, app.cfg.starExplodeSim);
-        if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, lightSpeedFor(app.cfg.lengthScale) * 0.2f, app.cfg.starKickSpeed);
+        if (has(kv, "starKickSpeed"))  app.cfg.starKickSpeed  = clampF(getFloat(kv, "starKickSpeed", app.cfg.starKickSpeed), 0.0f, lightSpeedFor(app.cfg.lengthScale, app.cfg.timeUnitScale) * 0.2f, app.cfg.starKickSpeed);
         if (has(kv, "starBHRatio"))    app.cfg.starBHRatio    = clampF(getFloat(kv, "starBHRatio", app.cfg.starBHRatio), 1.0f, 1.0e5f, app.cfg.starBHRatio);
         if (has(kv, "starCollapseToBH")) app.cfg.starCollapseToBH = getInt(kv, "starCollapseToBH", 0) != 0;
         if (has(kv, "bhFrictionK"))   app.cfg.bhFrictionK    = clampF(getFloat(kv, "bhFrictionK", app.cfg.bhFrictionK), 0.0f, 100.0f, app.cfg.bhFrictionK);

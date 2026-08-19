@@ -115,7 +115,7 @@ void DrawHud(const App& app) {
         // 크고 시간도 1000 배라, 고정 상수를 쓰면 100억 년을 1000만 년이라 적게 된다.
         // 자릿수가 넓어 세 구간으로 나눠 적는다.
         char age[32];
-        const double yrs = app.sim.simTime() * yearsPerSimUnitFor(app.cfg.lengthScale);
+        const double yrs = app.sim.simTime() * yearsPerSimUnitFor(app.cfg.timeUnitScale);
         if      (yrs >= 1.0e8) snprintf(age, sizeof(age), "%.2f\xEC\x96\xB5 \xEB\x85\x84", yrs / 1.0e8);
         else if (yrs >= 1.0e4) snprintf(age, sizeof(age), "%.0f\xEB\xA7\x8C \xEB\x85\x84", yrs / 1.0e4);
         else                   snprintf(age, sizeof(age), "%.0f \xEB\x85\x84", yrs);

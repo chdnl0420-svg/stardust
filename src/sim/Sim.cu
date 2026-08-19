@@ -3004,7 +3004,7 @@ struct Sim::Impl {
         // 길이 눈금을 늘리면 광속이 그만큼 느려지고, 지평선은 c² 에 반비례하므로
         // 눈금 제곱만큼 커진다 — 판을 크게 볼수록 같은 질량의 지평선이 화면에서
         // 작아 보이는 것과 앞뒤가 맞는다(`lightSpeedFor` 참조).
-        return 2.0f * cfg.gravity * M / lightSpeedSqFor(cfg.lengthScale);
+        return 2.0f * cfg.gravity * M / lightSpeedSqFor(cfg.lengthScale, cfg.timeUnitScale);
     }
 
     // 커널에 넘길 블랙홀 묶음을 만든다. 삼킴 반경의 바닥(격자 한 칸)도 여기서 건다.
@@ -4203,7 +4203,7 @@ void Sim::step() {
 
     kIntegrate<<<(d.allocN + 255) / 256, 256>>>(
         d.accG, d.pos, d.vel, d.allocN, d.allocG, dt, d.periodic() ? 1 : 0,
-        bhPack, lightSpeedSqFor(d.cfg.lengthScale), d.eaten, d.eatenP,
+        bhPack, lightSpeedSqFor(d.cfg.lengthScale, d.cfg.timeUnitScale), d.eaten, d.eatenP,
         // 세 힘 중 하나라도 켜져 있으면 그 가속도를 함께 넘긴다.
         (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
             ? d.accContact : nullptr,
