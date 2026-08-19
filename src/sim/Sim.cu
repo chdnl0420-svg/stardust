@@ -702,7 +702,8 @@ __global__ void kAccelMag(const float4* accG, const float4* pos, float* out,
 __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
                            int n, int G, float dt, int periodic,
                            BHPack bh, float c2, int* eaten, float* eatenP,
-                           const float4* accContact, const float4* accPress) {
+                           const float4* accContact, const float4* accPress,
+                           float softBoundR) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float4 p = pos[i];
@@ -838,6 +839,47 @@ __global__ void kIntegrate(const float4* accG, float4* pos, float4* vel,
 
     if (periodic) {
         p.x -= floorf(p.x); p.y -= floorf(p.y); p.z -= floorf(p.z);
+    } else if (softBoundR > 0.f) {
+        // ── 구형 경계 — 벽에 가까울수록 바깥으로 가는 속도를 잃는다 ───────────
+        //
+        // 아래 큐브 벽은 **우주를 정육면체로 보이게 한다.** 알갱이가 면에 부딪혀 되튀고,
+        // 모서리 방향으로만 더 멀리 갈 수 있어 퍼진 모양에 여섯 면이 드러난다
+        // (2026-08-19 사용자: 「큐브모양 벽에 부딛혀서 되돌아오고있어. 그래서 우주가
+        // 큐브모양처럼 보여」. 그때 30만 중 15187 개가 벽에 붙어 있었다).
+        //
+        // 그래서 **되튀지 않게** 한다 — 중심에서 `softBoundR` 을 넘어서면 거기서부터
+        // 바깥으로 가는 속도 성분만 서서히 깎고, 안쪽으로 오는 것은 건드리지 않는다.
+        // 깎는 양이 거리의 제곱으로 커져 한계에 닿을 즈음 0 이 되므로, **부딪히는 순간이
+        // 없다.** 튕기는 대신 잦아든다.
+        //
+        // 접선 속도는 그대로 두는 것이 중요하다 — 함께 깎으면 가장자리 알갱이가 회전을
+        // 잃고 지름 방향으로만 늘어서 또 다른 인위적 무늬가 생긴다.
+        const float dx = p.x - 0.5f, dy = p.y - 0.5f, dz = p.z - 0.5f;
+        const float r2 = dx * dx + dy * dy + dz * dz;
+        const float R1 = 0.497f;                       // 절대 한계(판 안쪽)
+        if (r2 > softBoundR * softBoundR) {
+            const float r   = sqrtf(r2);
+            const float inv = 1.0f / fmaxf(r, 1e-6f);
+            const float nx = dx * inv, ny = dy * inv, nz = dz * inv;
+            // 0(듣기 시작) → 1(한계). 한계 밖은 1 로 묶는다.
+            const float t = fminf((r - softBoundR) / fmaxf(R1 - softBoundR, 1e-6f), 1.0f);
+
+            const float vr = v.x * nx + v.y * ny + v.z * nz;   // + 면 바깥으로 간다
+            if (vr > 0.f) {
+                const float cut = vr * t * t;                  // 제곱이라 안쪽에서는 거의 안 듣는다
+                v.x -= nx * cut; v.y -= ny * cut; v.z -= nz * cut;
+            }
+            // 안쪽으로 당기는 힘도 거리와 함께 커진다. 속도를 깎는 것만으로도 벽에는
+            // 안 닿지만, 이것이 있어야 가장자리에 알갱이가 얇게 눌어붙지 않고 돌아온다.
+            const float pull = 2.0f * t * t;
+            v.x -= nx * pull * dt; v.y -= ny * pull * dt; v.z -= nz * pull * dt;
+
+            // 그래도 한계를 넘었으면 구면에 붙인다 — 큐브 벽이 아니라 **구면**이다.
+            if (r > R1) {
+                const float k = R1 * inv;
+                p.x = 0.5f + dx * k; p.y = 0.5f + dy * k; p.z = 0.5f + dz * k;
+            }
+        }
     } else {
         // 고립 경계에서는 판 밖으로 못 나가게 붙잡고 속도를 죽인다.
         if (p.x < 0.002f) { p.x = 0.002f; v.x = fabsf(v.x) * 0.25f; }
@@ -4208,7 +4250,9 @@ void Sim::step() {
         (d.cfg.contactEnabled || d.cfg.strongForceEnabled || d.cfg.emForceEnabled)
             ? d.accContact : nullptr,
         // 압력 가속도 — 적분이 **가스에만** 더한다. 별은 서로 부딪히지 않는다.
-        d.accPress);
+        d.accPress,
+        // 구형 경계(0 이면 예전 큐브 벽). 주기 경계에서는 애초에 안 쓴다.
+        d.periodic() ? 0.f : fmaxf(d.cfg.softBoundR, 0.f));
     CK(cudaGetLastError());
 
     if (d.bhCount > 0) {
