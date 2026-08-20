@@ -665,18 +665,20 @@ void DrawZoomBar(App& app, int viewW, int viewH) {
     const bool hov = ImGui::IsItemHovered();
     const bool act = ImGui::IsItemActive();
 
-    if (act) {
-        const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 1.0f);
-        if (d.y != 0.0f) {
-            // 위로 끌면 확대. 한 픽셀에 휠 한 칸의 1/12 쯤 — 끌어서 세밀하게 맞추기 좋다.
-            app.zoomRequest += -d.y * (1.0f / 12.0f);
-            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
-        }
-    }
-
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float cx = p.x + (w - 6.0f) * 0.5f;
     const float top = p.y + 16.0f, bot = p.y + h - 28.0f;
+
+    // 거리 눈금 — 가까울수록 위(확대). 로그로 편다.
+    const float kNear = 0.05f, kFar = 3.0f;
+
+    if (act) {
+        // **마우스가 있는 자리를 그대로 목표로 삼는다.** 증분을 쌓으면 손잡이가
+        // 손가락을 안 따라온다(끌기와 그리기의 눈금이 달라서다).
+        const float my = ImGui::GetIO().MousePos.y;
+        const float t = Clampf(1.0f - (my - top) / fmaxf(bot - top, 1.0f), 0.0f, 1.0f);
+        app.zoomTarget = kNear * powf(kFar / kNear, 1.0f - t);
+    }
 
     // 트랙
     dl->AddLine(ImVec2(cx, top), ImVec2(cx, bot), IM_COL32(255, 255, 255, 30), 3.0f);
@@ -687,15 +689,15 @@ void DrawZoomBar(App& app, int viewW, int viewH) {
     dl->AddLine(ImVec2(cx, top - 13.0f), ImVec2(cx, top - 3.0f), mark, 1.6f);
     dl->AddLine(ImVec2(cx - 5.0f, bot + 9.0f), ImVec2(cx + 5.0f, bot + 9.0f), mark, 1.6f);
 
-    // 손잡이 — 지금 얼마나 확대돼 있는지를 판 중심까지의 거리로 나타낸다.
-    // 가까울수록 위(확대), 멀수록 아래. 거리 0.05~3.0 을 로그로 편다.
+    // 손잡이 — 지금 판 중심까지의 거리를 위 눈금으로 되읽는다.
+    // 끌고 있을 때는 마우스 자리가 곧 이 자리라, 손잡이가 손가락에 붙어 움직인다.
     float t = 0.5f;
     {
         const float* rz = app.camRot + 6;
         const float toC[3] = { 0.5f - app.camPos[0], 0.5f - app.camPos[1], 0.5f - app.camPos[2] };
         const float dist = toC[0]*rz[0] + toC[1]*rz[1] + toC[2]*rz[2];
-        const float d = Clampf(dist, 0.05f, 3.0f);
-        t = 1.0f - logf(d / 0.05f) / logf(3.0f / 0.05f);   // 가까우면 1(위)
+        const float d = Clampf(dist, kNear, kFar);
+        t = 1.0f - logf(d / kNear) / logf(kFar / kNear);   // 가까우면 1(위)
     }
     const float gy = bot - (bot - top) * Clampf(t, 0.0f, 1.0f);
     dl->AddCircleFilled(ImVec2(cx, gy), (hov || act) ? 8.0f : 6.5f, kAccent);

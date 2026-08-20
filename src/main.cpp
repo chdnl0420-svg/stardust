@@ -757,11 +757,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             ClampPan(app);
         }
 
-        // 왼쪽 줌 막대가 요청한 확대를 여기서 처리한다 — 휠과 **같은 함수**를 쓴다.
-        if (app.zoomRequest != 0.0f) {
-            ApplyZoom(app, app.zoomRequest);
-            app.zoomRequest = 0.0f;
+        // 왼쪽 줌 막대가 잡은 **목표 거리**로 카메라를 옮긴다.
+        //
+        // 휠은 「한 칸에 몇 % 」로 움직이지만 막대는 손가락이 있는 자리를 그대로 가리킨다 —
+        // 그래야 손잡이가 마우스를 따라온다. 그래서 여기만 `ApplyZoom` 을 안 쓰고
+        // 목표 거리로 직접 옮긴다(보는 방향으로 잰 거리 하나만 바꾸므로 계산이 한 줄이다).
+        if (app.zoomTarget > 0.0f && app.camFly) {
+            const float* rz = app.camRot + 6;
+            const float toC[3] = { 0.5f - app.camPos[0],
+                                   0.5f - app.camPos[1],
+                                   0.5f - app.camPos[2] };
+            const float dist = toC[0]*rz[0] + toC[1]*rz[1] + toC[2]*rz[2];
+            const float mv = dist - app.zoomTarget;    // 이만큼 앞으로 가면 목표 거리가 된다
+            for (int k = 0; k < 3; ++k) app.camPos[k] += rz[k] * mv;
         }
+        app.zoomTarget = 0.0f;
 
         // 설정 창에서 전체화면을 뒤집었으면 여기서 실제로 창을 옮긴다.
         // **UI 는 값만 바꾸고 창은 건드리지 않는다** — `ToggleFullscreen` 이 되돌아가며
