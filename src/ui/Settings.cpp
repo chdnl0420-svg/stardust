@@ -328,9 +328,10 @@ void TabGravity(App& app) {
 
     Line();
     GroupLabel("시간 나아가기");
-    SliderLine("dt", "빠르기", &app.cfg.timeScale, 0.1f, 10.0f, "%.2f", true);
+    SliderLine("dt", "빠르기", &app.cfg.timeScale, 0.1f, 40.0f, "%.2f", true);
     UnderNote("배속 1.0 에서 팽창은 10 초쯤, 구조는 4 분쯤에 여문다. "
-              "낮추면 팽창이 천천히 보이는 대신 구조까지 오래 걸린다.");
+              "3 배까지는 스텝을 나눠 돌고 그 위는 한 스텝의 폭을 넓혀 낸다 — "
+              "넓힌 폭은 안정성 검사(CFL)가 잘라 주므로 빠른 국면에서는 저절로 줄어든다.");
 
     Line();
     GroupLabel("우주의 눈금");

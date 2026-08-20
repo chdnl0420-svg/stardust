@@ -4170,19 +4170,14 @@ void Sim::step() {
     float vmax = 0.f;
     CK(cudaMemcpy(&vmax, d.redF, sizeof(float), cudaMemcpyDeviceToHost));
     const float cell = 1.0f / (float)d.allocG;
-    // **배속을 1 위로는 `dt` 에 안 싣는다(2026-08-17에 고친 이중 적용).**
+    // **배속을 스텝 반복과 dt 로 나눠 싣는다** — 규칙은 `Sim.h` 의 `dtScaleFor` 하나뿐이고
+    // `App::tick` 의 `stepRepsFor` 와 짝이다. 둘이 어긋나면 배속이 이중으로 적용된다
+    // (2026-08-17 에 그랬다: 배속 2.8 이 dt 2.8배 × 스텝 3번 = 8.4배로 흘렀다).
     //
-    // `App::tick` 이 이미 배속만큼 **스텝을 여러 번** 돌린다(`reps`). 그런데 여기서 `dt`
-    // 에도 곱하고 있어서 **둘이 곱해졌다** — 배속 2.8 이면 `dt` 2.8배 × 스텝 3번 =
-    // **8.4배**로 흘렀다.
-    //
-    // 더 나쁜 것은 `dt` 를 늘린 쪽이다. `App::tick` 의 주석이 「시간 간격을 늘려서는 못
-    // 낸다(CFL 안정성 한계)」고 적어 두었는데 그 금지가 여기서 깨지고 있었다. 실측에서
-    // 최고 속도가 **광속의 82%** 까지 갔고, 우주가 「굉장히 역동적으로」 보인다는 지적이
-    // 거기서 나왔다.
-    //
-    // 1 아래로는 그대로 곱한다 — 느리게 볼 때는 스텝 수를 못 줄이므로 `dt` 로 낮춘다.
-    float dt = 0.0016f * fminf(d.cfg.timeScale, 1.0f);
+    // 앞의 3 배까지는 스텝을 나눠 돌므로 여기 dt 는 그대로고, 그 위부터 dt 가 커진다.
+    // 커진 dt 는 **바로 아래 CFL 검사가 자른다** — 빠르게 움직이는 국면에서는
+    // 한 스텝에 격자 한 칸을 못 넘게 저절로 줄어든다.
+    float dt = 0.0016f * dtScaleFor(d.cfg.timeScale);
     const float dtMax = (vmax > 1e-6f) ? (0.8f * cell / vmax) : dt;
     if (dt > dtMax) dt = dtMax;
 

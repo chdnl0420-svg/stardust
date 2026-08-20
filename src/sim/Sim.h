@@ -66,6 +66,32 @@ constexpr double kLightYearsPerUnit = 1.0e5;
 constexpr float kLightSpeed   = (float)(kYearsPerSimUnit / kLightYearsPerUnit);
 constexpr float kLightSpeedSq = kLightSpeed * kLightSpeed;
 
+// ── 배속을 「스텝 반복」과 「dt」로 나누는 규칙 ─────────────────────────────
+//
+// **한 곳에 적고 둘이 함께 본다.** `App::tick` 은 스텝을 몇 번 돌지, `Sim::step` 은
+// dt 를 얼마로 할지 각각 정하는데, 규칙이 어긋나면 배속이 **이중으로 적용되거나 빠진다** —
+// 2026-08-17 에 실제로 그랬다(배속 2.8 이 dt 2.8배 × 스텝 3번 = 8.4배로 흘렀다).
+//
+// 왜 나누는가. 배속을 스텝 반복으로만 내면 **GPU 가 초당 도는 스텝 수가 천장**이 된다
+// (실측: 스텝 5 ms 면 초당 200 회 → 배속 3.3 배에서 더 안 빨라지고 fps 만 떨어진다).
+// dt 를 키우면 같은 스텝 수로 더 멀리 가므로 fps 를 안 잃는데, 대신 적분이 성겨진다.
+//
+// 그래서 **앞의 3 배까지는 스텝을 나눠 돌아 정확도를 지키고, 그 위는 dt 로 채운다.**
+// dt 가 지나치게 커지는 것은 `Sim::step` 의 CFL 검사가 막는다(한 스텝에 격자 한 칸을
+// 넘지 못한다) — 빠르게 움직이는 국면에서는 거기서 저절로 잘린다.
+constexpr float kMaxStepReps = 3.0f;
+
+inline int stepRepsFor(float timeScale) {
+    if (timeScale <= 1.0f) return 1;
+    const float r = (timeScale < kMaxStepReps) ? timeScale : kMaxStepReps;
+    return (int)(r + 0.5f);
+}
+inline float dtScaleFor(float timeScale) {
+    // 1 아래로는 스텝 수를 못 줄이므로 dt 로 낮춘다.
+    if (timeScale <= 1.0f) return timeScale;
+    return (timeScale <= kMaxStepReps) ? 1.0f : (timeScale / kMaxStepReps);
+}
+
 // **판을 더 크게 볼 때는 길이와 시간을 같은 배율로 늘린다 — 광속은 불변이다.**
 //
 // 처음에는 길이만 1000 배로 늘렸다. 위 식이 c = (시간 눈금)/(길이 눈금) 이니 광속이

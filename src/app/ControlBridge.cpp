@@ -527,7 +527,9 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         // 이상한 값이 들어가는 구멍이 안 생긴다.
         if (has(kv, "gravity"))        app.cfg.gravity        = clampF(getFloat(kv, "gravity", app.cfg.gravity), 0.0f, 2.0f, app.cfg.gravity);
         if (has(kv, "softeningCells")) app.cfg.softeningCells = clampF(getFloat(kv, "softeningCells", app.cfg.softeningCells), 0.5f, 6.0f, app.cfg.softeningCells);
-        if (has(kv, "timeScale"))      app.cfg.timeScale      = clampF(getFloat(kv, "timeScale", app.cfg.timeScale), 0.1f, 4.0f, app.cfg.timeScale);
+        // **UI 슬라이더와 같은 범위여야 한다.** 여기가 4.0 이고 UI 가 10.0 이라 어긋나
+        // 있었다 — 제어 채널로 6 을 보내면 4 로 잘리는데 화면에는 6 이 떠 있었다.
+        if (has(kv, "timeScale"))      app.cfg.timeScale      = clampF(getFloat(kv, "timeScale", app.cfg.timeScale), 0.1f, 40.0f, app.cfg.timeScale);
         if (has(kv, "sortInterval"))   app.cfg.sortInterval   = clampI(getInt(kv, "sortInterval", app.cfg.sortInterval), 1, 120);
         if (has(kv, "pressure"))       app.cfg.pressureEnabled = getInt(kv, "pressure", 1) != 0;
         if (has(kv, "pressureK"))      app.cfg.pressureK      = clampF(getFloat(kv, "pressureK", app.cfg.pressureK), 0.0f, 2.0f, app.cfg.pressureK);

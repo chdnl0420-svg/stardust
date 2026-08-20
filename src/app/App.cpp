@@ -304,15 +304,14 @@ void App::tick() {
         stepsLastFrame = 1;
         stepOnce = false;
     } else if (running) {
-        // 배속 > 1 은 시간 간격을 늘려서는 못 낸다(CFL 안정성 한계 — Sim::step 의 주석 참조).
-        // 대신 한 프레임에 스텝을 여러 번 돌린다. 계산량이 그 배수만큼 늘어 프레임 예산을
-        // 넘길 수 있다는 뜻이라, 상한을 8 로 막아 슬라이더 최대값(4.0)에서도 안전하게 둔다.
-        int reps = 1;
-        if (cfg.timeScale > 1.0f) {
-            reps = (int)(cfg.timeScale + 0.5f);
-            if (reps < 1) reps = 1;
-            if (reps > 16) reps = 16;
-        }
+        // **배속을 스텝 반복과 dt 로 나눈다.** 규칙은 `Sim.h` 의 `stepRepsFor` 하나뿐이고
+        // `Sim::step` 의 `dtScaleFor` 와 짝이다 — 둘이 어긋나면 배속이 이중 적용된다.
+        //
+        // 앞의 3 배까지만 여기서 스텝을 나눠 돈다. 그 위를 계속 스텝으로 내면 **GPU 가
+        // 초당 도는 스텝 수가 천장**이라 fps 만 떨어지고 진행량은 안 는다(실측: 스텝 5 ms
+        // 면 초당 200 회 — 배속 3.3 배에서 막힌다). 넘는 몫은 dt 가 받고, 그 dt 는
+        // CFL 이 자른다.
+        const int reps = stepRepsFor(cfg.timeScale);
         for (int i = 0; i < reps; ++i) sim.step();
         // 코어가 실패 상태면 step 은 아무것도 안 하고 돌아온다 — 그때까지 돈 것으로 세면
         // 제어 채널이 멈춘 시뮬레이션을 정상 진행으로 보고한다(round-08 리뷰 A12).
