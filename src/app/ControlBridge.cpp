@@ -435,6 +435,13 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
     // 여기서 세운 stepOnce 는 다음 프레임에야 실행된다 — 예약하면서 바로 빼면
     // 마지막 스텝이 아직 안 돌았는데 pendingSteps=0 으로 응답해, 호출자가 한 스텝 일찍
     // "다 됐다"고 판단한다(round-08 리뷰 A7). App::tick 이 실행하면 stepOnce 가 내려간다.
+    //
+    // **「tick 다음」은 같은 프레임 안이라는 뜻이지 버퍼 교체 뒤라는 뜻이 아니다.**
+    // `main.cpp` 의 순서는 tick → 필드 → ImGui → poll → `present()` 라, poll 은 늘
+    // 교체 **앞**이고 `screenshot` 이 집는 GL_BACK 은 방금 그린 프레임이다.
+    // 2026-08-20 에 검은 스크린샷의 원인을 이 줄을 근거로 「poll 이 SwapBuffers 뒤라
+    // GL_BACK 이 미정의」로 의심했는데 아니었다 — 실제 원인은 기본 보기가 빛(Light)이라
+    // 별이 0 개인 판을 검게 그린 것이었다(App.h 의 `look` 주석).
     if (issuedStep_ && !app.stepOnce) {     // 앞서 예약한 것이 실제로 돌았다
         if (pendingSteps_ > 0) --pendingSteps_;
         issuedStep_ = false;
