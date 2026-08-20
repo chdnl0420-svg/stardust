@@ -19,7 +19,7 @@
 ; **셋째를 빠뜨려 `.rc` 가 0.6.1 에 멈춘 채 0.6.2~0.6.8 이 나갔다** — 2026-08-19 에
 ; 설치본을 확인하다 발견했다(파일 속성 0.6.1, 레지스트리 0.6.6). `ignoreversion`
 ; 플래그 덕에 설치는 되고 있어 아무도 안 걸렸다. **버전을 올릴 때 셋을 함께 올린다.**
-#define AppVersion "0.7.0"
+#define AppVersion "0.7.1"
 #define AppExe     "Stardust.exe"
 #define AppPublisher "JustKim"
 
