@@ -16,8 +16,8 @@
 // (2026-08-19 에 발견 — 설치본 파일 속성은 0.6.1, 레지스트리는 0.6.6 이었다).
 // 설치는 `ignoreversion` 플래그 덕에 되고 있었으므로 아무도 안 걸렸다.
 1 VERSIONINFO
-FILEVERSION    0,6,9,0
-PRODUCTVERSION 0,6,9,0
+FILEVERSION    0,7,0,0
+PRODUCTVERSION 0,7,0,0
 FILEOS         VOS_NT_WINDOWS32
 FILETYPE       VFT_APP
 BEGIN
@@ -28,11 +28,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "JustKim"
       VALUE "FileDescription",  "Stardust"
-      VALUE "FileVersion",      "0.6.9"
+      VALUE "FileVersion",      "0.7.0"
       VALUE "InternalName",     "Stardust"
       VALUE "OriginalFilename", "Stardust.exe"
       VALUE "ProductName",      "Stardust"
-      VALUE "ProductVersion",   "0.6.9"
+      VALUE "ProductVersion",   "0.7.0"
     END
   END
   BLOCK "VarFileInfo"
