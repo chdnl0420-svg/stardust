@@ -696,9 +696,20 @@ void DrawPhysicsBoard(App& app, int viewW, int viewH) {
     const float x = (float)viewW - w - margin + app.physBoardSlide * hidden;
 
     // 여닫는 손잡이. 보드 **왼쪽 바깥**에 붙어 함께 미끄러진다.
+    //
+    // **창 패딩을 0 으로 둔다.** ImGui 기본 패딩(8 px)이 들어가면 26 px 짜리 창에서
+    // 내용이 잘린다 — 화살표가 반만 보였다(2026-08-20).
+    //
+    // **닫혔을 때는 화면 안쪽으로 붙인다.** 보드를 따라 그대로 밀면 손잡이도 함께
+    // 화면 밖으로 나가 다시 꺼낼 방법이 사라진다.
     {
-        const float bw = 22.0f, bh = 40.0f;
-        ImGui::SetNextWindowPos(ImVec2(x - bw - 4.0f, 20.0f), ImGuiCond_Always);
+        const float bw = 26.0f, bh = 44.0f;
+        float hx = x - bw - 4.0f;
+        const float hxMax = (float)viewW - bw - 8.0f;      // 오른쪽 끝에 남길 자리
+        if (hx > hxMax) hx = hxMax;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::SetNextWindowPos(ImVec2(hx, 20.0f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(bw, bh), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.0f);
         ImGui::Begin("##physhandle", nullptr,
@@ -707,20 +718,22 @@ void DrawPhysicsBoard(App& app, int viewW, int viewH) {
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoNav);
         const ImVec2 p = ImGui::GetCursorScreenPos();
-        const bool pressed = ImGui::InvisibleButton("##t", ImVec2(bw, bh - 8.0f));
+        const bool pressed = ImGui::InvisibleButton("##t", ImVec2(bw, bh));
         const bool hov = ImGui::IsItemHovered();
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p, ImVec2(p.x + bw, p.y + bh - 8.0f),
-                          hov ? IM_COL32(255,255,255,40) : IM_COL32(255,255,255,20), 7.0f);
+        dl->AddRectFilled(p, ImVec2(p.x + bw, p.y + bh),
+                          hov ? IM_COL32(255,255,255,46) : IM_COL32(255,255,255,26), 8.0f);
+        dl->AddRect(p, ImVec2(p.x + bw, p.y + bh), kGlassLine, 8.0f);
         // 화살표 — 펼쳐져 있으면 「>」(밀어 넣기), 감춰져 있으면 「<」(꺼내기).
-        const float cx = p.x + bw * 0.5f, cy = p.y + (bh - 8.0f) * 0.5f;
+        const float cx = p.x + bw * 0.5f, cy = p.y + bh * 0.5f;
         const float s = app.physBoardOpen ? 1.0f : -1.0f;
         const ImU32 col = hov ? kInk : kInkDim;
-        dl->AddLine(ImVec2(cx - 3.0f * s, cy - 5.0f), ImVec2(cx + 3.0f * s, cy), col, 1.8f);
-        dl->AddLine(ImVec2(cx + 3.0f * s, cy), ImVec2(cx - 3.0f * s, cy + 5.0f), col, 1.8f);
+        dl->AddLine(ImVec2(cx - 3.5f * s, cy - 6.0f), ImVec2(cx + 3.5f * s, cy), col, 2.0f);
+        dl->AddLine(ImVec2(cx + 3.5f * s, cy), ImVec2(cx - 3.5f * s, cy + 6.0f), col, 2.0f);
         if (pressed) app.physBoardOpen = !app.physBoardOpen;
         Tip(app.physBoardOpen ? "물리 보드를 밀어 넣습니다" : "물리 보드를 꺼냅니다");
         ImGui::End();
+        ImGui::PopStyleVar();
     }
 
     // 다 밀려 들어갔으면 보드 자체는 그리지 않는다(창 밖이라 어차피 안 보인다).
