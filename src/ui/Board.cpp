@@ -778,32 +778,57 @@ void DrawPhysicsBoard(App& app, int viewW, int viewH) {
 
     ImGui::Dummy(ImVec2(1.0f, 8.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+    ImGui::TextUnformatted("시간 배속");
+    ImGui::PopStyleColor();
+    {
+        // **바로 듣는다** — 알갱이 수와 달리 판을 다시 안 깔아도 된다.
+        //
+        // 3 배까지는 한 프레임에 스텝을 나눠 돌고, 그 위는 한 스텝의 폭(dt)을 넓혀 낸다.
+        // 넓힌 폭은 안정성 검사(CFL)가 자르므로 빠른 국면에서는 저절로 줄어든다.
+        // 실측(2026-08-20): 배속 30 에서 11.5 배 빨라지고 구조는 오차 5~7% 안이었다.
+        char tv[32]; snprintf(tv, sizeof(tv), "%.1f배", app.cfg.timeScale);
+        float tt = logf(Clampf(app.cfg.timeScale, 0.1f, 40.0f) / 0.1f) / logf(400.0f);
+        ImGui::PushID("tscale");
+        if (TrackRow("빠르기", tv, &tt, ImGui::GetContentRegionAvail().x))
+            app.cfg.timeScale = 0.1f * expf(logf(400.0f) * tt);
+        ImGui::PopID();
+        if (app.cfg.timeScale > 3.0f) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+            ImGui::TextUnformatted("3배 위는 한 걸음을 넓혀 냅니다");
+            ImGui::PopStyleColor();
+        }
+    }
+
+    ImGui::Dummy(ImVec2(1.0f, 8.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
     ImGui::TextUnformatted("알갱이 수");
     ImGui::PopStyleColor();
 
-    // **상한 100만은 실측으로 정했다**(2026-08-20, 필라멘트가 다 퍼진 뒤 잰 값):
+    // **상한은 실측으로 정했다**(2026-08-20, 배속 1 · 다 퍼진 뒤):
     //
-    //   30만  프레임 18.5 ms  54 fps   여유
-    //   60만  프레임 27.1 ms  37 fps   빠듯
-    //   100만 프레임 37.4 ms  27 fps   가드 문턱(40)에 3 ms 남음
-    //   200만 프레임 60.8 ms  16 fps   가드가 판을 다시 깐다
+    //   100만  스텝 12.6 ms  프레임 16.7 ms  60 fps  여유
+    //   200만  스텝 23.1 ms  프레임 25.0 ms  40 fps  빠듯
+    //   400만  스텝 38.9 ms  프레임 42.9 ms  23 fps  가드가 판을 다시 깐다
     //
-    // 병목은 렌더다 — 100만에서 스텝 10 ms 인데 렌더가 27 ms 다. 알갱이가 판 전체로
-    // 퍼질수록 무거워지므로, 짧게 재면 후하게 나온다.
+    // **병목은 스텝(중력)이고 알갱이 수에 정비례한다** — 렌더는 4 ms 로 거의 안 는다.
+    // 처음에 배속 8 로 재서 프레임이 3 배로 나왔고 그것을 렌더 탓으로 읽었다.
     const int shown = (app.pendingCount > 0) ? app.pendingCount : app.cfg.particleCount;
     int man = shown / 10000;
     char v[32]; snprintf(v, sizeof(v), "%d만", man);
-    float t = (float)(man - 5) / 95.0f;
+    float t = (float)(man - 5) / 195.0f;      // 5만~200만
     ImGui::PushID("pcount");
     if (TrackRow("개수", v, &t, ImGui::GetContentRegionAvail().x)) {
-        man = 5 + (int)(t * 95.0f + 0.5f);
+        man = 5 + (int)(t * 195.0f + 0.5f);
         app.pendingCount = man * 10000;
     }
     ImGui::PopID();
     if (app.pendingCount > 0 && app.pendingCount != app.cfg.particleCount) {
+        // 실측(2026-08-20, 다 퍼진 뒤): 15만 60fps · 30만 54fps · 60만 37fps ·
+        // 100만은 가드가 알갱이를 줄이며 **판을 다시 깐다**(빅뱅이 되풀이된다).
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
-        ImGui::TextUnformatted(app.pendingCount > 600000 ? "60만 위는 느려집니다"
-                                                         : "다시 시작해야 바뀝니다");
+        ImGui::TextUnformatted(app.pendingCount > 2500000 ? "판이 다시 깔릴 수 있습니다"
+                             : app.pendingCount > 1200000 ? "200만이 도는 한계입니다"
+                                                          : "다시 시작해야 바뀝니다");
         ImGui::PopStyleColor();
         if (ImGui::Button("이 개수로 다시 시작", ImVec2(-1.0f, 26.0f))) {
             app.cfg.particleCount = app.pendingCount;
