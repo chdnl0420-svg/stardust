@@ -22,6 +22,10 @@ void DrawShapeDrawer(App& app, int viewW, int viewH);
 // 하단 막대 — 장면 칩 · 도구 · 값 알약 · 녹화.
 void DrawBottomBar(App& app, int viewW, int viewH);
 
+// 화면 오른쪽 위의 물리 보드. 어떤 힘을 켤지와 알갱이 수를 여기서 정한다.
+// 켜고 끄는 것은 곧바로 듣고, 알갱이 수만 판을 다시 깔아야 반영된다.
+void DrawPhysicsBoard(App& app, int viewW, int viewH);
+
 // 화면 왼쪽 가운데의 줌 막대. 위아래로 끌어 확대·축소한다.
 // 실제로 카메라를 옮기는 것은 프레임 루프다 — 여기서는 `app.zoomRequest` 에 얼마나
 // 확대할지만 적는다(휠 처리와 같은 코드를 쓰려는 것이다).

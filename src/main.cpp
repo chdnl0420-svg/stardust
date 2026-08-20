@@ -838,6 +838,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int) {
             DrawBlackHoleRings(app, g_w, g_h);
             DrawSceneDrawer(app, g_w, g_h);
             DrawShapeDrawer(app, g_w, g_h);
+            DrawPhysicsBoard(app, g_w, g_h);
             DrawZoomBar(app, g_w, g_h);
             DrawBottomBar(app, g_w, g_h);
             DrawMeters(app, g_w, g_h);

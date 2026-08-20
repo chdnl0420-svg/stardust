@@ -634,6 +634,191 @@ void DrawSceneDrawer(App& app, int viewW, int viewH) {
     ImGui::PopStyleColor();
 }
 
+// ── 오른쪽 위 물리 보드 ─────────────────────────────────────────────────────
+//
+// 「물리 계산 켜고 끌수 있게 우측 상단에 별도 보드 만들어줘. 거기서 공식들 켜고
+// 끌수있게해줘. 최대 입자 개수도 거기서 설정할수있게 변경해줘.」(2026-08-20)
+//
+// **중력은 스위치가 없다** — 이 판이 그것 하나로 서 있어서 끄면 아무 일도 안 일어난다.
+// 켜져 있다는 것만 보여 준다.
+//
+// **장면을 새로 고르면 여기서 켠 것이 도로 꺼진다.** 장면 전환은 「새로 시작」이고,
+// 켠 채로 따라오면 사용자가 모르는 힘이 도는 판이 된다(2026-08-19 에 그 일이 있었다 —
+// 전자기력이 켜진 채 필라멘트가 돌아 「중력 공식만으로 동작하는 걸로는 안 보였어」).
+namespace {
+
+// 보드 안의 한 줄짜리 스위치. 설정 창의 것과 달리 폭이 좁아 설명은 툴팁으로 준다.
+bool BoardToggle(const char* id, const char* label, const char* tip, bool* v,
+                 bool enabled = true) {
+    ImGui::PushID(id);
+    const float w = ImGui::GetContentRegionAvail().x;
+    const float h = 24.0f;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##t", ImVec2(w, h));
+    const bool hov = ImGui::IsItemHovered() && enabled;
+    bool changed = false;
+    if (ImGui::IsItemDeactivated() && enabled) { *v = !*v; changed = true; }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float sw = 30.0f, sh = 15.0f;          // 스위치 크기
+    const float sx = p.x + w - sw, sy = p.y + (h - sh) * 0.5f;
+    const ImU32 track = !enabled ? IM_COL32(255,255,255,20)
+                                 : (*v ? kAccentLine : IM_COL32(255,255,255,36));
+    dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + sw, sy + sh), track, sh * 0.5f);
+    const float kx = *v ? (sx + sw - sh * 0.5f) : (sx + sh * 0.5f);
+    dl->AddCircleFilled(ImVec2(kx, sy + sh * 0.5f), sh * 0.5f - 2.0f,
+                        !enabled ? kInkGhost : (*v ? kAccent : kInkFaint));
+    const ImVec2 ls = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(p.x, p.y + (h - ls.y) * 0.5f),
+                !enabled ? kInkGhost : (hov ? kInk : kInkDim), label);
+    ImGui::PopID();
+    if (tip) Tip(tip);
+    return changed;
+}
+
+}  // namespace
+
+void DrawPhysicsBoard(App& app, int viewW, int viewH) {
+    if (app.uiHidden || viewW <= 0) return;
+
+    const float w = 236.0f;
+
+    // ── 미끄러져 들어가고 나온다 ────────────────────────────────────────────
+    //
+    // 목표 자리로 조금씩 당긴다(프레임마다 남은 거리의 22%). 툭 사라지면 어디로 갔는지
+    // 모르지만, 밀려나는 것이 보이면 오른쪽 끝에 있다는 것이 남는다.
+    const float target = app.physBoardOpen ? 0.0f : 1.0f;
+    app.physBoardSlide += (target - app.physBoardSlide) * 0.22f;
+    if (fabsf(target - app.physBoardSlide) < 0.001f) app.physBoardSlide = target;
+
+    const float margin = 20.0f;
+    const float hidden = w + margin + 6.0f;              // 다 밀리면 이만큼 밖으로
+    const float x = (float)viewW - w - margin + app.physBoardSlide * hidden;
+
+    // 여닫는 손잡이. 보드 **왼쪽 바깥**에 붙어 함께 미끄러진다.
+    {
+        const float bw = 22.0f, bh = 40.0f;
+        ImGui::SetNextWindowPos(ImVec2(x - bw - 4.0f, 20.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(bw, bh), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.0f);
+        ImGui::Begin("##physhandle", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoNav);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const bool pressed = ImGui::InvisibleButton("##t", ImVec2(bw, bh - 8.0f));
+        const bool hov = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, ImVec2(p.x + bw, p.y + bh - 8.0f),
+                          hov ? IM_COL32(255,255,255,40) : IM_COL32(255,255,255,20), 7.0f);
+        // 화살표 — 펼쳐져 있으면 「>」(밀어 넣기), 감춰져 있으면 「<」(꺼내기).
+        const float cx = p.x + bw * 0.5f, cy = p.y + (bh - 8.0f) * 0.5f;
+        const float s = app.physBoardOpen ? 1.0f : -1.0f;
+        const ImU32 col = hov ? kInk : kInkDim;
+        dl->AddLine(ImVec2(cx - 3.0f * s, cy - 5.0f), ImVec2(cx + 3.0f * s, cy), col, 1.8f);
+        dl->AddLine(ImVec2(cx + 3.0f * s, cy), ImVec2(cx - 3.0f * s, cy + 5.0f), col, 1.8f);
+        if (pressed) app.physBoardOpen = !app.physBoardOpen;
+        Tip(app.physBoardOpen ? "물리 보드를 밀어 넣습니다" : "물리 보드를 꺼냅니다");
+        ImGui::End();
+    }
+
+    // 다 밀려 들어갔으면 보드 자체는 그리지 않는다(창 밖이라 어차피 안 보인다).
+    if (app.physBoardSlide > 0.995f) return;
+
+    ImGui::SetNextWindowPos(ImVec2(x, 20.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(w, 0.0f), ImGuiCond_Always);   // 높이는 내용에 맞춘다
+    ImGui::SetNextWindowBgAlpha(0.86f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
+    ImGui::Begin("##physics", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                 ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+    ImGui::TextUnformatted("물리");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(1.0f, 4.0f));
+
+    // 중력 — 끌 수 없다. 이 판이 그것 하나로 서 있다.
+    {
+        bool on = true;
+        BoardToggle("grav", "중력", "이 판의 바탕이라 끌 수 없습니다", &on, false);
+    }
+
+    ImGui::Dummy(ImVec2(1.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+    ImGui::TextUnformatted("가스와 별");
+    ImGui::PopStyleColor();
+    BoardToggle("cool",  "식어서 뭉치기", "이웃과 어긋난 움직임을 걷어냅니다", &app.cfg.coolingEnabled);
+    BoardToggle("press", "압력",         "빽빽한 곳이 스스로 부풉니다", &app.cfg.pressureEnabled);
+    // **별 만들기는 압력에 얹혀 있다.** 별이 될지 가리는 Jeans 조건이 속도 분산(σ²)을
+    // 쓰는데 그 값을 압력 쪽이 만든다 — 압력이 꺼져 있으면 켜도 아무 일이 안 일어난다
+    // (2026-08-20 실측: starCount 가 0 에서 안 올랐다). 그래서 못 켜게 막고 까닭을 적는다.
+    BoardToggle("star",  "별 만들기",
+                app.cfg.pressureEnabled ? "빽빽하고 찬 가스가 별이 됩니다"
+                                        : "압력을 먼저 켜야 합니다 — 별 판정이 그 값을 씁니다",
+                &app.cfg.starFormationEnabled, app.cfg.pressureEnabled);
+    if (!app.cfg.pressureEnabled && app.cfg.starFormationEnabled)
+        app.cfg.starFormationEnabled = false;   // 압력을 끄면 함께 내려간다
+    BoardToggle("bh",    "블랙홀",        "무너진 자리에 지평선이 생깁니다", &app.cfg.collapseEnabled);
+
+    ImGui::Dummy(ImVec2(1.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+    ImGui::TextUnformatted("나머지 세 힘");
+    ImGui::PopStyleColor();
+    const bool fits = ContactFitsCount(app.cfg.particleCount, app.cfg.gridSize);
+    BoardToggle("contact", "서로 부딪히기", "겹치면 밀어냅니다", &app.cfg.contactEnabled, fits);
+    BoardToggle("strong",  "강한핵력",     "아주 가까울 때만 세게 당깁니다", &app.cfg.strongForceEnabled, fits);
+    BoardToggle("em",      "전자기력",     "같은 부호는 밀고 다른 부호는 당깁니다", &app.cfg.emForceEnabled, fits);
+    BoardToggle("weak",    "약한핵력",     "부호가 이따금 뒤집힙니다(베타 붕괴)",
+                &app.cfg.weakForceEnabled, app.cfg.emForceEnabled);
+
+    ImGui::Dummy(ImVec2(1.0f, 8.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+    ImGui::TextUnformatted("알갱이 수");
+    ImGui::PopStyleColor();
+
+    // **상한 100만은 실측으로 정했다**(2026-08-20, 필라멘트가 다 퍼진 뒤 잰 값):
+    //
+    //   30만  프레임 18.5 ms  54 fps   여유
+    //   60만  프레임 27.1 ms  37 fps   빠듯
+    //   100만 프레임 37.4 ms  27 fps   가드 문턱(40)에 3 ms 남음
+    //   200만 프레임 60.8 ms  16 fps   가드가 판을 다시 깐다
+    //
+    // 병목은 렌더다 — 100만에서 스텝 10 ms 인데 렌더가 27 ms 다. 알갱이가 판 전체로
+    // 퍼질수록 무거워지므로, 짧게 재면 후하게 나온다.
+    const int shown = (app.pendingCount > 0) ? app.pendingCount : app.cfg.particleCount;
+    int man = shown / 10000;
+    char v[32]; snprintf(v, sizeof(v), "%d만", man);
+    float t = (float)(man - 5) / 95.0f;
+    ImGui::PushID("pcount");
+    if (TrackRow("개수", v, &t, ImGui::GetContentRegionAvail().x)) {
+        man = 5 + (int)(t * 95.0f + 0.5f);
+        app.pendingCount = man * 10000;
+    }
+    ImGui::PopID();
+    if (app.pendingCount > 0 && app.pendingCount != app.cfg.particleCount) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.40f, 0.48f, 1.0f));
+        ImGui::TextUnformatted(app.pendingCount > 600000 ? "60만 위는 느려집니다"
+                                                         : "다시 시작해야 바뀝니다");
+        ImGui::PopStyleColor();
+        if (ImGui::Button("이 개수로 다시 시작", ImVec2(-1.0f, 26.0f))) {
+            app.cfg.particleCount = app.pendingCount;
+            ApplyAutoGrid(app.cfg);
+            app.applyConfig();
+            app.sim.reset();
+            app.running = true;
+            app.pendingCount = 0;
+        }
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
 // ── 왼쪽 줌 막대 ────────────────────────────────────────────────────────────
 //
 // 「마우스 클릭 드래그 만으로도 줌 할수있게 화면 왼쪽에 UI만들어줘」(2026-08-19).

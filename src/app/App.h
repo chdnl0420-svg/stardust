@@ -101,6 +101,15 @@ struct App {
     // 카메라를 실제로 옮기는 것은 프레임 루프다 — 원근에서 확대는 카메라를 앞으로
     // 옮기는 일이라 `camRot`·`camPos`가 얽히고, 그 계산을 한 곳에 둬야 휠과 안 어긋난다.
     float zoomTarget = 0.0f;
+
+    // 물리 보드에서 고른 알갱이 수. 판을 다시 깔아야 반영되므로 바로 안 쓰고 여기 담아
+    // 둔다 — 슬라이더를 끄는 동안 판이 매번 다시 깔리면 화면이 계속 초기화된다.
+    int   pendingCount = 0;
+
+    // 물리 보드가 펼쳐져 있는가, 그리고 지금 얼마나 밀려나 있는가(0 = 펼침, 1 = 감춤).
+    // 위치를 목표값으로 조금씩 당겨 미끄러지게 한다 — 툭 사라지면 어디로 갔는지 모른다.
+    bool  physBoardOpen  = true;
+    float physBoardSlide = 0.0f;
     bool  stepOnce = false;    // "한 스텝" 버튼
     Tool  tool = Tool::Camera;
 
