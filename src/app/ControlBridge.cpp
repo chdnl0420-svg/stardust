@@ -276,6 +276,9 @@ std::string ControlBridge::statusBody(const App& app) const {
         // 끄는 코드를 넣는 것만으로는 부족하다 — **껐다는 것을 잴 수 있어야 한다.**
         "coreStrong=%d\ncoreEm=%d\ncoreWeak=%d\ncoreSpin=%.4f\ncoreLenScale=%.1f\n"
         "coreHubble=%.4f\ncoreBigBang=%.4f\ncoreDarkE=%.2f\ncoreSoftBound=%.3f\ncoreVelDisp=%.3f\n"
+        // 저절로 생기는 블랙홀. **켰다는 것을 잴 수 있어야 한다** — 이것이 없어서
+        // 「블랙홀 0 개」가 물리 탓인지 명령이 안 먹은 탓인지 가릴 수 없었다(2026-08-20).
+        "coreCollapse=%d\ncoreCollapseDens=%.1f\ncoreBhCap=%.4f\n"
         // **나머지 설정도 같은 창으로 낸다(2026-08-18).**
         //
         // 전수조사에서 설정 스물넷을 보내 대조했더니 **열셋은 밖에서 확인할 방법이 없었다.**
@@ -373,6 +376,8 @@ std::string ControlBridge::statusBody(const App& app) const {
         sim.config().weakForceEnabled ? 1 : 0, sim.config().spin, sim.config().lengthScale,
         sim.config().hubble, sim.config().bigBangShrink,
         sim.config().darkEnergy, sim.config().softBoundR, sim.config().velDispersion,
+        sim.config().collapseEnabled ? 1 : 0, sim.config().collapseDensity,
+        sim.config().blackHoleMassCap,
         // 위 포맷의 `core*` 열넷과 **같은 순서**여야 한다 — 어긋나면 뒤쪽 필드가 통째로
         // 엉뚱한 값이 되고, 그것은 밖에서 0 과 구분되지 않는다.
         sim.config().coolingRate, sim.config().starFormEfficiency,
@@ -539,6 +544,18 @@ bool ControlBridge::poll(App& app, int viewW, int viewH) {
         if (has(kv, "timeScale"))      app.cfg.timeScale      = clampF(getFloat(kv, "timeScale", app.cfg.timeScale), 0.1f, 40.0f, app.cfg.timeScale);
         if (has(kv, "sortInterval"))   app.cfg.sortInterval   = clampI(getInt(kv, "sortInterval", app.cfg.sortInterval), 1, 120);
         if (has(kv, "pressure"))       app.cfg.pressureEnabled = getInt(kv, "pressure", 1) != 0;
+        // **저절로 생기는 블랙홀 — 이 둘이 빠져 있었다(2026-08-20).**
+        //
+        // 보드의 「블랙홀」 토글이 만지는 값인데 밖에서 켤 길이 없어, 「블랙홀을 켜면 판이
+        // 무너진다」는 보고를 실측으로 확인할 수가 없었다. 문턱을 훑어 봐도 세 번 다
+        // 「블랙홀 0 개」가 나왔고, 그 이유가 물리가 아니라 **명령이 안 먹은 것**이었다.
+        // 문턱은 평균 밀도의 배수라 장면마다 뜻이 크게 달라 넓게 열어 둔다.
+        if (has(kv, "collapse"))       app.cfg.collapseEnabled = getInt(kv, "collapse", 1) != 0;
+        if (has(kv, "collapseDensity"))
+            app.cfg.collapseDensity = clampF(getFloat(kv, "collapseDensity", app.cfg.collapseDensity), 1.0f, 1.0e6f, app.cfg.collapseDensity);
+        // 블랙홀 하나의 무게 상한(판 전체 대비). 0 이면 상한 없음 — 옛 동작이라 그것도 허용한다.
+        if (has(kv, "blackHoleMassCap"))
+            app.cfg.blackHoleMassCap = clampF(getFloat(kv, "blackHoleMassCap", app.cfg.blackHoleMassCap), 0.0f, 1.0f, app.cfg.blackHoleMassCap);
         if (has(kv, "pressureK"))      app.cfg.pressureK      = clampF(getFloat(kv, "pressureK", app.cfg.pressureK), 0.0f, 2.0f, app.cfg.pressureK);
         // 원반을 처음 깔 때 주는 두께 **씨앗**이다. 「두께를 손으로 안 정해도 두께가
         // 생기는가」를 대조하려면 이 값을 밖에서 0 과 0.001 로 바꿔 볼 수 있어야 한다.

@@ -3027,6 +3027,19 @@ struct Sim::Impl {
     unsigned long long *redU = nullptr;
     float  *redF = nullptr;
 
+    // **버퍼 크기와 커널이 도는 범위를 나눈다(2026-08-20).**
+    //
+    // `capacityN` 은 실제로 `cudaMalloc` 한 슬롯 수이고 **줄지 않는다.** `allocN` 은 이번
+    // 프레임에 커널이 도는 범위이고 그 이하로 줄 수 있다. 둘을 나눈 이유:
+    //
+    // 성능 가드가 버거울 때 알갱이를 30% 씩 덜어내는데, 여태 그것이 곧 **재할당 + 판을
+    // 다시 깔기**였다. 사용자가 필라멘트를 보다 「장면이 처음부터 다시 시작되는 이유는
+    // 뭐야?」로 잡았고, 로그가 그 자리였다 — 3분 5초·3분 55초·5분 4초에 세 번 다시 깔렸다.
+    //
+    // 줄이는 데는 버퍼를 다시 잡을 이유가 없다. 이미 잡아둔 앞부분만 돌면 그만이고,
+    // 그것이 `CLAUDE.md` 1번(「커질 때만 다시 잡는다 — 줄어들 때는 그대로 둔다」)이다.
+    // 커널은 모두 `allocN` 을 도므로 이 값만 낮추면 부담도 실제로 준다.
+    int capacityN = 0;
     int allocN = 0, allocG = 0;
     Boundary allocBoundary = Boundary::Isolated;
     int requestedN = -1, requestedG = -1;
@@ -3094,11 +3107,34 @@ struct Sim::Impl {
     float potScale() const {
         return cfg.gravity / (float)(allocN > 0 ? allocN : 1);
     }
+    // 블랙홀 하나의 무게 상한(알갱이 수 눈금). 0 이하면 상한 없음.
+    // **자르는 것은 코어다** — 밖에서 몇을 넘기든, 삼켜서 얼마가 되든 여기서 걸린다
+    // (`CLAUDE.md` 3번: 한계를 아는 쪽이 코어이므로 코어가 자른다).
+    float massCap() const {
+        if (cfg.blackHoleMassCap <= 0.f) return 0.f;
+        return cfg.blackHoleMassCap * (float)(allocN > 0 ? allocN : 1);
+    }
+    float capMass(float m) const {
+        const float c = massCap();
+        return (c > 0.f && m > c) ? c : m;
+    }
+
     float horizonOf(float eatenCount) const {
         const float M = eatenCount / (float)(allocN > 0 ? allocN : 1);
         // 길이 눈금을 늘리면 광속이 그만큼 느려지고, 지평선은 c² 에 반비례하므로
-        // 눈금 제곱만큼 커진다 — 판을 크게 볼수록 같은 질량의 지평선이 화면에서
-        // 작아 보이는 것과 앞뒤가 맞는다(`lightSpeedFor` 참조).
+        // **눈금 제곱만큼 커진다.**
+        //
+        // 여기 있던 「판을 크게 볼수록 화면에서 작아 보이는 것과 앞뒤가 맞는다」는 말은
+        // 앞 문장과 정반대였다(2026-08-21 에 바로잡았다). 커지는 것이 맞고, 그래서
+        // 필라멘트(c=10)에서는 같은 무게의 지평선이 다른 장면(c=100)의 **100 배**다.
+        //
+        // 눈금 체계가 완전히 일관되지는 않다 — 같은 실제 질량을 두 장면에서 견주면
+        // 1e-4 배 어긋난다(G·M 은 눈금을 안 따르는데 c 만 따라서다). 그것을 바로잡으려면
+        // 세 값의 관계를 통째로 다시 짜야 하고 모든 장면의 겉보기가 바뀐다.
+        //
+        // **대신 무게에 상한을 걸어 증상을 끊었다**(`SimConfig::blackHoleMassCap`).
+        // 상한이 걸린 지금 필라멘트의 지평선은 3.6e-4 로 격자 한 칸(0.0078)의 22 분의 1
+        // 이라, 여기서 눈금까지 보정하면 100 배 더 작아져 아예 안 보인다.
         return 2.0f * cfg.gravity * M / lightSpeedSqFor(cfg.lengthScale, cfg.timeUnitScale);
     }
 
@@ -3221,7 +3257,7 @@ int Sim::Impl::addBlackHole(float x, float y, float z, float mass, bool born,
     // 은하 회전 속도로 돌던 별이 블랙홀이 되는 순간 멎어 각운동량이 없어지고, 중심으로
     // 자유낙하해 반대편으로 솟아 판 밖으로 나간다(자세한 근거는 `kStarAge` 의 후보 기록).
     bhs[i].vx = vx; bhs[i].vy = vy; bhs[i].vz = vz;
-    bhs[i].mass = mass;
+    bhs[i].mass = capMass(mass);   // 태어날 때부터 상한을 넘지 않는다
     // **지평선은 질량에서만 나온다** — `setRsFrom` 이 `2GM/c²` 하나로 낸다.
     // 「처음 크기 × 세제곱근 성장」과 그 기준값(`bhMassAtBirth`·`bhRsAtBirth`)은
     // 부풀리기용이라 함께 지웠다(2026-08-18).
@@ -3377,7 +3413,9 @@ void Sim::Impl::advanceBlackHoles(float dt) {
             bhs[i].vx = (bhs[i].vx * mi + bhs[j].vx * mj) / mt;
             bhs[i].vy = (bhs[i].vy * mi + bhs[j].vy * mj) / mt;
             bhs[i].vz = (bhs[i].vz * mi + bhs[j].vz * mj) / mt;
-            bhs[i].mass = mt;
+            // 합쳐도 상한을 넘지 않는다. 무게 중심·속도는 **자르기 전 값**으로 냈다 —
+            // 그래야 둘의 관성이 제대로 섞인다.
+            bhs[i].mass = capMass(mt);
             setRsFrom(i);
 
             // j 를 빼고 뒤를 당긴다 — 가운데를 비워 두면 번호가 어긋난다(맨 위 불변식).
@@ -3410,12 +3448,24 @@ void Sim::Impl::freeAll() {
     F((void*&)redD); F((void*&)redI); F((void*&)redU); F((void*&)redF);
     F((void*&)eaten); F((void*&)eatenP); F((void*&)bhAcc);
     sortTmpBytes = 0; redTmpBytes = 0;
+    // 버퍼가 사라졌으므로 용량도 0 이다. 남겨 두면 다음 `reconfigure` 가 「이미 잡아 뒀다」고
+    // 보고 커널 범위만 좁히는 길로 새어, 해제된 포인터를 그대로 쓴다.
+    capacityN = 0;
     if (planReady) { cufftDestroy(planR2C); cufftDestroy(planC2R); planReady = false; }
 }
 
 void Sim::Impl::allocate() {
+    // **버퍼는 `capacityN` 으로 잡는다.** `allocN` 은 커널이 도는 범위라 나중에 줄 수 있는데,
+    // 그것으로 잡으면 줄인 뒤 다시 늘릴 때 배열 밖을 쓴다.
+    //
+    // **읽는 것이 `freeAll()` 보다 먼저다.** 아래 `freeAll()` 이 `capacityN` 을 0 으로
+    // 되돌리므로(포인터가 사라진 뒤 용량만 남으면 다음 `reconfigure` 가 해제된 포인터를
+    // 쓴다), 그 뒤에 읽으면 **크기 0 으로 잡는다.** 실제로 그렇게 짰다가 첫 스텝에서
+    // `illegal memory access` 로 죽었다(2026-08-20) — 커널은 `allocN`(100만)만큼 도는데
+    // 버퍼가 0 이었다.
+    const int N = capacityN, G = allocG, S = stride();
     freeAll();
-    const int N = allocN, G = allocG, S = stride();
+    capacityN = N;                 // freeAll 이 지운 값을 이번에 잡을 크기로 되돌린다
     const size_t cells = padCells();
     const size_t spec = (size_t)S * S * (S / 2 + 1);
 
@@ -4042,6 +4092,29 @@ void Sim::reconfigure(const SimConfig& c) {
     d.cfg.gridSize = g;
     if (!structural) return;
 
+    // ── 알갱이가 **줄기만** 하면 판을 깨지 않는다(2026-08-20) ────────────────
+    //
+    // 격자와 경계가 그대로이고 요청이 이미 잡아 둔 슬롯 안에 들어오면, 커널이 도는
+    // 범위(`allocN`)만 좁히면 된다. 버퍼를 다시 잡을 이유도, 판을 다시 깔 이유도 없다.
+    //
+    // 이것이 없어서 성능 가드가 손을 댈 때마다 **보던 우주가 처음부터 다시 시작됐다.**
+    // 커널이 모두 `allocN` 을 도므로 범위를 좁히는 것만으로 부담도 실제로 준다 —
+    // 가드가 노린 효과는 그대로 얻고 판만 살린다.
+    //
+    // **늘리는 쪽은 이 길로 보내지 않는다.** 줄였던 구간의 알갱이는 그때 자리에 멈춰 있어
+    // 되살리면 옛 좌표가 갑자기 튀어나온다. 개수를 올리는 것은 사용자가 「이 개수로 다시
+    // 시작」을 눌렀을 때뿐이고, 그 자리는 원래 `reset()` 을 부른다.
+    if (d.capacityN > 0 && g == d.allocG && c.boundary == d.allocBoundary &&
+        c.particleCount > 0 && c.particleCount <= d.allocN) {
+        d.requestedN = c.particleCount;
+        d.allocN     = c.particleCount;
+        if (d.active > d.allocN) d.active = d.allocN;
+        if (d.aliveShown > d.allocN) d.aliveShown = d.allocN;
+        fx::mark("커널 범위만 좁힘: 알갱이 %d (버퍼 %d 그대로 — 판을 다시 깔지 않는다)",
+                 d.allocN, d.capacityN);
+        return;
+    }
+
     d.requestedN = c.particleCount;
     d.requestedG = g;
     d.requestedBoundary = c.boundary;
@@ -4060,6 +4133,9 @@ void Sim::reconfigure(const SimConfig& c) {
         if (n > cap) n = cap;
     }
     d.allocN = (n > 0) ? n : 1;
+    // 잡는 크기와 커널이 도는 범위는 여기서만 같다. 이 뒤로 가드가 범위를 좁혀도
+    // 버퍼는 이 크기 그대로 남는다(위 「커널 범위만 좁힘」 분기).
+    d.capacityN = d.allocN;
     d.allocG = g;
     d.allocBoundary = c.boundary;
 
@@ -4322,8 +4398,11 @@ void Sim::step() {
                 d.bhs[i].vy = (M * d.bhs[i].vy + ep[i * 3 + 1]) * inv;
                 d.bhs[i].vz = (M * d.bhs[i].vz + ep[i * 3 + 2]) * inv;
             }
-            d.bhs[i].mass += (float)e[i];
-            // 자라는 규칙은 setRsFrom 이 쥔다(세제곱근 — 그 자리의 주석 참조).
+            // **삼켜도 상한을 넘지 않는다.** 삼킨 알갱이는 판에서 사라지는데 무게는 안 늘어
+            // 물리적으로는 어긋나지만, 그 대가로 지평선이 멈춘다 — 유한한 판에서 되먹임을
+            // 끊는 값이다(`SimConfig::blackHoleMassCap`).
+            d.bhs[i].mass = d.capMass(d.bhs[i].mass + (float)e[i]);
+            // 자라는 규칙은 setRsFrom 이 쥔다(rs = 2GM/c²).
             d.setRsFrom(i);
             any = true;
         }

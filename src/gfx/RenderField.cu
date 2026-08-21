@@ -796,11 +796,22 @@ void RenderField::draw(App& app, int viewW, int viewH) {
     // 떨리는 것은 물론이고, 크기가 바뀔 때마다 버퍼를 다시 잡던 예전 코드에서는
     // 드라이버까지 무너졌다. 켜지는 선과 꺼지는 선을 벌려 두고, 바뀐 뒤 서른 프레임은
     // 그대로 둔다.
+    //
+    // **가드도 이 길을 쓴다**(`app.guardHalfRes`). 성능 가드가 알갱이를 덜어내기 전에
+    // 먼저 여기를 켠다 — 흐려지는 것은 되돌릴 수 있지만 알갱이를 잃는 것은 그렇지 않다.
     const int outW = viewW, outH = viewH;
-    if (app.ui.halfResWhenBusy && app.running) {
+    if ((app.ui.halfResWhenBusy || app.guardHalfRes) && app.running) {
         if (halfHold_ > 0) --halfHold_;
         else {
-            const bool want = half_ ? (app.frameMs > 14.0f) : (app.frameMs > 24.0f);
+            // **배속으로 스텝이 여러 번 돈 몫은 빼고 본다(2026-08-20).**
+            //
+            // 여기서 재려는 것은 「카드가 버거운가」인데, 프레임 시간에는 사용자가 올린
+            // 배속도 섞여 있다 — 배속이 3 을 넘으면 한 프레임에 스텝이 세 번 돌아 시간이
+            // 그대로 세 배가 된다. 그대로 견주면 **배속을 쓰는 내내 화면이 흐리다.**
+            // 성능 가드도 같은 이유로 같은 나눗셈을 한다(`App::guardPerformance`).
+            const int   reps = (app.stepsLastFrame > 0) ? app.stepsLastFrame : 1;
+            const float perStepMs = app.frameMs / (float)reps;
+            const bool want = half_ ? (perStepMs > 14.0f) : (perStepMs > 24.0f);
             if (want != half_) { half_ = want; halfHold_ = 30; }
         }
     } else if (half_) {
